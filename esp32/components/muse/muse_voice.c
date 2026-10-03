@@ -540,6 +540,12 @@ static void hold_rec(bool tried)
         go_idle("COULDN'T SAVE THE NOTE");
         return;
     }
+    if (!s_rec_n) {   /* upstream 96c6e8f: nothing captured — hold nothing (pool version: the
+                          pool stays whole via drop_rec) */
+        drop_rec();
+        go_idle("HOLD LONGER TO TALK");
+        return;
+    }
     int16_t *pcm = heap_caps_malloc(s_rec_n * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (pcm) {
         memcpy(pcm, s_rec, s_rec_n * sizeof(int16_t));   // the pool stays whole for the next press
