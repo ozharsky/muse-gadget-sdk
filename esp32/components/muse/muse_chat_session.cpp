@@ -1746,25 +1746,31 @@ out:
 }
 
 
-/* The last reply, whole, for the reading view (a long press on the avatar). Each Hermes
- * turn replaces it (start_tts only runs for Muse turns, so Hermes does its own here). */
+/* The last reply, whole, for the reading view (a long press on the avatar) — one per agent:
+ * the show picks the active agent's own store, so switching agents never shows the other's text. */
 #define LAST_REPLY_MAX 3072
-static EXT_RAM_BSS_ATTR char s_last_reply[LAST_REPLY_MAX];
+static EXT_RAM_BSS_ATTR char s_last_reply[2][LAST_REPLY_MAX];
+
+static int last_reply_idx(void)
+{
+    return CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes() ? 1 : 0;
+}
 
 extern "C" const char *muse_hatch_last_reply(void)
 {
-    return s_last_reply;
+    return s_last_reply[last_reply_idx()];
 }
 
 static void last_reply_add(int msg_index, const char *text)
 {
+    char *store = s_last_reply[last_reply_idx()];
     if (msg_index == 0) {
-        s_last_reply[0] = 0;
+        store[0] = 0;
     }
-    if (s_last_reply[0]) {
-        strlcat(s_last_reply, "\n\n", sizeof(s_last_reply));
+    if (store[0]) {
+        strlcat(store, "\n\n", LAST_REPLY_MAX);
     }
-    strlcat(s_last_reply, text, sizeof(s_last_reply));
+    strlcat(store, text, LAST_REPLY_MAX);
 }
 
 static void start_tts(void)
@@ -2183,7 +2189,7 @@ static void hermes_line(cJSON *j)
             s_turn.phase = P_WAIT_REPLY;
         }
         append_text(m, reply);
-        s_last_reply[0] = 0;        /* the streamed reply IS the reading view now */
+        s_last_reply[last_reply_idx()][0] = 0;   /* this agent's reading view is replaced */
         if (s_turn.tts_msg < 0) {   /* silent (no TTS streamed): captions from the text */
             show_reply_start(m);
         } else {
