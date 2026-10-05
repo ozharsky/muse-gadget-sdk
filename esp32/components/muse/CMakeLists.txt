@@ -63,8 +63,9 @@ if(CONFIG_MUSE_ENABLED)
         # Both avatars are built: SHODAN for Muse, the Construct for Hermes. muse_pixel_switch.c picks.
         # Face history: Bloop (Meta's) -> the Construct (muse_pixel_hermes.c) -> brief Keller trial (muse_pixel_keller.c);
         # all kept in the folder; swap the filename in these two lines to change.
-        list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_hermes.c" "avatar/muse_pixel_switch.c")
-        foreach(f "avatar/muse_pixel.c:shodan" "avatar/muse_pixel_hermes.c:stock")
+        # GOLEM is the Hermes face: revert = swap muse_pixel_golem.c back to muse_pixel_hermes.c
+        list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_golem.c" "avatar/muse_pixel_switch.c")
+        foreach(f "avatar/muse_pixel.c:shodan" "avatar/muse_pixel_golem.c:stock")
             string(REPLACE ":" ";" p "${f}")
             list(GET p 0 file)
             list(GET p 1 tag)
