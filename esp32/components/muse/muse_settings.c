@@ -48,7 +48,7 @@ static struct {
 } s = {
     .volume = CONFIG_MUSE_DEFAULT_VOLUME,
     .speaker_on = true,
-    .mic_gain = 30,
+    .mic_gain = 36,   /* the bench sweep: +6 dB speech; floor -60 dB stays far below it */
     .brightness = 100,
     .sleep_s = 120,
     .wifi_on = true,
