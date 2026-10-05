@@ -706,7 +706,14 @@ static void choose_done(int idx, void *user)
 }
 
 static bool bench_ui_command(const char *line)
-{    if (!strncmp(line, "agent=", 6)) {
+{
+    if (!strcmp(line, "sound=transition")) {
+        muse_voice_request_transition();
+        printf("@sound transition\n");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "agent=", 6)) {
         muse_settings_set_agent_hermes(!strcmp(line + 6, "hermes"));
         printf("@agent %s\n", muse_settings_agent_hermes() ? "hermes" : "muse");
         fflush(stdout);

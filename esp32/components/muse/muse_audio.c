@@ -269,17 +269,20 @@ esp_err_t muse_audio_read(int16_t *mono, size_t frames)
     return ESP_OK;
 }
 
-esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
+static esp_err_t write_impl(const int16_t *mono, size_t frames, bool fx)
 {
     /* Speaker off still plays silence at the same pace, so captions timed to
      * the audio scroll as if it were heard. */
     bool mute = !muse_settings_speaker_on();
+#if !CONFIG_MUSE_VOICE_FX
+    (void)fx;
+#endif
     while (frames) {
         size_t n = frames > MUSE_AUDIO_CHUNK ? MUSE_AUDIO_CHUNK : frames;
         const int16_t *src = mono;
 #if CONFIG_MUSE_VOICE_FX
         static int16_t s_fx[MUSE_AUDIO_CHUNK];
-        if (!mute && !(CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes())) {   /* Hermes: plain voice */
+        if (fx && !mute && !(CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes())) {   /* Hermes: plain voice */
             memcpy(s_fx, mono, n * sizeof(int16_t));
             muse_voice_fx(s_fx, n);
             src = s_fx;
@@ -296,6 +299,16 @@ esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
         frames -= n;
     }
     return ESP_OK;
+}
+
+esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
+{
+    return write_impl(mono, frames, true);
+}
+
+esp_err_t muse_audio_write_plain(const int16_t *mono, size_t frames)
+{
+    return write_impl(mono, frames, false);
 }
 
 float muse_audio_dbfs(const int16_t *mono, size_t frames)

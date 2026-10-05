@@ -52,6 +52,7 @@ static void on_setting(muse_setting_t what)
         break;
     case MUSE_SETTING_AGENT:   /* drops the Muse link, or lets it reconnect */
         muse_voice_drop_held();
+        muse_voice_request_transition();   /* the agent-switch sound (voice task, ~1.6 s) */
         muse_hatch_agent_changed();
         muse_ui_agent_switch(muse_settings_agent_hermes());
         break;

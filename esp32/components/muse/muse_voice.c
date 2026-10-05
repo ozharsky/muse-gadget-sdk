@@ -71,6 +71,7 @@ static QueueHandle_t s_queue;
 static volatile bool s_monitor;
 static volatile float s_monitor_db = -100.0f;
 static volatile bool s_chirp;
+static volatile bool s_transition;
 static volatile bool s_loopback;
 static volatile bool s_mp3test;
 
@@ -805,7 +806,7 @@ static void voice_task(void *arg)
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
             bool battery = muse_state_on_battery();
-            bool rest = asleep && battery && !s_chirp && !s_mp3test && !s_loopback;
+            bool rest = asleep && battery && !s_chirp && !s_transition && !s_mp3test && !s_loopback;
 #if HOLD_NOTES
             /* A press goes first: send_held() leaves it queued and returns
              * without backing off, so retrying before it's read would spin. */
@@ -835,6 +836,27 @@ static void voice_task(void *arg)
             if (s_chirp) {
                 s_chirp = false;
                 muse_audio_chirp(1);
+                pre_reset();
+            }
+            if (s_transition) {
+                s_transition = false;
+                /* The embedded agent-switch sound: raw 16 kHz mono PCM, so it plays at once.
+                 * Assembled byte-by-byte: the embedded section is only 1-byte aligned (an
+                 * int16_t cast there could fault on load). Plain write: it is the same
+                 * sound in both directions (no Muse voice FX). */
+                extern const uint8_t transition_pcm_start[] asm("_binary_transition_pcm_start");
+                extern const uint8_t transition_pcm_end[] asm("_binary_transition_pcm_end");
+                static int16_t buf[MUSE_AUDIO_CHUNK];
+                size_t frames = (size_t)(transition_pcm_end - transition_pcm_start) / 2;
+                ESP_LOGI(TAG, "agent-switch sound: %.2fs", (double)frames / MUSE_AUDIO_RATE);
+                for (size_t i = 0; i < frames; i += MUSE_AUDIO_CHUNK) {
+                    size_t n = frames - i < MUSE_AUDIO_CHUNK ? frames - i : MUSE_AUDIO_CHUNK;
+                    const uint8_t *b = transition_pcm_start + i * 2;
+                    for (size_t j = 0; j < n; j++) {
+                        buf[j] = (int16_t)(b[2 * j] | (b[2 * j + 1] << 8));
+                    }
+                    muse_audio_write_plain(buf, n);
+                }
                 pre_reset();
             }
             if (s_mp3test) {
@@ -927,6 +949,12 @@ float muse_voice_monitor_db(void)
 void muse_voice_request_chirp(void)
 {
     s_chirp = true;
+    muse_state_nudge();
+}
+
+void muse_voice_request_transition(void)
+{
+    s_transition = true;
     muse_state_nudge();
 }
 
