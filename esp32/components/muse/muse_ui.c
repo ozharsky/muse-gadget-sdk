@@ -625,6 +625,23 @@ bool muse_ui_react(const char *name)
     return muse_pixel_react(name);
 }
 
+
+/* ---- Agent switch: the avatar glitches from the old agent's face to the new one's (muse_pixel_switch.c) ---- */
+
+extern void muse_pixel_transition(bool to_hermes) __attribute__((weak));
+
+void muse_ui_agent_switch(bool hermes)
+{
+    if (!s_ready || !muse_pixel_transition) {
+        return;
+    }
+    muse_pixel_transition(hermes);
+    muse_board->display_lock(-1);
+    muse_ui_show_face();   /* so the change is seen, if it was made from Settings */
+    muse_board->display_unlock();
+    muse_state_poke();
+}
+
 static uint32_t s_gesture_ms;   /* when the last swipe happened: a swipe isn't also a pet */
 
 static void on_canvas_clicked(lv_event_t *e)

@@ -57,6 +57,9 @@ void muse_ui_camera_hint(bool visible);
  * or -1 timed out, -2 you spoke instead, -3 replaced by a newer question.
  */
 bool muse_ui_react(const char *name);
+
+/* A short full-screen animation when the agent is switched: rings sweep round, the new agent's name lights up. */
+void muse_ui_agent_switch(bool hermes);
 typedef void (*muse_ui_choice_cb)(int index, void *user);
 bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms, muse_ui_choice_cb done,
                     void *user);
