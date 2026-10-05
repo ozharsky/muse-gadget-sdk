@@ -375,6 +375,11 @@ static bool hatch_reply(bool *delivered)
                     muse_state_set_caption("NOTE SENT - WAITING FOR MUSE");
                 }
                 break;
+            case MUSE_HATCH_EV_STATUS:
+                if (!speaking && !replied && text[0]) {
+                    muse_state_set_caption("WORKING: %s", text);   /* what the agent is grinding on */
+                }
+                break;
             case MUSE_HATCH_EV_REPLY:
                 replied = *delivered = true;
                 /* Once speech starts, the caption follows it. The event only

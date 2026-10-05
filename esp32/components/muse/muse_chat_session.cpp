@@ -82,6 +82,19 @@ using namespace musegadgets::noise::core;
 
 static const char *TAG = "muse_chat_session";
 
+/* ---- Hermes streaming turn: the reply arrives as NDJSON lines; audio/status ride along ---- */
+
+struct hermes_stream_t {
+    esp_http_client_handle_t h;   /* while a streamed turn is in flight */
+    char *line;                   /* NDJSON line being assembled (PSRAM) */
+    size_t cap, len;
+    bool overflow, headers_done, ended;
+    bool got_heard, got_reply;
+    char react[32];
+};
+static hermes_stream_t s_hstream;
+
+
 #define NOISE_PATH "/v1/noise"
 #define NOISE_PORT 443
 #define IO_TIMEOUT_US (15 * 1000000LL)
@@ -986,6 +999,13 @@ static void turn_reset_streams(void)
 static void turn_finish(void)
 {
     turn_reset_streams();
+    if (s_hstream.h) {   /* a Hermes streaming turn in flight: close it */
+        esp_http_client_close(s_hstream.h);
+        esp_http_client_cleanup(s_hstream.h);
+        s_hstream.h = nullptr;
+        heap_caps_free(s_hstream.line);
+        s_hstream.line = nullptr;
+    }
     s_turn.phase = P_IDLE;
     s_turn.dict_id = s_turn.chat_id = 0;
     s_turn.tts_msg = -1;
@@ -2005,8 +2025,9 @@ static bool hermes_home_reachable(void)
     return ok && err == 0;
 }
 
-/* One turn against the relay: PCM up, {"heard","reply"} back. False (turn failed) on any error. */
-static bool hermes_request(void)
+/* One turn against the relay (compat, non-stream): PCM up, {"heard","reply"} back. Kept for
+ * a fallback if ?stream=1 ever misbehaves; not called by the streaming path. */
+[[maybe_unused]] static bool hermes_request(void)
 {
     const char *url = CONFIG_MUSE_HERMES_URL "/turn";
     bool remote = false;
@@ -2085,6 +2106,242 @@ static bool hermes_request(void)
     return ok;
 }
 
+static void hermes_react_show(void)
+{
+    if (s_hreact[0]) {
+        muse_ui_react(s_hreact);
+        s_hreact[0] = '\0';
+    }
+}
+
+/* NDJSON line -> one action. Lines: heard / status / tts (+ the final reply/react/image line). */
+static void hermes_line(cJSON *j)
+{
+    if (s_turn.gen != s_gen.load()) {
+        return;
+    }
+    const char *heard = cJSON_GetStringValue(cJSON_GetObjectItem(j, "heard"));
+    if (heard && !s_hstream.got_heard) {
+        s_hstream.got_heard = true;
+        emit(MUSE_HATCH_EV_HEARD, heard);
+        ESP_LOGI(TAG, "hermes heard: \"%s\"", heard);
+        return;
+    }
+    const char *status = cJSON_GetStringValue(cJSON_GetObjectItem(j, "status"));
+    if (status && status[0]) {
+        emit(MUSE_HATCH_EV_STATUS, status);
+        return;
+    }
+    const char *tts = cJSON_GetStringValue(cJSON_GetObjectItem(j, "tts"));
+    if (tts && tts[0]) {
+        /* First speech: become the speaking message now (start_tts would have). */
+        if (s_turn.tts_msg < 0) {
+            msg_t &m = s_turn.msgs[0];
+            m = msg_t{};
+            strlcpy(m.id, "hermes", sizeof(m.id));
+            s_turn.nmsgs = 1;
+            s_turn.chat_posted = true;
+            s_turn.chat_us = s_turn.last_event_us = s_turn.last_content_us = now_us();
+            s_turn.phase = P_WAIT_REPLY;
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = 0;
+            s_turn.silent = false;
+            m.pcm_start = s_turn.pcm_out;
+            m.pcm_frames = 0;
+            s_turn.mp3_len = 0;
+            s_turn.mp3_ended = false;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+            mp3dec_init(&s_turn.dec);
+            hermes_react_show();   /* the mood, as the speech starts */
+        }
+        if (s_turn.tts_msg >= 0) {
+            char *copy = static_cast<char *>(psram_alloc(strlen(tts) + 1));
+            if (copy) {
+                strcpy(copy, tts);
+                size_t n = b64_decode_inplace(copy, strlen(copy));
+                tts_data(reinterpret_cast<uint8_t *>(copy), n);
+                heap_caps_free(copy);
+            }
+        }
+        return;
+    }
+    /* the final line (or a compat single-JSON reply) */
+    const char *reply = cJSON_GetStringValue(cJSON_GetObjectItem(j, "reply"));
+    const char *react = cJSON_GetStringValue(cJSON_GetObjectItem(j, "react"));
+    char *image = cJSON_GetStringValue(cJSON_GetObjectItem(j, "image_b64"));
+    if (reply && reply[0]) {
+        s_hstream.got_reply = true;
+        msg_t &m = s_turn.msgs[0];
+        if (s_turn.nmsgs == 0) {   /* a reply with no TTS chunks (speaker off / synth failed) */
+            m = msg_t{};
+            strlcpy(m.id, "hermes", sizeof(m.id));
+            s_turn.nmsgs = 1;
+            s_turn.chat_posted = true;
+            s_turn.chat_us = s_turn.last_event_us = s_turn.last_content_us = now_us();
+            s_turn.phase = P_WAIT_REPLY;
+        }
+        append_text(m, reply);
+        if (s_turn.tts_msg < 0) {   /* silent (no TTS streamed): captions from the text */
+            show_reply_start(m);
+        }
+        message_done(0, reply);     /* done in both paths: check_turn waits on it */
+        hermes_react_show();
+        strlcpy(s_hreact, react && react[0] ? react : "", sizeof(s_hreact));
+        if (image && image[0]) {
+            const char *code = "", *msg2 = "";
+            size_t n = b64_decode_inplace(image, strlen(image));
+            if (!image_fetch_buffer(reinterpret_cast<uint8_t *>(image), n, -1, image_done, nullptr, &code, &msg2)) {
+                ESP_LOGW(TAG, "hermes: image not shown: %s (%s)", msg2, code);
+            }
+        }
+        if (s_turn.tts_msg < 0) {
+            s_turn.msgs[0].tts = TTS_FINISHED;   /* nothing to drain */
+            s_turn.tts_msg = -1;
+        } else {
+            s_turn.mp3_ended = true;             /* decode() drains the buffered frames, then finishes */
+        }
+        s_hstream.ended = true;
+    }
+}
+
+/* A complete NDJSON line arrived: parse and dispatch. */
+static void hermes_dispatch_line(char *line, size_t len)
+{
+    if (s_hstream.overflow) {
+        ESP_LOGW(TAG, "hermes stream: skipped a line over %u bytes", (unsigned)s_hstream.cap);
+        s_hstream.overflow = false;
+        s_hstream.len = 0;
+        return;
+    }
+    line[len] = 0;
+    cJSON *j = cJSON_ParseWithLength(line, len);
+    s_hstream.len = 0;
+    if (j) {
+        hermes_line(j);
+        cJSON_Delete(j);
+    }
+}
+
+/* Starts a streamed turn: opens the HTTP exchange; hermes_stream_pump() drives it. */
+static bool hermes_request_stream(void)
+{
+    const char *url = CONFIG_MUSE_HERMES_URL "/turn?stream=1";
+    bool remote = false;
+    if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
+        url = CONFIG_MUSE_HERMES_URL_REMOTE "/turn?stream=1";
+        remote = true;
+        ESP_LOGI(TAG, "hermes: home relay unreachable, using the remote address");
+    }
+    char *line = static_cast<char *>(psram_alloc(160 * 1024));   /* a long sentence's b64 MP3 can be ~60-100K */
+    if (!line) {
+        turn_fail("OUT OF MEMORY");
+        return false;
+    }
+    s_hstream.line = line;
+    s_hstream.cap = 160 * 1024;
+    s_hstream.len = 0;
+    s_hstream.overflow = false;
+    s_hstream.headers_done = false;
+    s_hstream.ended = false;
+    s_hstream.got_heard = false;
+    s_hstream.got_reply = false;
+    s_hstream.react[0] = '\0';
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 100000;
+    cfg.buffer_size = 4096;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) {
+        heap_caps_free(line);
+        s_hstream.line = nullptr;
+        turn_fail("OUT OF MEMORY");
+        return false;
+    }
+    esp_http_client_set_header(h, "Content-Type", "application/octet-stream");
+    esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+    esp_http_client_set_post_field(h, reinterpret_cast<const char *>(s_hbuf), s_turn.pcm_bytes);
+    int64_t t0 = now_us();
+    esp_err_t err = esp_http_client_open(h, s_turn.pcm_bytes);   /* headers only */
+    if (err == ESP_OK) {
+        /* write the PCM body: esp_http_client_open sends the headers, not the payload */
+        int written = esp_http_client_write(h, reinterpret_cast<const char *>(s_hbuf), s_turn.pcm_bytes);
+        if (written < 0) {
+            err = ESP_FAIL;
+        } else {
+            ESP_LOGI(TAG, "hermes stream: body written (%d bytes, %lld ms)", written,
+                     (long long)((now_us() - t0) / 1000));
+        }
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "hermes stream: open/write failed (%s) after %lld ms", esp_err_to_name(err),
+                 (long long)((now_us() - t0) / 1000));
+        esp_http_client_cleanup(h);
+        heap_caps_free(line);
+        s_hstream.line = nullptr;
+        turn_fail("CAN'T REACH HERMES");
+        return false;
+    }
+    int64_t hdr = esp_http_client_fetch_headers(h);
+    ESP_LOGI(TAG, "hermes stream: open ok, headers %lld bytes in %lld ms", (long long)hdr,
+             (long long)((now_us() - t0) / 1000));
+    s_hstream.h = h;
+    s_turn.chat_us = s_turn.last_event_us = now_us();
+    return true;
+}
+
+/* Pumps the streamed response; true while the exchange continues (call again next tick). */
+static bool hermes_stream_pump(void)
+{
+    hermes_stream_t &hs = s_hstream;
+    if (!hs.h) {
+        return false;
+    }
+    uint8_t chunk[2048];
+    int n;
+    while ((n = esp_http_client_read(hs.h, reinterpret_cast<char *>(chunk), sizeof(chunk))) > 0) {
+        for (int i = 0; i < n && !hs.ended; i++) {
+            char ch = static_cast<char>(chunk[i]);
+            if (ch == '\n') {
+                if (hs.len || hs.overflow) {
+                    hermes_dispatch_line(hs.line, hs.len);
+                }
+            } else if (ch != '\r') {
+                if (hs.len == hs.cap - 1) {
+                    hs.overflow = true;
+                } else {
+                    hs.line[hs.len++] = ch;
+                }
+            }
+        }
+        if (hs.ended) {
+            break;
+        }
+    }
+    if (hs.ended || n <= 0) {   /* ended, or the server closed (read returned 0/-1) */
+        int status = esp_http_client_get_status_code(hs.h);
+        esp_http_client_close(hs.h);
+        esp_http_client_cleanup(hs.h);
+        hs.h = nullptr;
+        heap_caps_free(hs.line);
+        hs.line = nullptr;
+        if (hs.overflow) {
+            ESP_LOGW(TAG, "hermes stream: trailing partial line dropped");
+        }
+        if (status != 200 && status != 0) {
+            ESP_LOGW(TAG, "hermes stream: HTTP %d", status);
+            return false;
+        }
+        return hs.got_reply;
+    }
+    return true;
+}
+
 /* Collects the mic while the button is held, then asks the relay. */
 static void hermes_step(void)
 {
@@ -2102,8 +2359,18 @@ static void hermes_step(void)
         }
         ESP_LOGI(TAG, "hermes: sending %.2fs of speech", (double)s_turn.pcm_bytes / (MIC_RATE * 2));
         mark(M_SENT);
-        hermes_request();
+        if (!hermes_request_stream()) {
+            return;   /* it failed the turn already */
+        }
+        s_turn.phase = P_WAIT_REPLY;
     } else if (s_turn.phase == P_WAIT_REPLY) {
+        if (s_hstream.h) {
+            if (!hermes_stream_pump()) {   /* the exchange is over (fine or failed) */
+                if (!s_hstream.got_reply && s_turn.gen == s_gen.load()) {
+                    turn_fail(s_hstream.got_heard ? "HERMES ERROR" : "CAN'T REACH HERMES");
+                }
+            }
+        }
         start_tts();
         decode();
         check_turn();

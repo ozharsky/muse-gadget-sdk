@@ -97,6 +97,7 @@ typedef enum {
     MUSE_HATCH_EV_DONE,     /* reply complete; the audio stream is drained after this */
     MUSE_HATCH_EV_ERROR,    /* turn failed; text says why */
     MUSE_HATCH_EV_SENT,     /* the VM has acknowledged the note */
+    MUSE_HATCH_EV_STATUS,   /* what the agent is doing right now (a working caption; not a reply) */
 } muse_hatch_ev_t;
 
 /* Non-blocking; copies the event's text. Events of cancelled turns are dropped. */
