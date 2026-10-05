@@ -1746,7 +1746,8 @@ out:
 }
 
 
-/* The last reply, whole, for the reading view (a long press on the avatar). */
+/* The last reply, whole, for the reading view (a long press on the avatar). Each Hermes
+ * turn replaces it (start_tts only runs for Muse turns, so Hermes does its own here). */
 #define LAST_REPLY_MAX 3072
 static EXT_RAM_BSS_ATTR char s_last_reply[LAST_REPLY_MAX];
 
@@ -2182,8 +2183,11 @@ static void hermes_line(cJSON *j)
             s_turn.phase = P_WAIT_REPLY;
         }
         append_text(m, reply);
+        s_last_reply[0] = 0;        /* the streamed reply IS the reading view now */
         if (s_turn.tts_msg < 0) {   /* silent (no TTS streamed): captions from the text */
             show_reply_start(m);
+        } else {
+            last_reply_add(0, reply);   /* spoken: the reading view keeps the whole reply */
         }
         message_done(0, reply);     /* done in both paths: check_turn waits on it */
         hermes_react_show();
