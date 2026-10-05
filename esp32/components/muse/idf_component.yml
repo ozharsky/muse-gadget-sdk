@@ -74,3 +74,7 @@ dependencies:
     version: "^3.0.3"
     rules:
       - if: "$CONFIG{MUSE_BOARD_ID} == \"m5stack_core2\""
+  espressif/esp_lcd_axs15231b:
+    version: "^2.1.1"
+    rules:
+      - if: "$CONFIG{MUSE_BOARD_ID} == \"guition_jc3248w535\""

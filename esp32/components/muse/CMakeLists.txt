@@ -50,6 +50,9 @@ if(CONFIG_MUSE_ENABLED)
         list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
     endif()
     list(APPEND srcs "muse_chat_text.c")
+    if(CONFIG_MUSE_CJK_FONT)
+        list(APPEND srcs "fonts/muse_font_cjk_16.c")   # captions' CJK fallback
+    endif()
     # Your own character (tools/muse/AVATAR_RECIPE.md) stands in for the default
     # avatar when avatar/muse_pixel.c exists here; this avatar/ is gitignored. The
     # default is in avatar/ at the top of the project.
@@ -101,6 +104,8 @@ if(CONFIG_MUSE_ENABLED)
         list(APPEND srcs "boards/board_m5stack_core2.c")
     elseif(CONFIG_MUSE_BOARD_FNK0104B)
         list(APPEND srcs "boards/board_fnk0104b.c")
+    elseif(CONFIG_MUSE_BOARD_GUITION_JC3248W535)
+        list(APPEND srcs "boards/board_guition_jc3248w535.c")
     endif()
 elseif(CONFIG_HOMEHUB_VOICE)
     # The Voice PE board uses just the Hatch voice session; the project's main/

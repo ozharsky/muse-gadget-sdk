@@ -71,8 +71,9 @@ BOARDS = {
     "M5Stack CoreS3": "cores3",
     "M5Stack Core2": "core2",
     "Freenove FNK0104B": "fnk0104b",
+    "Guition JC3248W535": "jc3248w535",
 }
-CHAT_BOARDS = ("s3", "s3n", "aipi", "box3", "sticks3", "watcher", "stopwatch", "cores3", "core2", "fnk0104b")
+CHAT_BOARDS = ("s3", "s3n", "aipi", "box3", "sticks3", "watcher", "stopwatch", "cores3", "core2", "fnk0104b", "jc3248w535")
 
 
 class Stop(Exception):
