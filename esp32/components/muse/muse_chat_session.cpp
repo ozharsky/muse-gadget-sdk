@@ -871,9 +871,15 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
     return true;
 }
 
+/* Hermes is the active agent: voice goes to the relay, and there is no Muse link to keep. */
+static bool hermes_mode(void)
+{
+    return CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes();
+}
+
 static bool ensure_connected(void)
 {
-    if (s_connected) {
+    if (s_connected || hermes_mode()) {
         return true;
     }
     if (!muse_hatch_configured() || !muse_wifi_connected()) {
@@ -954,11 +960,6 @@ extern "C" bool image_fetch_buffer(const uint8_t *jpeg, size_t len, int row, voi
                                    void *user, const char **code, const char **message);
 static void image_done(const void *, void *) {}
 
-static bool hermes_mode(void)
-{
-    return CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes();
-}
-
 /* SHODAN is deep and slow; Hermes speaks at the voice's own pitch. */
 static int pitch_pct(void)
 {
@@ -1037,9 +1038,6 @@ static bool turn_start(uint32_t gen, bool text)
     s_reply_shown[0] = '\0';
     s_turn.start_us = now_us();
     resampler_init(&s_turn.up, MIC_RATE, DICT_RATE);
-    if (hermes_mode()) {
-        return true;   /* no Muse link in this mode */
-    }
     if (!ensure_connected()) {
         turn_fail(muse_hatch_configured() ? "CAN'T REACH MUSE" : "MUSE NOT SET UP");
         return false;
