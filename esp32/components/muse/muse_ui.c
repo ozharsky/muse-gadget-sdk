@@ -24,7 +24,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include <ctype.h>
-#include <stdlib.h>
 #include <time.h>
 
 #include "esp_netif_sntp.h"
@@ -1881,8 +1880,10 @@ void muse_ui_request_snapshot(void)
     s_snapshot = true;
 }
 
-/* If the UI task stops running frames for 10 s while the screen is awake, it is deadlocked: abort, so the
- * panic handler dumps every task (core dump to UART) and the board reboots instead of staying frozen. */
+/* If the UI task stops running frames while the screen is awake, it is deadlocked: warn first
+ * (a BLE phone-setup display pause can stall frames ~10 s and recovers), then abort much later
+ * for a core dump so the panic handler dumps every task and the board reboots instead of
+ * staying frozen forever. */
 static void stall_check(void *arg)
 {
     (void)arg;
@@ -1891,9 +1892,17 @@ static void stall_check(void *arg)
         s_last_frame_us = now;
         return;
     }
-    if (now - s_last_frame_us > 10 * 1000000LL) {
-        ESP_LOGE(TAG, "UI task stalled for 10 s: aborting for a core dump");
+    int64_t stall = now - s_last_frame_us;
+    if (stall > 20 * 1000000LL && !muse_settings_ble_on()) {
+        ESP_LOGE(TAG, "UI task stalled for 20 s: aborting for a core dump");
         abort();
+    } else if (stall > 5 * 1000000LL) {
+        static int64_t s_warned_us;
+        if (now - s_warned_us > 5000000LL) {
+            s_warned_us = now;
+            ESP_LOGW(TAG, "UI task stalled for %d s (BLE setup pauses frames; waiting before abort)",
+                     (int)(stall / 1000000LL));
+        }
     }
 }
 
@@ -1945,6 +1954,15 @@ static void frame_tick(lv_timer_t *timer)
     /* Fast attack, slow release keeps the mouth and meter lively but readable. */
     float level = muse_state_level();
     s_level += (level - s_level) * (level > s_level ? 0.6f : 0.2f);
+
+    /* Idle costs less: with no audio and no interaction the face at ~15 fps reads the same
+     * (it is slow breathing light), and the freed cycles go back to Wi-Fi/backoff. */
+    static int s_idle_frames;
+    bool idle = level < 0.02f && mode == MUSE_MODE_IDLE;
+    s_idle_frames = idle ? s_idle_frames + 1 : 0;
+    if (idle && (s_idle_frames & 1)) {
+        return;   /* alternate frames: half rate, no timer churn */
+    }
 
     muse_pose_t pose = {
         .mode = mode,

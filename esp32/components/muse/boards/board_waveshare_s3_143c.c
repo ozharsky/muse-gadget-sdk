@@ -423,9 +423,11 @@ static int tdm_read(const audio_codec_data_if_t *h, uint8_t *data, int size)
             return r;
         }
         for (int f = 0; f < frames; f++) {
-            int32_t m = (int32_t)s_tdm_scratch[f * 4 + 0] + s_tdm_scratch[f * 4 + 1] +
-                        s_tdm_scratch[f * 4 + 2] + s_tdm_scratch[f * 4 + 3];
-            int16_t mono = (int16_t)(m >> 2);
+            /* Only MIC1 (slot 0) and MIC2 (slot 2) are real mics: slot 1 is the ES7210's
+             * AEC echo reference (cabinet noise) and slot 3 floats. Summing all four cost
+             * ~6 dB of SNR. Average the two real mics. */
+            int32_t m = (int32_t)s_tdm_scratch[f * 4 + 0] + s_tdm_scratch[f * 4 + 2];
+            int16_t mono = (int16_t)(m >> 1);
             out[0] = mono;
             out[1] = mono;
             out += 2;
@@ -536,8 +538,9 @@ static esp_err_t audio_init(esp_codec_dev_handle_t *spk, esp_codec_dev_handle_t 
     const audio_codec_if_t *es8311 = es8311_codec_new(&es8311_cfg);
     ESP_RETURN_ON_FALSE(es8311, ESP_FAIL, TAG, "ES8311 not responding");
 
-    /* ES7210: all four mics selected for TDM mode. The physical mics are
-     * MIC1/MIC2; MIC3 is the AEC reference, MIC4 unused. */
+    /* ES7210: all four mics stay selected for TDM mode (the 4-slot frame must carry all
+     * slots); the shim above then mixes only MIC1/MIC2 -- the real mics. MIC3 is the AEC
+     * reference (cabinet noise), MIC4 is unconnected. */
     i2c_cfg.addr = ES7210_CODEC_DEFAULT_ADDR;
     const audio_codec_ctrl_if_t *es7210_ctrl = audio_codec_new_i2c_ctrl(&i2c_cfg);
     ESP_RETURN_ON_FALSE(es7210_ctrl, ESP_FAIL, TAG, "es7210 ctrl");

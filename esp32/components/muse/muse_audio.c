@@ -53,8 +53,15 @@ static esp_err_t open_codecs(void)
         .channel = CHANNELS,
         .bits_per_sample = 16,
     };
-    ESP_RETURN_ON_FALSE(esp_codec_dev_open(s_spk, &fs) == ESP_CODEC_DEV_OK, ESP_FAIL, TAG, "open speaker");
-    ESP_RETURN_ON_FALSE(esp_codec_dev_open(s_mic, &fs) == ESP_CODEC_DEV_OK, ESP_FAIL, TAG, "open mic");
+    if (esp_codec_dev_open(s_spk, &fs) != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "open speaker");
+        return ESP_FAIL;
+    }
+    if (esp_codec_dev_open(s_mic, &fs) != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "open mic");
+        esp_codec_dev_close(s_spk);   /* don't leave the speaker open while s_open stays false */
+        return ESP_FAIL;
+    }
     s_open = true;
     return ESP_OK;
 }
@@ -67,6 +74,10 @@ esp_err_t muse_audio_init(int volume, int mic_gain_db)
     ESP_RETURN_ON_ERROR(open_codecs(), TAG, "open codecs");
     muse_audio_set_volume(volume);
     muse_audio_set_mic_gain(mic_gain_db);
+
+    /* The shared I2S bus logs a harmless error when its codecs close twice; quiet it once
+     * here (a per-call toggle would race the voice task). */
+    esp_log_level_set("i2s_common", ESP_LOG_NONE);
 
     float rc = 1.0f / (2.0f * (float)M_PI * HPF_HZ);
     float dt = 1.0f / MUSE_AUDIO_RATE;
@@ -81,10 +92,8 @@ void muse_audio_power(bool on)
     if (!s_spk || on == s_open) {
         return;
     }
-    /* The shared I2S bus gets disabled twice (once per codec), which logs a
-     * harmless error. */
-    esp_log_level_t lvl = esp_log_level_get("i2s_common");
-    esp_log_level_set("i2s_common", ESP_LOG_NONE);
+    /* The shared I2S bus gets disabled twice (once per codec) at close, which logs a
+     * harmless error; i2s_common's level was silenced once at init for that. */
     if (on) {
         if (open_codecs() == ESP_OK) {
             muse_audio_set_volume(muse_settings_volume());
@@ -95,7 +104,6 @@ void muse_audio_power(bool on)
         esp_codec_dev_close(s_mic);
         s_open = false;
     }
-    esp_log_level_set("i2s_common", lvl);
 }
 
 void muse_audio_set_volume(int volume)

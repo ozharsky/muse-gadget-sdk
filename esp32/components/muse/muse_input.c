@@ -102,7 +102,14 @@ static void post(muse_ptt_t type, bool wake)
 {
     muse_input_event_t ev = { .type = type, .wake = wake };
     ESP_LOGI(TAG, "PTT %s%s", type == MUSE_PTT_DOWN ? "down" : "up", wake ? " (waking)" : "");
-    xQueueSend(s_queue, &ev, 0);
+    if (xQueueSend(s_queue, &ev, 0) != pdTRUE) {
+        /* A dropped press would leave the task waiting for an UP that never comes (or
+         * worse, an UP with its DOWN gone); flush the stale counterpart and log it. */
+        ESP_LOGW(TAG, "PTT queue full: dropping %s", type == MUSE_PTT_DOWN ? "down" : "up");
+        muse_input_event_t stale;
+        while (xQueueReceive(s_queue, &stale, 0) == pdTRUE) {
+        }
+    }
 }
 
 static bool update_power(void);

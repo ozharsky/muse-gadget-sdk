@@ -102,6 +102,9 @@ static int s_settle;
  * Streaming, Hatch has had s_sent frames of it.
  */
 static int16_t *s_rec;   /* MAX_FRAMES */
+#if HOLD_NOTES
+static int16_t *s_rec_pool;   /* the MAX_FRAMES scratch, allocated once and reused every press */
+#endif
 static size_t s_rec_n, s_sent;
 static bool s_live = true;
 static bool s_tried;     /* it went to Hatch */
@@ -499,7 +502,8 @@ static bool held_on_waking(void)
 
 static void drop_rec(void)
 {
-    free(s_rec);
+    /* The scratch is the per-process pool: it is reused on the next press, never freed
+     * mid-session (a 480 KB churn per turn was fragmenting PSRAM). */
     s_rec = NULL;
 }
 
@@ -531,9 +535,15 @@ static void hold_rec(bool tried)
         go_idle("COULDN'T SAVE THE NOTE");
         return;
     }
-    int16_t *pcm = heap_caps_realloc(s_rec, s_rec_n * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int16_t *pcm = heap_caps_malloc(s_rec_n * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (pcm) {
+        memcpy(pcm, s_rec, s_rec_n * sizeof(int16_t));   // the pool stays whole for the next press
+    } else {                                             // no room for a copy: the pool becomes the note
+        pcm = s_rec;
+        s_rec_pool = NULL;
+    }
     s_held[s_held_count++] = (held_note_t){
-        .pcm = pcm ? pcm : s_rec,
+        .pcm = pcm,
         .frames = s_rec_n,
         .at_us = esp_timer_get_time(),
         .tries = tried,
@@ -784,7 +794,10 @@ static bool can_record(void)
     if (ready && s_held_count) {
         s_next_send_us = 0;   /* the saved ones go first, right after */
     }
-    s_rec = heap_caps_malloc(MAX_FRAMES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_rec_pool) {   /* once; every later press reuses it (held notes get their own copies) */
+        s_rec_pool = heap_caps_malloc(MAX_FRAMES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    s_rec = s_rec_pool;
     if (!s_rec) {
         ESP_LOGE(TAG, "no memory to keep a note");
     }

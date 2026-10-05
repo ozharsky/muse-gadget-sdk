@@ -61,8 +61,8 @@ if(CONFIG_MUSE_ENABLED)
     if(custom_avatar)
         message(STATUS "Custom avatar: components/muse/avatar/muse_pixel.c")
         # Both avatars are built: SHODAN for Muse, the Construct for Hermes. muse_pixel_switch.c picks.
-        # The Construct (muse_pixel_hermes.c, picture-based like SHODAN) replaced Bloop as the Hermes
-        # face; to go back, swap "avatar/muse_pixel_hermes.c" -> "avatar/muse_pixel_bloop.c" in both lines.
+        # Face history: Bloop (Meta's) -> the Construct (muse_pixel_hermes.c) -> brief Keller trial (muse_pixel_keller.c);
+        # all kept in the folder; swap the filename in these two lines to change.
         list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_hermes.c" "avatar/muse_pixel_switch.c")
         foreach(f "avatar/muse_pixel.c:shodan" "avatar/muse_pixel_hermes.c:stock")
             string(REPLACE ":" ";" p "${f}")
