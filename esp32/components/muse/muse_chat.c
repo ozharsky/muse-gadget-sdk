@@ -51,6 +51,12 @@ void muse_hatch_test(void)
     muse_hatch_chat_connect();
 }
 
+void muse_hatch_agent_changed(void)
+{
+    muse_hatch_report(MUSE_HATCH_UNTESTED, "");
+    muse_hatch_chat_agent_changed();
+}
+
 void muse_hatch_config_changed(void)
 {
     muse_hatch_report(MUSE_HATCH_UNTESTED, "");

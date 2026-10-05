@@ -50,5 +50,16 @@ void muse_ui_image_hide(void);
 /* Watcher camera mode: shows an on-screen shutter hint over the live image. */
 void muse_ui_camera_hint(bool visible);
 
+/*
+ * Muse's own moves, from any task. muse_ui_react acts out a short mood on the avatar (smirk, scan,
+ * alert, glitch, squint, angry, surprised, pleased); false if the avatar has none by that name.
+ * muse_ui_choose asks a question with 2..4 tap choices and calls done once: with the index tapped,
+ * or -1 timed out, -2 you spoke instead, -3 replaced by a newer question.
+ */
+bool muse_ui_react(const char *name);
+typedef void (*muse_ui_choice_cb)(int index, void *user);
+bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms, muse_ui_choice_cb done,
+                    void *user);
+
 /* Bench testing, from any task: streams the screen over USB serial. */
 void muse_ui_request_snapshot(void);

@@ -47,6 +47,30 @@
 #include "boards/watcher_camera.h"
 #endif
 
+/* Bench hook: "draw=URL" draws an image the way Muse's display.draw_url command does
+ * (main/image_fetch.c; the layout below mirrors image_fetch_result_t). */
+typedef struct {
+    bool ok;
+    const char *code, *message, *format;
+    int width, height, scale;
+    size_t bytes;
+    int ms;
+} draw_result_t;
+extern bool image_fetch_start(const char *url, int row, void (*done)(const draw_result_t *, void *), void *user,
+                              const char **code, const char **message);
+
+static bool bench_ui_command(const char *line);
+
+static void draw_done(const draw_result_t *r, void *user)
+{
+    (void)user;
+    printf("@draw %s %s %dx%d %u bytes %d ms\n", r->ok ? "ok" : "FAILED", r->ok ? r->format : r->message, r->width,
+           r->height, (unsigned)r->bytes, r->ms);
+    fflush(stdout);
+}
+
+
+
 static const char *TAG = "muse_input";
 
 #define POLL_MS 10
@@ -206,6 +230,31 @@ static void aux_key(bool pressed, bool edge)
 /* Talk button: push-to-talk, or Select while the menu is open. Asleep, the
  * press wakes and is posted as a waking one: muse_voice records only if it's
  * still held once awake. */
+/* Three quick taps of the talk button switch the agent (Muse / Hermes). */
+static void count_tap(bool pressed)
+{
+#ifdef CONFIG_MUSE_HERMES_URL
+    static TickType_t down, last_tap;
+    static int taps;
+    TickType_t now = xTaskGetTickCount();
+    if (pressed) {
+        down = now;
+        return;
+    }
+    if (!CONFIG_MUSE_HERMES_URL[0] || now - down > pdMS_TO_TICKS(300)) {
+        taps = 0;
+        return;
+    }
+    taps = (taps && now - last_tap <= pdMS_TO_TICKS(1200)) ? taps + 1 : 1;
+    last_tap = now;
+    if (taps >= 3) {
+        taps = 0;
+        ESP_LOGI(TAG, "triple tap: switching agent");
+        muse_settings_set_agent_hermes(!muse_settings_agent_hermes());
+    }
+#endif
+}
+
 static void talk_button(unsigned ev)
 {
     bool talk_down = s_talk_down;
@@ -232,6 +281,7 @@ static void talk_button(unsigned ev)
     if ((talk_down || swallow) && released) {
         if (talk_down) {
             post(MUSE_PTT_UP, false);
+            count_tap(false);
         }
         talk_down = swallow = false;
         released = false;
@@ -252,11 +302,13 @@ static void talk_button(unsigned ev)
         } else {
             post(MUSE_PTT_DOWN, false);
             talk_down = true;
+            count_tap(true);
         }
     }
     if ((talk_down || swallow) && released) {
         if (talk_down) {
             post(MUSE_PTT_UP, false);
+            count_tap(false);
         }
         talk_down = swallow = false;
     }
@@ -611,6 +663,17 @@ static bool console_command(char *line, bool whole)
         set_face(line + 5);
         return true;
     }
+    if (bench_ui_command(line)) {
+        return true;
+    }
+    if (!strncmp(line, "draw=", 5)) {
+        const char *code = NULL, *message = NULL;
+        if (!image_fetch_start(line + 5, -1, draw_done, NULL, &code, &message)) {
+            printf("@draw FAILED %s: %s\n", code ? code : "?", message ? message : "?");
+            fflush(stdout);
+        }
+        return true;
+    }
     if (strncmp(line, "chat", 4) != 0) {
         return false;
     }
@@ -630,6 +693,46 @@ static bool console_command(char *line, bool whole)
     muse_hatch_console("error", "THIS BOARD CAN'T CHAT OVER SERIAL", NULL);
     return true;
 #endif
+}
+
+
+
+/* Bench hooks: ">react=smirk" acts out a mood; ">choose=Question?|One|Two" asks a question and prints the answer. */
+static void choose_done(int idx, void *user)
+{
+    (void)user;
+    printf("@choose %d\n", idx);
+    fflush(stdout);
+}
+
+static bool bench_ui_command(const char *line)
+{    if (!strncmp(line, "agent=", 6)) {
+        muse_settings_set_agent_hermes(!strcmp(line + 6, "hermes"));
+        printf("@agent %s\n", muse_settings_agent_hermes() ? "hermes" : "muse");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "react=", 6)) {
+        printf("@react %s %s\n", line + 6, muse_ui_react(line + 6) ? "ok" : "unknown");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "choose=", 7)) {
+        static char buf[160];
+        strlcpy(buf, line + 7, sizeof(buf));
+        const char *opts[4];
+        int n = 0;
+        char *prompt = buf, *p = strchr(buf, '|');
+        while (p && n < 4) {
+            *p = 0;
+            opts[n++] = p + 1;
+            p = strchr(p + 1, '|');
+        }
+        printf("@choose-start %s\n", muse_ui_choose(prompt, opts, n, 20000, choose_done, NULL) ? "ok" : "refused");
+        fflush(stdout);
+        return true;
+    }
+    return false;
 }
 
 /*

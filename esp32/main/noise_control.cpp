@@ -1335,6 +1335,42 @@ static char *build_register_json(void) {
         cJSON_AddNumberToObject(
             cJSON_GetObjectItem(commands, "display.draw_url"), "timeout_ms",
             bits == 4 ? 120000 : 60000);
+#if CONFIG_HOMEHUB_LED_BACKEND_MUSE
+        {
+            cJSON *rreq = cJSON_CreateObject();
+            cJSON_AddItemToObject(rreq, "name",
+                                  string_param("One of: smirk (cold amusement), scan (analysing), alert (warning), glitch (digital "
+                                               "breakdown), squint (suspicion), angry (rage), surprised, pleased (a happy glow), "
+                                               "laugh, wink (playful), sleepy (tired), confused (puzzled), evil (a menacing "
+                                               "grin), hacked (a hacking or data-corruption joke), powerup (gaining strength), "
+                                               "bored (unimpressed), disgust, target (locking on), nervous (anxious), proud "
+                                               "(self-satisfied)."));
+            add_command(commands, "avatar.react",
+                        "Make the gadget's face act out a short mood for about two to three seconds, to go with what you "
+                        "are saying. Use sparingly, only when it fits. Returns immediately.",
+                        rreq, nullptr);
+            cJSON *creq = cJSON_CreateObject();
+            cJSON_AddItemToObject(creq, "prompt", string_param("The question, at most 120 characters."));
+            cJSON *opts = cJSON_CreateObject();
+            cJSON_AddStringToObject(opts, "type", "array");
+            cJSON_AddStringToObject(opts, "description", "2 to 4 short choices (each at most 28 characters) shown as "
+                                                          "large tap buttons.");
+            cJSON *items = cJSON_AddObjectToObject(opts, "items");
+            cJSON_AddStringToObject(items, "type", "string");
+            cJSON_AddItemToObject(creq, "options", opts);
+            cJSON *copt = cJSON_CreateObject();
+            cJSON *tmo = cJSON_CreateObject();
+            cJSON_AddStringToObject(tmo, "type", "integer");
+            cJSON_AddStringToObject(tmo, "description", "Seconds to wait for a tap, 5 to 60; default 25.");
+            cJSON_AddItemToObject(copt, "timeout_s", tmo);
+            add_command(commands, "ui.choose",
+                        "Ask the user a question on the gadget's screen with 2 to 4 tap-to-choose buttons. Waits for "
+                        "the tap and returns {choice, index}. Fails with answered_by_voice if the user speaks instead, or "
+                        "timeout. Good for quick yes/no or pick-one questions.",
+                        creq, copt);
+            cJSON_AddNumberToObject(cJSON_GetObjectItem(commands, "ui.choose"), "timeout_ms", 65000);
+        }
+#endif
         add_command(commands, "display.show_animation",
                     epaper ? "Clear the image and bring back the status screen "
                            "and the agent's name."

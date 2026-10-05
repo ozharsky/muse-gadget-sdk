@@ -69,6 +69,7 @@ void muse_hatch_status(muse_hatch_status_t *out);
 void muse_hatch_test(void);
 /* Call when host/VM/token change: forgets the last result and the connection. */
 void muse_hatch_config_changed(void);
+void muse_hatch_agent_changed(void);   /* the active agent was switched (Muse or Hermes) */
 const char *muse_hatch_state_name(muse_hatch_state_t state);
 /* Screen off, voice idle: check the connection less often. */
 void muse_hatch_set_resting(bool resting);
@@ -80,6 +81,8 @@ bool muse_hatch_ready(void);
 
 /* Press: connects if needed and starts streaming speech to the VM. */
 void muse_hatch_turn_begin(void);
+/* The last reply's whole text (empty before the first), for the reading view. */
+const char *muse_hatch_last_reply(void);
 /* 16 kHz mono speech, in order, from press to release. */
 void muse_hatch_turn_audio(const int16_t *pcm, size_t frames);
 /* Release: no more audio; the reply follows. */

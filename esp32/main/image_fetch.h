@@ -18,6 +18,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "sdkconfig.h"
 
@@ -62,6 +63,10 @@ typedef void (*image_fetch_done_cb)(const image_fetch_result_t *result, void *us
 // download task.
 bool image_fetch_start(const char *url, int row, image_fetch_done_cb done,
                        void *user, const char **code, const char **message);
+
+// Draw a baseline JPEG already in memory (copied); no download, little RAM.
+bool image_fetch_buffer(const uint8_t *jpeg, size_t len, int row, image_fetch_done_cb done,
+                        void *user, const char **code, const char **message);
 
 #ifdef __cplusplus
 }

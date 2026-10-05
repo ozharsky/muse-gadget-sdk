@@ -22,6 +22,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_mac.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #include "muse_audio.h"
@@ -45,11 +46,11 @@
 #define ROW_H 58
 #define MAX_APS 12
 
-#define COLOR_TEXT 0xf2efff
-#define COLOR_DIM 0x8b84a8
-#define COLOR_CARD 0x1a1530
-#define COLOR_CARD_PRESSED 0x2e2552
-#define COLOR_ACCENT 0xa77dff
+#define COLOR_TEXT 0xe8fff0
+#define COLOR_DIM 0x5fa070
+#define COLOR_CARD 0x0e2016
+#define COLOR_CARD_PRESSED 0x1d4a2c
+#define COLOR_ACCENT 0x4dff3c
 #define COLOR_OK 0x6ff0bf
 #define COLOR_WARN 0xffb45c
 #define COLOR_DANGER 0xff5c5c
@@ -60,7 +61,7 @@ typedef void (*text_done_cb_t)(const char *text);
 static int s_text_scale = 466;
 static lv_obj_t *s_tile;
 static lv_obj_t *s_current;
-static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_power, *s_text;
+static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_usage, *s_power, *s_text;
 
 /*
  * Only home is kept. A sub-page is built when it opens and deleted on the way
@@ -73,7 +74,7 @@ typedef struct {
 } page_t;
 
 /* Home values. */
-static lv_obj_t *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
+static lv_obj_t *s_home_agent, *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
 
 /* Wi-Fi page. */
 static lv_obj_t *s_wifi_sw, *s_wifi_status, *s_wifi_saved, *s_wifi_scan_btn, *s_wifi_scan_lbl, *s_wifi_list;
@@ -359,7 +360,7 @@ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
 
 static void drop(lv_obj_t *p)
 {
-    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_power, &s_text };
+    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_usage, &s_power, &s_text };
     for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
         if (*pages[i] == p) {
             *pages[i] = NULL;
@@ -1234,6 +1235,62 @@ static void build_power_page(lv_obj_t *tile)
     note(list, text);
 }
 
+/* ---------- Usage ---------- */
+
+#define TTS_FREE_CHARS 1000000u   /* Google's monthly free allowance for Chirp 3 HD voices, about */
+static lv_obj_t *s_use_chars, *s_use_left, *s_use_up, *s_use_net, *s_use_mem;
+static int64_t s_use_shown_us;
+
+static void on_usage_reset(lv_event_t *e)
+{
+    (void)e;
+    muse_settings_tts_reset();
+    s_use_shown_us = 0;
+}
+
+static void build_usage_page(lv_obj_t *tile)
+{
+    lv_obj_t *list;
+    s_usage = page(tile, "USAGE", true, &list);
+    s_use_shown_us = 0;
+    s_use_chars = info_row(list, "Voice characters");
+    s_use_left = info_row(list, "Free tier left");
+    s_use_up = info_row(list, "Uptime");
+    s_use_net = info_row(list, "Network");
+    s_use_mem = info_row(list, "Free memory");
+    button(list, LV_SYMBOL_REFRESH "  Reset counter", COLOR_ACCENT, on_usage_reset, NULL);
+    note(list, "Counts the characters spoken through Google Text-to-Speech since the last reset. The free allowance "
+               "is about 1M characters a month; reset this on the 1st. Google Cloud has the exact figure.");
+}
+
+static void tick_usage(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (now - s_use_shown_us < 1000000) {
+        return;
+    }
+    s_use_shown_us = now;
+    char buf[48];
+    uint32_t used = muse_settings_tts_chars();
+    snprintf(buf, sizeof(buf), "%lu", (unsigned long)used);
+    set_text(s_use_chars, buf);
+    snprintf(buf, sizeof(buf), "%.1f%%", used >= TTS_FREE_CHARS ? 0.0 : 100.0 - 100.0 * (double)used / TTS_FREE_CHARS);
+    set_text(s_use_left, buf);
+    int up = (int)(now / 1000000);
+    snprintf(buf, sizeof(buf), "%dh %02dm", up / 3600, (up / 60) % 60);
+    set_text(s_use_up, buf);
+    muse_wifi_status_t w;
+    muse_wifi_status(&w);
+    if (w.state == MUSE_WIFI_CONNECTED) {
+        snprintf(buf, sizeof(buf), "%s  %d dBm", w.ssid, w.rssi);
+    } else {
+        strlcpy(buf, "offline", sizeof(buf));
+    }
+    set_text(s_use_net, buf);
+    snprintf(buf, sizeof(buf), "%u KB", (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+    set_text(s_use_mem, buf);
+}
+
 /* ---------- Home ---------- */
 
 static const page_t WIFI = { &s_wifi, build_wifi_page };
@@ -1242,18 +1299,29 @@ static const page_t BLE = { &s_ble, build_ble_page };
 static const page_t SOUND = { &s_sound, build_sound_page };
 static const page_t SLEEP = { &s_sleep, build_sleep_page };
 static const page_t BATTERY = { &s_battery, build_battery_page };
+static const page_t USAGE = { &s_usage, build_usage_page };
 static const page_t POWER = { &s_power, build_power_page };
+
+static void on_agent(lv_event_t *e)
+{
+    (void)e;
+    muse_settings_set_agent_hermes(!muse_settings_agent_hermes());
+}
 
 static void build_home(lv_obj_t *tile)
 {
     lv_obj_t *list;
     s_home = page(tile, "SETTINGS", false, &list);
+    if (CONFIG_MUSE_HERMES_URL[0]) {
+        row(list, LV_SYMBOL_SHUFFLE, "Agent", &s_home_agent, on_agent, NULL);
+    }
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
     row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
     row(list, LV_SYMBOL_BLUETOOTH, "Bluetooth", &s_home_ble, on_nav, (void *)&BLE);
     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);
     row(list, LV_SYMBOL_EYE_CLOSE, "Sleep", &s_home_sleep, on_nav, (void *)&SLEEP);
     row(list, LV_SYMBOL_BATTERY_FULL, "Battery", &s_home_battery, on_nav, (void *)&BATTERY);
+    row(list, LV_SYMBOL_LIST, "Usage", NULL, on_nav, (void *)&USAGE);
     row(list, LV_SYMBOL_POWER, "Power off", NULL, on_nav, (void *)&POWER);
     s_about = note(list, "");
 }
@@ -1265,6 +1333,9 @@ static void tick_home(void)
     static const char *const WIFI_VALUES[] = { "Off", "Not set", "Joining", "", "Failed", "Not nearby" };
     set_text(s_home_wifi, w.state == MUSE_WIFI_CONNECTED ? w.ssid : WIFI_VALUES[w.state]);
 
+    if (s_home_agent) {
+        set_text(s_home_agent, muse_settings_agent_hermes() ? "Hermes" : "Muse");
+    }
     muse_hatch_status_t h;
     muse_hatch_status(&h);
     set_text(s_home_hatch, muse_hatch_state_name(h.state));
@@ -1331,6 +1402,8 @@ void muse_settings_ui_tick(bool visible)
         tick_sleep();
     } else if (s_current == s_battery) {
         tick_battery();
+    } else if (s_current == s_usage) {
+        tick_usage();
     }
 }
 

@@ -1,0 +1,61 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Waveshare ESP32-S3-Touch-AMOLED-1.43C: ESP32-S3-PICO-1-N8R8 (8 MB flash,
+# 8 MB octal PSRAM), 1.43" 466x466 round SH8601 AMOLED over QSPI, CST816S
+# touch, ES8311 speaker amp (NS4150 on GPIO46) + ES7210 dual mic, BOOT button
+# only, no PMU. Load last, after sdkconfig.muse.
+#
+# Pin/fact sources (see devices/AGENTS.md: cite, don't guess):
+# - Waveshare's own repo (waveshareteam/ESP32-S3-Touch-AMOLED-1.43C):
+#   02_Example/arduino_v3.3.0/04_Audio_Test/bsp_config.h (display/touch/I2C
+#   pins), esp32_s3_touch_amoled_1.43c.cpp (touch at I2C 0x15, battery ADC on
+#   GPIO4 with x2 divider, charger status GPIO7), board_cfg.txt (I2S pins and
+#   codec wiring), codec_init.c (ES7210 mic init).
+# - xiaozhi-esp32's proven board (main/boards/waveshare/esp32-s3-touch-amoled-1.43c):
+#   config.h + esp32-s3-touch-amoled-1.43c.cc (QSPI SH8601 bring-up, init
+#   commands, 180-degree rotation, ES7210 in TDM with all four mics selected,
+#   TDM slot order MIC1/MIC3/MIC2/MIC4).
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_MUSE_BOARD_WAVESHARE_S3_143C=y
+
+# 8 MB flash: the Muse partition table for 8 MB boards.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_8mb.csv"
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# Static buffers in PSRAM: Wi-Fi's, lwIP's and BT's, and those marked
+# EXT_RAM_BSS_ATTR (Muse's chat turn, the tunnel batch).
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# CONFIG_SPIRAM_IGNORE_NOTFOUND is not set
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+# The CST816S on this panel doesn't answer the chip-ID register (0xA7);
+# the driver's ID read fails init. The vendor's own driver never reads it
+# and polls the touch registers directly, so skip it.
+CONFIG_ESP_LCD_TOUCH_CST816S_DISABLE_READ_ID=y

@@ -683,9 +683,23 @@ static bool send_held(bool quiet)
  * Whether to send a saved note now: Hatch within reach and the backoff over.
  * Coming within reach starts the backoff over. Keeps s_waiting too.
  */
+static volatile bool s_drop_held;
+
+/* Notes saved for one agent must not go to the other after a switch. */
+void muse_voice_drop_held(void)
+{
+    s_drop_held = true;
+}
+
 static bool held_due(void)
 {
     static bool was_ready = true;
+    if (s_drop_held) {
+        s_drop_held = false;
+        while (s_held_count) {
+            drop_oldest();
+        }
+    }
     if (!s_held_count) {
         was_ready = true;
         s_waiting = false;

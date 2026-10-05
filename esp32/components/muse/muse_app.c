@@ -50,6 +50,10 @@ static void on_setting(muse_setting_t what)
     case MUSE_SETTING_BLE:
         muse_ble_apply();
         break;
+    case MUSE_SETTING_AGENT:   /* drops the Muse link, or lets it reconnect */
+        muse_voice_drop_held();
+        muse_hatch_agent_changed();
+        break;
     case MUSE_SETTING_HATCH:
         muse_hatch_config_changed();
         break;

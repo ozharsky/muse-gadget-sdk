@@ -35,6 +35,10 @@ menu "Muse"
             bool "Waveshare ESP32-S3-Touch-AMOLED-1.75 (not the 1.75C)"
             depends on IDF_TARGET_ESP32S3
 
+        config MUSE_BOARD_WAVESHARE_S3_143C
+            bool "Waveshare ESP32-S3-Touch-AMOLED-1.43C"
+            depends on IDF_TARGET_ESP32S3
+
         config MUSE_BOARD_AIPI
             bool "AIPI Lite (ESP32-S3, two buttons, no touch)"
             depends on IDF_TARGET_ESP32S3
@@ -89,6 +93,7 @@ menu "Muse"
         string
         default "waveshare_s3_175c" if MUSE_BOARD_WAVESHARE_S3_175C
         default "waveshare_s3_175" if MUSE_BOARD_WAVESHARE_S3_175
+        default "waveshare_s3_143c" if MUSE_BOARD_WAVESHARE_S3_143C
         default "aipi" if MUSE_BOARD_AIPI
         default "espressif_box_3" if MUSE_BOARD_ESPRESSIF_BOX_3
         default "waveshare_c6_18" if MUSE_BOARD_WAVESHARE_C6_18
@@ -137,5 +142,116 @@ menu "Muse"
             muse_chat_session.cpp is where a TTS API of your own can speak
             them. Needs PSRAM. Without it, voice notes go over Home Link's own
             session to its paired VM and replies are shown as text.
+
+    config MUSE_TTS_GOOGLE_KEY
+        string "Google Cloud Text-to-Speech API key (spoken replies)"
+        depends on MUSE_HATCH
+        default ""
+        help
+            When set, each reply's text is sent to Google Cloud Text-to-Speech
+            and played on the speaker. Empty keeps replies as text. The key is
+            compiled into the firmware: restrict it to the Text-to-Speech API.
+
+    config MUSE_VOICE_HINT
+        string "Text sent with every voice note (e.g. a length instruction)"
+        depends on MUSE_HATCH
+        default ""
+        help
+            Goes in the note's "message" field beside the audio, so Muse reads it
+            as part of what you said. Plain text only: no quotes or backslashes.
+
+    config MUSE_AVATAR_STYLE
+        int "Avatar design: 0 classic, 1 glyph text, 2 hologram wireframe, 3 red fused flesh"
+        depends on MUSE_ENABLED
+        range 0 3
+        default 0
+        help
+            Only has an effect with a custom avatar (components/muse/avatar/muse_pixel.c)
+            that reads CONFIG_MUSE_AVATAR_STYLE.
+
+    config MUSE_AVATAR_CELL_PX
+        int "Avatar size: screen pixels per art pixel on a full-layout round screen (5 = stock)"
+        depends on MUSE_ENABLED
+        range 3 7
+        default 5
+        help
+            The avatar is 64 art pixels square. Any value other than 5 resizes
+            it (6 = 384 px, 7 = 448 px) and places it by MUSE_AVATAR_Y_OFFSET
+            from the screen's centre instead of above the captions.
+
+    config MUSE_TIMEZONE
+        string "Timezone for the idle clock (POSIX TZ string)"
+        depends on MUSE_ENABLED
+        default "PST8PDT,M3.2.0,M11.1.0"
+        help
+            For example EST5EDT,M3.2.0,M11.1.0 or CET-1CEST,M3.5.0,M10.5.0/3. The gadget gets the
+            time from the internet (NTP) once Wi-Fi is up.
+
+    config MUSE_AVATAR_X_OFFSET
+        int "Avatar offset to the right, in screen pixels"
+        depends on MUSE_ENABLED
+        range -80 80
+        default 0
+
+    config MUSE_AVATAR_Y_OFFSET
+        int "Avatar offset in screen pixels (down from the stock spot at size 5, down from centre otherwise)"
+        depends on MUSE_ENABLED
+        range -80 80
+        default 0
+
+    config MUSE_REPLY_MAX_CHARS
+        int "Longest reply the gadget speaks and shows, in characters (0 = no limit)"
+        depends on MUSE_HATCH
+        range 0 1000
+        default 0
+        help
+            A longer reply is cut at the last sentence end within the limit
+            (or the last word). The full answer is still in the Muse app.
+
+    config MUSE_TTS_RATE_PCT
+        int "TTS speaking rate, percent (Google speakingRate x 100)"
+        depends on MUSE_HATCH
+        range 25 200
+        default 100
+
+    config MUSE_TTS_PITCH_PCT
+        int "TTS pitch, percent (70 = deeper and slower, like a slowed tape)"
+        depends on MUSE_HATCH
+        range 50 100
+        default 100
+
+    config MUSE_VOICE_FX
+        bool "Machine voice effect on the speaker (stutter, echo, light crunch)"
+        default n
+
+    config MUSE_TTS_GOOGLE_VOICE
+        string "Google TTS voice name"
+        depends on MUSE_HATCH
+        default "en-US-Chirp3-HD-Aoede"
+
+    config MUSE_HERMES_URL
+        string "Hermes relay URL (empty: Muse only)"
+        depends on MUSE_HATCH
+        default ""
+        help
+            Base URL of tools hermes-relay on your computer, e.g. http://192.168.1.20:8788.
+            Shows an Agent switch (Muse / Hermes) in Settings.
+
+    config MUSE_HERMES_URL_REMOTE
+        string "Hermes relay URL when away from home (https, optional)"
+        depends on MUSE_HATCH
+        default ""
+        help
+            Used when the home address above can't be reached, e.g. on a phone hotspot.
+
+    config MUSE_HERMES_TOKEN
+        string "Hermes relay token"
+        depends on MUSE_HATCH
+        default ""
+
+    config MUSE_HERMES_TTS_VOICE
+        string "Google TTS voice for Hermes"
+        depends on MUSE_HATCH
+        default "en-US-Chirp3-HD-Algenib"
 
 endmenu

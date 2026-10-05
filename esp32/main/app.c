@@ -53,6 +53,9 @@
 #include "vm_connect.h"
 #include "noise_control.h"
 #include "image_fetch.h"
+#if CONFIG_HOMEHUB_LED_BACKEND_MUSE
+#include "muse_ui.h"
+#endif
 #include "noise_tunnel.h"
 #include "led_status.h"
 #include "button.h"
@@ -1826,6 +1829,87 @@ static cJSON *bug_report_command(
 }
 #endif
 
+#if CONFIG_HOMEHUB_DISPLAY_COMMANDS && CONFIG_HOMEHUB_LED_BACKEND_MUSE
+/* ui.choose: a question with tap choices. Answers when the user taps, speaks instead, or it times out. */
+typedef struct {
+    noise_ctrl_session_generation_t session_generation;
+    char request_id[64];
+    int n;
+    char options[4][32];
+} choose_ctx_t;
+
+static void choose_done(int idx, void *user) {
+    choose_ctx_t *ctx = user;
+    cJSON *result = cJSON_CreateObject();
+    if (idx >= 0 && idx < ctx->n) {
+        cJSON_AddBoolToObject(result, "ok", true);
+        cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+        cJSON_AddStringToObject(payload, "choice", ctx->options[idx]);
+        cJSON_AddNumberToObject(payload, "index", idx);
+    } else {
+        cJSON_AddBoolToObject(result, "ok", false);
+        cJSON *error = cJSON_AddObjectToObject(result, "error");
+        cJSON_AddStringToObject(error, "code", idx == -2 ? "answered_by_voice" : idx == -3 ? "replaced" : "timeout");
+        cJSON_AddStringToObject(error, "message", idx == -2 ? "the user answered out loud instead of tapping"
+                                                  : idx == -3 ? "a newer question replaced this one"
+                                                              : "the user did not tap a choice in time");
+    }
+    noise_ctrl_send_command_result(ctx->session_generation, ctx->request_id, result);
+    free(ctx);
+}
+
+static cJSON *choose_command(cJSON *params, const char *request_id,
+                             noise_ctrl_session_generation_t session_generation) {
+    cJSON *prompt = cJSON_GetObjectItem(params, "prompt");
+    cJSON *options = cJSON_GetObjectItem(params, "options");
+    cJSON *tmo = cJSON_GetObjectItem(params, "timeout_s");
+    if (!cJSON_IsString(prompt) || !prompt->valuestring[0] || strlen(prompt->valuestring) > 120) {
+        return command_error("bad_param", "prompt is required (1-120 characters)");
+    }
+    int n = cJSON_IsArray(options) ? cJSON_GetArraySize(options) : 0;
+    if (n < 2 || n > 4) return command_error("bad_param", "options must be 2 to 4 strings");
+    choose_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return command_error("out_of_memory", "failed to allocate");
+    ctx->session_generation = session_generation;
+    strncpy(ctx->request_id, request_id, sizeof(ctx->request_id) - 1);
+    const char *opts[4];
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_GetArrayItem(options, i);
+        if (!cJSON_IsString(o) || !o->valuestring[0] || strlen(o->valuestring) > 28) {
+            free(ctx);
+            return command_error("bad_param", "each option must be a string of 1-28 characters");
+        }
+        strlcpy(ctx->options[i], o->valuestring, sizeof(ctx->options[i]));
+        opts[i] = ctx->options[i];
+    }
+    ctx->n = n;
+    int seconds = cJSON_IsNumber(tmo) ? tmo->valueint : 25;
+    if (seconds < 5) seconds = 5;
+    if (seconds > 60) seconds = 60;
+    if (!muse_ui_choose(prompt->valuestring, opts, n, seconds * 1000, choose_done, ctx)) {
+        free(ctx);
+        return command_error("unavailable", "the screen can't show choices right now");
+    }
+    cJSON *async = cJSON_CreateObject();
+    cJSON_AddBoolToObject(async, "_async", true);
+    return async;
+}
+
+static cJSON *react_command(cJSON *params) {
+    cJSON *name = cJSON_GetObjectItem(params, "name");
+    if (!cJSON_IsString(name) || !name->valuestring[0]) return command_error("bad_param", "name is required");
+    if (!muse_ui_react(name->valuestring)) {
+        return command_error("unknown_reaction",
+                             "no such reaction; use smirk, scan, alert, glitch, squint, angry, surprised, pleased, laugh, wink, sleepy, confused, evil, hacked, powerup, bored, disgust, target, nervous or proud");
+    }
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "ok", true);
+    cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+    cJSON_AddStringToObject(payload, "reaction", name->valuestring);
+    return result;
+}
+#endif
+
 static cJSON *on_ws_command(
     const char *command, cJSON *params, const char *request_id,
     noise_ctrl_session_generation_t session_generation) {
@@ -1837,6 +1921,14 @@ static cJSON *on_ws_command(
         if (!url) return command_error("missing_param", "url is required");
         return queue_ws_control(WS_CONTROL_SET_VM, url);
     }
+#if CONFIG_HOMEHUB_DISPLAY_COMMANDS && CONFIG_HOMEHUB_LED_BACKEND_MUSE
+    if (strcmp(command, "avatar.react") == 0) {
+        return react_command(params);
+    }
+    if (strcmp(command, "ui.choose") == 0) {
+        return choose_command(params, request_id, session_generation);
+    }
+#endif
 #if CONFIG_HOMEHUB_DISPLAY_COMMANDS
     if (strcmp(command, "display.draw_url") == 0) {
         cJSON *url = cJSON_GetObjectItem(params, "url");

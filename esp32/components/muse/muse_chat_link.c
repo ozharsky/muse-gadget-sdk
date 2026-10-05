@@ -778,6 +778,10 @@ void muse_hatch_test(void)
 {
 }
 
+void muse_hatch_agent_changed(void)
+{
+}   /* one agent only in this build */
+
 void muse_hatch_config_changed(void)
 {
 }

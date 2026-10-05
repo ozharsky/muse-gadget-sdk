@@ -39,6 +39,7 @@ static struct {
     uint16_t sleep_s;
     bool wifi_on;
     bool ble_on;
+    bool agent_hermes;
     char ssid[MUSE_SSID_MAX + 1];
     char pass[MUSE_PASS_MAX + 1];
     char host[MUSE_HOST_MAX + 1];
@@ -96,6 +97,28 @@ static void notify(muse_setting_t what)
     }
 }
 
+static uint32_t s_tts_chars;
+
+uint32_t muse_settings_tts_chars(void) { return s_tts_chars; }
+
+static void save_tts_chars(void)
+{
+    nvs_set_u32(s_nvs, "tts_chars", s_tts_chars);
+    nvs_commit(s_nvs);
+}
+
+void muse_settings_tts_add(uint32_t chars)
+{
+    s_tts_chars += chars;
+    save_tts_chars();
+}
+
+void muse_settings_tts_reset(void)
+{
+    s_tts_chars = 0;
+    save_tts_chars();
+}
+
 esp_err_t muse_settings_init(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -114,6 +137,7 @@ esp_err_t muse_settings_init(void)
     }
 
     uint8_t b;
+    nvs_get_u32(s_nvs, "tts_chars", &s_tts_chars);
     load_u8("volume", &s.volume);
     if (nvs_get_u8(s_nvs, "speaker", &b) == ESP_OK) {
         s.speaker_on = b;
@@ -126,6 +150,9 @@ esp_err_t muse_settings_init(void)
     }
     if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
         s.ble_on = b;
+    }
+    if (nvs_get_u8(s_nvs, "agent", &b) == ESP_OK) {
+        s.agent_hermes = b;
     }
     load_str("ssid", s.ssid, sizeof(s.ssid));
     load_str("pass", s.pass, sizeof(s.pass));
@@ -154,6 +181,7 @@ int muse_settings_brightness(void) { return s.brightness; }
 int muse_settings_sleep_s(void) { return s.sleep_s; }
 bool muse_settings_wifi_on(void) { return s.wifi_on; }
 bool muse_settings_ble_on(void) { return s.ble_on; }
+bool muse_settings_agent_hermes(void) { return s.agent_hermes; }
 
 /* Home Link owns the saved networks (this is the first); the local copy is only a fallback. */
 void muse_settings_wifi(char ssid[MUSE_SSID_MAX + 1], char pass[MUSE_PASS_MAX + 1])
@@ -232,6 +260,13 @@ void muse_settings_set_wifi_on(bool on)
     s.wifi_on = on;
     save_u8("wifi_on", on);
     notify(MUSE_SETTING_WIFI);
+}
+
+void muse_settings_set_agent_hermes(bool hermes)
+{
+    s.agent_hermes = hermes;
+    save_u8("agent", hermes);
+    notify(MUSE_SETTING_AGENT);
 }
 
 void muse_settings_set_ble_on(bool on)

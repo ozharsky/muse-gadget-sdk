@@ -16,6 +16,16 @@
 
 #pragma once
 
+/* Host test harnesses build this header without an IDF config. */
+#if defined(__has_include)
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+#endif
+#ifndef CONFIG_MUSE_VOICE_HINT
+#define CONFIG_MUSE_VOICE_HINT ""
+#endif
+
 /* Between the status side (muse_chat.c) and the session task (muse_chat_session.cpp),
  * plus voice note and caption helpers shared with muse_chat_link.c. */
 
@@ -37,10 +47,11 @@ void muse_hatch_report(muse_hatch_state_t state, const char *detail);
 void muse_hatch_chat_connect(void);
 /* Drops the connection and the cached VM credentials (settings changed). */
 void muse_hatch_chat_forget(void);
+void muse_hatch_chat_agent_changed(void);   /* Muse <-> Hermes: no credential reset */
 
 /* A voice note is a POST /chat/stream body: NOTE_HEAD, a base64 WAV, NOTE_TAIL. */
 #define MUSE_HATCH_NOTE_HEAD \
-    "{\"message\":\"\",\"output_modality\":\"text\",\"items\":[{\"type\":\"file\"," \
+    "{\"message\":\"" CONFIG_MUSE_VOICE_HINT "\",\"output_modality\":\"text\",\"items\":[{\"type\":\"file\"," \
     "\"mime_type\":\"audio/wav\",\"filename\":\"voice_note.wav\",\"data_base64\":\""
 #define MUSE_HATCH_NOTE_TAIL "\"}]}"
 #define MUSE_HATCH_WAV_HEADER 44

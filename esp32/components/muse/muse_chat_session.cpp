@@ -52,6 +52,7 @@
 #include "esp_attr.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -129,7 +130,7 @@ static const char *TAG = "muse_chat_session";
 
 /* ---- Voice task <-> session task ---- */
 
-enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE };
+enum cmd_type_t : uint8_t { CMD_CONNECT, CMD_FORGET, CMD_AGENT, CMD_BEGIN, CMD_END, CMD_CANCEL, CMD_TEXT, CMD_TEXT_CANCEL, CMD_WAKE };
 
 struct cmd_t {
     cmd_type_t type;
@@ -895,6 +896,10 @@ static bool ensure_connected(void)
             return true;
         }
         disconnect(err);
+        if (status == 0 && attempt == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1500));   /* just joined a network: DNS and the route may need a moment */
+            continue;
+        }
         /* A refused VM token may just be stale: fetch a fresh one once. */
         if ((status == 401 || status == 403) && !s_vm_direct) {
             forget_vm();
@@ -902,7 +907,9 @@ static bool ensure_connected(void)
         }
         break;
     }
-    ESP_LOGW(TAG, "connect failed: %s", err);
+    ESP_LOGW(TAG, "connect failed: %s (int free %uK, largest %uK)", err,
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
     muse_hatch_report(MUSE_HATCH_UNREACHABLE, err);
     return false;
 }
@@ -935,6 +942,31 @@ static size_t resample(resampler_t *r, const int16_t *in, size_t n, int16_t *out
     r->prev = in[n - 1];
     return o;
 }
+
+/* ---- Hermes: voice goes to a relay on the user's computer, which answers in text ---- */
+
+#define HERMES_MAX_BYTES NOTE_MAX_BYTES
+
+extern "C" bool muse_ui_react(const char *name);   /* muse_ui.h has no C++ guards */
+/* main/image_fetch.c: downloads a JPEG and draws it on the screen. */
+extern "C" bool image_fetch_buffer(const uint8_t *jpeg, size_t len, int row, void (*done)(const void *, void *),
+                                   void *user, const char **code, const char **message);
+static void image_done(const void *, void *) {}
+
+static bool hermes_mode(void)
+{
+    return CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes();
+}
+
+/* SHODAN is deep and slow; Hermes speaks at the voice's own pitch. */
+static int pitch_pct(void)
+{
+    return hermes_mode() ? 100 : CONFIG_MUSE_TTS_PITCH_PCT;
+}
+
+static char s_hreact[24];     /* Hermes's mood for this reply, acted out when its speech starts */
+
+static uint8_t *s_hbuf;      /* HERMES_MAX_BYTES of 16 kHz PCM, PSRAM, allocated on first use */
 
 /* ---- Turn: dictation ---- */
 
@@ -1004,6 +1036,9 @@ static bool turn_start(uint32_t gen, bool text)
     s_reply_shown[0] = '\0';
     s_turn.start_us = now_us();
     resampler_init(&s_turn.up, MIC_RATE, DICT_RATE);
+    if (hermes_mode()) {
+        return true;   /* no Muse link in this mode */
+    }
     if (!ensure_connected()) {
         turn_fail(muse_hatch_configured() ? "CAN'T REACH MUSE" : "MUSE NOT SET UP");
         return false;
@@ -1014,6 +1049,18 @@ static bool turn_start(uint32_t gen, bool text)
 static void turn_begin(uint32_t gen)
 {
     if (!turn_start(gen, false)) {
+        return;
+    }
+    if (hermes_mode()) {
+        if (!s_hbuf) {
+            s_hbuf = static_cast<uint8_t *>(psram_alloc(HERMES_MAX_BYTES));
+        }
+        if (!s_hbuf) {
+            turn_fail("OUT OF MEMORY");
+            return;
+        }
+        s_turn.pcm_bytes = 0;
+        s_turn.phase = P_LISTEN;
         return;
     }
     if (VOICE_NOTE) {
@@ -1492,6 +1539,207 @@ static void on_chat_ack(stream_t *s)
 
 /* ---- Turn: speech ---- */
 
+static void tts_data(const uint8_t *data, size_t len);
+
+/* ---- Spoken replies: Google Cloud Text-to-Speech (REST, MP3 in base64 JSON) ---- */
+/* Google Trust Services GTS Root R1 (self-signed, valid to 2036). The server sends it
+ * cross-signed by the old GlobalSign Root CA, which ESP-IDF's bundle lacks, so pin the root. */
+static const char GTS_ROOT_R1[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "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\n"
+    "bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c\n"
+    "-----END CERTIFICATE-----\n";
+
+struct tts_buf_t {
+    char *p;
+    size_t len, cap;
+    bool over;
+};
+
+static esp_err_t tts_http_evt(esp_http_client_event_t *e)
+{
+    auto *b = static_cast<tts_buf_t *>(e->user_data);
+    if (e->event_id == HTTP_EVENT_ON_DATA) {
+        if (b->len + e->data_len < b->cap) {
+            memcpy(b->p + b->len, e->data, e->data_len);
+            b->len += e->data_len;
+        } else {
+            b->over = true;
+        }
+    }
+    return ESP_OK;
+}
+
+/* Decodes base64 in place (output never outruns input); returns the byte count. */
+static size_t b64_decode_inplace(char *s, size_t n)
+{
+    static int8_t T[256];
+    if (!T[(int)'B']) {
+        memset(T, -1, sizeof(T));
+        const char *a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; i++) {
+            T[(uint8_t)a[i]] = (int8_t)i;
+        }
+    }
+    uint8_t *out = reinterpret_cast<uint8_t *>(s);
+    size_t o = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+    for (size_t i = 0; i < n; i++) {
+        int v = T[(uint8_t)s[i]];
+        if (v < 0) {
+            continue;   /* '=' padding, stray whitespace */
+        }
+        acc = (acc << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[o++] = (uint8_t)(acc >> bits);
+        }
+    }
+    return o;
+}
+
+/* Fetches speech for text and queues its MP3 for decode(). False leaves nothing queued. */
+static bool fetch_tts(const char *text)
+{
+    const size_t CAP = 900 * 1024;
+    char *body = static_cast<char *>(psram_alloc(TEXT_MAX * 2 + 256));
+    char *resp = static_cast<char *>(psram_alloc(CAP));
+    bool ok = false;
+    uint32_t billed = 0;   /* characters actually sent, as Google counts them */
+    /* The language is the voice name's first two parts: en-US-Chirp3-HD-Aoede -> en-US. */
+    int lang_len = 0;
+    const char *voice = hermes_mode() ? CONFIG_MUSE_HERMES_TTS_VOICE : CONFIG_MUSE_TTS_GOOGLE_VOICE;
+    for (int dashes = 0; voice[lang_len]; lang_len++) {
+        if (voice[lang_len] == '-' && ++dashes == 2) {
+            break;
+        }
+    }
+    if (!body || !resp) {
+        goto out;
+    }
+    {
+        size_t n = snprintf(body, 128, "{\"input\":{\"text\":\"");
+        for (const char *c = text; *c && n < TEXT_MAX * 2 - 8; c++) {
+            if (*c == '"' || *c == '\\') {
+                body[n++] = '\\';
+                body[n++] = *c;
+                billed++;
+            } else if (*c == '*' || *c == '#') {
+                continue;   /* markdown: not worth saying */
+            } else if ((uint8_t)*c < 0x20) {
+                body[n++] = ' ';
+                billed++;
+            } else {
+                body[n++] = *c;
+                if (((uint8_t)*c & 0xC0) != 0x80) {
+                    billed++;   /* a character, not each of its UTF-8 bytes */
+                }
+            }
+        }
+        snprintf(body + n, 200, "\"},\"voice\":{\"languageCode\":\"%.*s\",\"name\":\"%s\"},"
+                 "\"audioConfig\":{\"audioEncoding\":\"MP3\",\"speakingRate\":%.2f}}", lang_len, voice, voice, hermes_mode() ? 1.0 : CONFIG_MUSE_TTS_RATE_PCT / 100.0);
+    }
+    {
+        static const char URL[] = "https://texttospeech.googleapis.com/v1/text:synthesize?key=" CONFIG_MUSE_TTS_GOOGLE_KEY;
+        tts_buf_t buf = { resp, 0, CAP, false };
+        esp_http_client_config_t cfg = {};
+        cfg.url = URL;
+        cfg.method = HTTP_METHOD_POST;
+        cfg.cert_pem = GTS_ROOT_R1;
+        cfg.timeout_ms = 8000;   /* this task is blocked meanwhile; if Google is slow, show the text rather than wait */
+        cfg.event_handler = tts_http_evt;
+        cfg.user_data = &buf;
+        esp_http_client_handle_t h = esp_http_client_init(&cfg);
+        if (!h) {
+            goto out;
+        }
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_post_field(h, body, strlen(body));
+        int64_t t0 = now_us();
+        esp_err_t err = esp_http_client_perform(h);
+        int status = esp_http_client_get_status_code(h);
+        esp_http_client_cleanup(h);
+        if (err != ESP_OK || status != 200 || buf.over) {
+            ESP_LOGW(TAG, "tts: request failed (err %s, HTTP %d%s)", esp_err_to_name(err), status, buf.over ? ", too big" : "");
+            if (status != 200 && buf.len) {
+                buf.p[buf.len < 300 ? buf.len : 299] = 0;   /* Google's error text */
+                ESP_LOGW(TAG, "tts: %s", buf.p);
+            }
+            goto out;
+        }
+        buf.p[buf.len] = 0;
+        char *a = strstr(buf.p, "\"audioContent\"");
+        a = a ? strchr(a + 14, '"') : nullptr;
+        char *end = a ? strchr(a + 1, '"') : nullptr;
+        if (!end) {
+            ESP_LOGW(TAG, "tts: no audioContent in reply");
+            goto out;
+        }
+        size_t mp3 = b64_decode_inplace(a + 1, (size_t)(end - (a + 1)));
+        s_turn.mp3_len = 0;
+        s_turn.mp3_ended = false;
+        tts_data(reinterpret_cast<uint8_t *>(a + 1), mp3);
+        s_turn.mp3_ended = true;
+        muse_settings_tts_add(billed);   /* what Google counts against the free allowance */
+        ESP_LOGI(TAG, "tts: %u chars -> %u bytes MP3 in %lld ms", (unsigned)strlen(text), (unsigned)mp3, (long long)((now_us() - t0) / 1000));
+        ok = true;
+    }
+out:
+    heap_caps_free(body);
+    heap_caps_free(resp);
+    return ok;
+}
+
+
+/* The last reply, whole, for the reading view (a long press on the avatar). */
+#define LAST_REPLY_MAX 3072
+static EXT_RAM_BSS_ATTR char s_last_reply[LAST_REPLY_MAX];
+
+extern "C" const char *muse_hatch_last_reply(void)
+{
+    return s_last_reply;
+}
+
+static void last_reply_add(int msg_index, const char *text)
+{
+    if (msg_index == 0) {
+        s_last_reply[0] = 0;
+    }
+    if (s_last_reply[0]) {
+        strlcat(s_last_reply, "\n\n", sizeof(s_last_reply));
+    }
+    strlcat(s_last_reply, text, sizeof(s_last_reply));
+}
+
 static void start_tts(void)
 {
     if (s_turn.tts_msg >= 0) {
@@ -1517,11 +1765,42 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
+        if (CONFIG_MUSE_REPLY_MAX_CHARS > 0 && s_turn.texts && m.len > CONFIG_MUSE_REPLY_MAX_CHARS) {
+            /* Keep to the last sentence end within the limit, else the last word. */
+            char *t = s_turn.texts + i * TEXT_MAX;
+            int cut = -1, space = -1;
+            for (int k = 0; k < CONFIG_MUSE_REPLY_MAX_CHARS; k++) {
+                if ((t[k] == '.' || t[k] == '!' || t[k] == '?') && (t[k + 1] == ' ' || t[k + 1] == '\n')) {
+                    cut = k + 1;
+                } else if (t[k] == ' ') {
+                    space = k;
+                }
+            }
+            cut = cut > CONFIG_MUSE_REPLY_MAX_CHARS / 3 ? cut : space > 0 ? space : CONFIG_MUSE_REPLY_MAX_CHARS;
+            t[cut] = 0;
+            m.len = (uint32_t)cut;
+        }
+        if (s_turn.texts) {
+            last_reply_add(i, s_turn.texts + i * TEXT_MAX);
+        }
         m.pcm_start = s_turn.pcm_out;
         m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
         m.tts = TTS_ACTIVE;
         s_turn.tts_msg = i;
         s_turn.silent = true;
+        if (CONFIG_MUSE_TTS_GOOGLE_KEY[0] && s_turn.texts && muse_settings_speaker_on() &&
+            fetch_tts(s_turn.texts + i * TEXT_MAX)) {
+            /* Speech fetched: decode() plays it, captions following. */
+            s_turn.silent = false;
+            m.pcm_frames = 0;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+            mp3dec_init(&s_turn.dec);
+        }
+        if (s_hreact[0]) {
+            muse_ui_react(s_hreact);   /* now, not when the reply arrived: the speech fetch above takes seconds */
+            s_hreact[0] = '\0';
+        }
         ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
         show_reply_start(m);
         return;
@@ -1611,7 +1890,7 @@ static void decode(void)
         if (s_turn.down_rate != info.hz) {
             ESP_LOGI(TAG, "reply audio: %d Hz, %d ch, %d kbps", info.hz, info.channels, info.bitrate_kbps);
             s_turn.down_rate = info.hz;
-            resampler_init(&s_turn.down, info.hz, MIC_RATE);
+            resampler_init(&s_turn.down, info.hz * pitch_pct() / 100, MIC_RATE);   /* < 100: deeper and slower */
         }
         size_t n = resample(&s_turn.down, s_pcm, samples, s_pcm16);
         if (s_turn.gen == s_gen.load()) {
@@ -1628,7 +1907,7 @@ static void decode(void)
     msg_t &m = s_turn.msgs[s_turn.tts_msg];
     if (s_turn.mp3_ended && s_turn.kbps > 0) {
         /* All of it is here: what's decoded plus what the bitrate says the rest holds. */
-        uint32_t rest = (uint32_t)((uint64_t)s_turn.mp3_len * 8 * MIC_RATE / (s_turn.kbps * 1000));
+        uint32_t rest = (uint32_t)((uint64_t)s_turn.mp3_len * 8 * MIC_RATE * 100 / (s_turn.kbps * 1000ull * pitch_pct()));
         m.pcm_frames = s_turn.pcm_out - m.pcm_start + rest;
     }
     if (s_turn.mp3_ended && !s_turn.mp3_len) {
@@ -1676,6 +1955,153 @@ static void check_turn(void)
     ESP_LOGI(TAG, "turn done: %d message(s) in %.1fs", s_turn.nmsgs, (t - s_turn.start_us) / 1e6);
     log_marks();
     turn_done(true);
+}
+
+/* True if the home relay's port answers within 1.5 s (a plain TCP connect to "http://a.b.c.d:port"). */
+static bool hermes_home_reachable(void)
+{
+    char host[64];
+    int port = 80;
+    const char *p = strstr(CONFIG_MUSE_HERMES_URL, "://");
+    p = p ? p + 3 : CONFIG_MUSE_HERMES_URL;
+    size_t n = strcspn(p, ":/");
+    if (n >= sizeof(host)) {
+        return false;
+    }
+    memcpy(host, p, n);
+    host[n] = 0;
+    if (p[n] == ':') {
+        port = atoi(p + n + 1);
+    }
+    struct sockaddr_in sa = {};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
+        return true;   /* a name, not an address: just try it */
+    }
+    int fd = lwip_socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return true;
+    }
+    lwip_fcntl(fd, F_SETFL, lwip_fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    lwip_connect(fd, reinterpret_cast<sockaddr *>(&sa), sizeof(sa));
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(fd, &w);
+    timeval tv = { 1, 500000 };
+    bool ok = lwip_select(fd + 1, nullptr, &w, nullptr, &tv) > 0;
+    int err = 1;
+    socklen_t len = sizeof(err);
+    if (ok) {
+        lwip_getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+    }
+    lwip_close(fd);
+    return ok && err == 0;
+}
+
+/* One turn against the relay: PCM up, {"heard","reply"} back. False (turn failed) on any error. */
+static bool hermes_request(void)
+{
+    const char *url = CONFIG_MUSE_HERMES_URL "/turn";
+    bool remote = false;
+    if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
+        url = CONFIG_MUSE_HERMES_URL_REMOTE "/turn";
+        remote = true;
+        ESP_LOGI(TAG, "hermes: home relay unreachable, using the remote address");
+    }
+    const size_t RESP_CAP = 160 * 1024;   /* the reply, plus a base64 JPEG of up to ~100 KB */
+    char *resp = static_cast<char *>(psram_alloc(RESP_CAP));
+    if (!resp) {
+        turn_fail("OUT OF MEMORY");
+        return false;
+    }
+    tts_buf_t buf = { resp, 0, RESP_CAP - 1, false };
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 100000;   /* this task waits; the relay gives Hermes 80 s */
+    cfg.event_handler = tts_http_evt;
+    cfg.user_data = &buf;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) {
+        heap_caps_free(resp);
+        turn_fail("OUT OF MEMORY");
+        return false;
+    }
+    esp_http_client_set_header(h, "Content-Type", "application/octet-stream");
+    esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+    esp_http_client_set_post_field(h, reinterpret_cast<const char *>(s_hbuf), s_turn.pcm_bytes);
+    esp_err_t err = esp_http_client_perform(h);
+    int status = esp_http_client_get_status_code(h);
+    esp_http_client_cleanup(h);
+    resp[buf.len] = 0;
+    cJSON *j = (err == ESP_OK && status == 200) ? cJSON_Parse(resp) : nullptr;
+    const char *heard = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "heard")) : nullptr;
+    const char *reply = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "reply")) : nullptr;
+    const char *react = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "react")) : nullptr;
+    char *image = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "image_b64")) : nullptr;
+    bool ok = false;
+    if (s_turn.gen != s_gen.load()) {
+        turn_finish();   /* cancelled while waiting */
+    } else if (!j) {
+        ESP_LOGW(TAG, "hermes: request failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+        turn_fail(err != ESP_OK ? "CAN'T REACH HERMES" : "HERMES ERROR");
+    } else if (!reply || !reply[0]) {
+        turn_fail("DIDN'T CATCH THAT");
+    } else {
+        ESP_LOGI(TAG, "hermes heard: \"%s\"", heard ? heard : "");
+        emit(MUSE_HATCH_EV_HEARD, heard ? heard : "");
+        msg_t &m = s_turn.msgs[0];
+        m = msg_t{};
+        strlcpy(m.id, "hermes", sizeof(m.id));
+        s_turn.nmsgs = 1;
+        s_turn.chat_posted = true;
+        s_turn.chat_us = s_turn.last_event_us = s_turn.last_content_us = now_us();
+        s_turn.phase = P_WAIT_REPLY;
+        append_text(m, reply);
+        show_reply_start(m);
+        message_done(0, reply);
+        strlcpy(s_hreact, react ? react : "", sizeof(s_hreact));   /* start_tts() plays it as the speech starts */
+        if (image && image[0]) {
+            const char *code = "", *msg = "";
+            size_t n = b64_decode_inplace(image, strlen(image));
+            if (!image_fetch_buffer(reinterpret_cast<uint8_t *>(image), n, -1, image_done, nullptr, &code, &msg)) {
+                ESP_LOGW(TAG, "hermes: image not shown: %s (%s)", msg, code);
+            }
+        }
+        ok = true;
+    }
+    cJSON_Delete(j);
+    heap_caps_free(resp);
+    return ok;
+}
+
+/* Collects the mic while the button is held, then asks the relay. */
+static void hermes_step(void)
+{
+    if (s_turn.phase == P_LISTEN) {
+        size_t room = HERMES_MAX_BYTES - s_turn.pcm_bytes;
+        size_t got = room ? xStreamBufferReceive(s_in, s_hbuf + s_turn.pcm_bytes, room & ~(size_t)1, 0) : 0;
+        s_turn.pcm_bytes += got;
+        if (!s_turn.end_requested && s_turn.pcm_bytes < HERMES_MAX_BYTES) {
+            return;
+        }
+        mark(M_RELEASE);
+        if (s_turn.pcm_bytes < MIC_RATE * 2 * 3 / 10) {
+            turn_fail("DIDN'T CATCH THAT");
+            return;
+        }
+        ESP_LOGI(TAG, "hermes: sending %.2fs of speech", (double)s_turn.pcm_bytes / (MIC_RATE * 2));
+        mark(M_SENT);
+        hermes_request();
+    } else if (s_turn.phase == P_WAIT_REPLY) {
+        start_tts();
+        decode();
+        check_turn();
+    }
 }
 
 /* ---- Inbound dispatch ---- */
@@ -1890,6 +2316,14 @@ static void handle(const cmd_t &cmd)
         s_auto_next_us = 0;
         s_auto_backoff_us = AUTO_RETRY_MIN_US;
         break;
+    case CMD_AGENT:   /* Muse <-> Hermes: drop the Muse link, keep its VM details, reconnect on demand */
+        if (s_turn.phase != P_IDLE) {
+            turn_fail("SWITCHED AGENT");
+        }
+        disconnect("agent switch");
+        s_auto_next_us = 0;
+        s_auto_backoff_us = AUTO_RETRY_MIN_US;
+        break;
     case CMD_BEGIN:
         if (cmd.gen == s_gen.load()) {
             turn_begin(cmd.gen);
@@ -1907,7 +2341,9 @@ static void handle(const cmd_t &cmd)
         }
         break;
     case CMD_TEXT:
-        if (s_turn.phase != P_IDLE && !s_turn.text) {
+        if (hermes_mode()) {
+            muse_hatch_console("error", "HERMES: VOICE ONLY", nullptr);
+        } else if (s_turn.phase != P_IDLE && !s_turn.text) {
             muse_hatch_console("error", "BUSY WITH A VOICE TURN", nullptr);
         } else {
             text_begin(cmd.text);
@@ -1932,13 +2368,45 @@ static void hatch_task(void *arg)
         /* Resting, the socket's keepalive (PING_US) needs no quicker polls.
          * Resting unconnected, Wi-Fi may nap (muse_wifi_nap): wait for a
          * turn or for waking (CMD_WAKE) instead of watching it. */
-        int wait_ms = !s_connected ? (s_resting ? -1 : 200) : s_turn.phase != P_IDLE ? 2 : s_resting ? 500 : 20;
+        int wait_ms = hermes_mode() ? (s_turn.phase != P_IDLE ? 2 : 100)
+                    : !s_connected ? (s_resting ? -1 : 200) : s_turn.phase != P_IDLE ? 2 : s_resting ? 500 : 20;
         TickType_t wait = wait_ms < 0 ? portMAX_DELAY : pdMS_TO_TICKS(wait_ms);
         if (xQueueReceive(s_cmds, &cmd, wait) == pdTRUE) {
             handle(cmd);
             while (xQueueReceive(s_cmds, &cmd, 0) == pdTRUE) {
                 handle(cmd);
             }
+        }
+        if (hermes_mode()) {
+            /* Look up the Muse VM now, while there is RAM for the account API's TLS: later, with Hermes in use,
+             * it can't be done, and switching to Muse would find no credentials ("Can't reach Muse's server"). */
+            static int64_t s_vm_try_us;
+            if (!s_vm.vm_token && s_turn.phase == P_IDLE && muse_hatch_configured() && muse_wifi_connected() &&
+                now_us() >= s_vm_try_us) {
+                char err[48] = "";
+                bool got = resolve_vm(err, sizeof(err));
+                ESP_LOGI(TAG, "Muse VM lookup while on Hermes: %s (int free %uK)", got ? "ok" : err,
+                         (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+                s_vm_try_us = now_us() + 30 * 1000000LL;
+            }
+            hermes_step();
+            continue;
+        }
+        /* A network change (or loss) leaves the old socket dead without telling us: drop it now and
+         * reconnect as soon as Wi-Fi is back, rather than discovering it a turn or a minute later. */
+        static bool s_wifi_was = true;
+        bool wifi_now = muse_wifi_connected();
+        if (wifi_now != s_wifi_was) {
+            s_wifi_was = wifi_now;
+            ESP_LOGI(TAG, "Wi-Fi %s: %s the Muse link", wifi_now ? "joined" : "lost", s_connected ? "dropping" : "retrying");
+            if (s_turn.phase != P_IDLE) {
+                turn_fail("WI-FI CHANGED");
+            }
+            if (s_connected) {
+                disconnect("Wi-Fi changed");
+            }
+            s_auto_next_us = 0;
+            s_auto_backoff_us = AUTO_RETRY_MIN_US;
         }
         if (!s_connected) {
             if (!muse_wifi_connected()) {
@@ -2051,6 +2519,11 @@ extern "C" void muse_hatch_chat_connect(void)
     post(CMD_CONNECT, 0);
 }
 
+extern "C" void muse_hatch_chat_agent_changed(void)
+{
+    post(CMD_AGENT, 0);
+}
+
 extern "C" void muse_hatch_chat_forget(void)
 {
     post(CMD_FORGET, 0);
@@ -2058,6 +2531,9 @@ extern "C" void muse_hatch_chat_forget(void)
 
 extern "C" bool muse_hatch_ready(void)
 {
+    if (hermes_mode()) {
+        return s_cmds && muse_wifi_connected();
+    }
     return s_cmds && muse_hatch_configured() && muse_wifi_connected();
 }
 

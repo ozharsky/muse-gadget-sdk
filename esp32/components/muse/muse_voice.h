@@ -50,3 +50,6 @@ bool muse_voice_resting(void);
 /* Voice notes recorded out of Hatch's reach wait to go, the oldest from the
  * last half hour: worth keeping Wi-Fi up for. */
 bool muse_voice_notes_waiting(void);
+
+/* Forgets notes saved to send later (the agent was switched). */
+void muse_voice_drop_held(void);

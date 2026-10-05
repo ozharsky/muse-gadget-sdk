@@ -15,6 +15,7 @@
  */
 
 #include "muse_audio.h"
+#include "muse_voice_fx.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -275,9 +276,18 @@ esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
     bool mute = !muse_settings_speaker_on();
     while (frames) {
         size_t n = frames > MUSE_AUDIO_CHUNK ? MUSE_AUDIO_CHUNK : frames;
+        const int16_t *src = mono;
+#if CONFIG_MUSE_VOICE_FX
+        static int16_t s_fx[MUSE_AUDIO_CHUNK];
+        if (!mute && !(CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes())) {   /* Hermes: plain voice */
+            memcpy(s_fx, mono, n * sizeof(int16_t));
+            muse_voice_fx(s_fx, n);
+            src = s_fx;
+        }
+#endif
         for (size_t i = 0; i < n; i++) {
-            s_out_stereo[2 * i] = mute ? 0 : mono[i];
-            s_out_stereo[2 * i + 1] = mute ? 0 : mono[i];
+            s_out_stereo[2 * i] = mute ? 0 : src[i];
+            s_out_stereo[2 * i + 1] = mute ? 0 : src[i];
         }
         if (esp_codec_dev_write(s_spk, s_out_stereo, n * CHANNELS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
             return ESP_FAIL;

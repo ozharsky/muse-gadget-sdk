@@ -30,6 +30,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_battery.c"
         "muse_ui.c"
         "muse_audio.c"
+        "muse_voice_fx.c"
         "muse_pmu.c"
         "muse_input.c"
         "muse_menu.c"
@@ -55,13 +56,26 @@ if(CONFIG_MUSE_ENABLED)
     file(GLOB custom_avatar CONFIGURE_DEPENDS "${COMPONENT_DIR}/avatar/muse_pixel.c")
     if(custom_avatar)
         message(STATUS "Custom avatar: components/muse/avatar/muse_pixel.c")
-        list(APPEND srcs "avatar/muse_pixel.c")
+        # Both avatars are built: SHODAN for Muse, the stock one for Hermes. muse_pixel_switch.c picks.
+        list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_bloop.c" "avatar/muse_pixel_switch.c")
+        foreach(f "avatar/muse_pixel.c:shodan" "avatar/muse_pixel_bloop.c:stock")
+            string(REPLACE ":" ";" p "${f}")
+            list(GET p 0 file)
+            list(GET p 1 tag)
+            set(defs "")
+            foreach(fn accent set_size scale render react)
+                list(APPEND defs "muse_pixel_${fn}=${tag}_pixel_${fn}")
+            endforeach()
+            set_source_files_properties("${COMPONENT_DIR}/${file}" PROPERTIES COMPILE_DEFINITIONS "${defs}")
+        endforeach()
     else()
         list(APPEND srcs "../../avatar/muse_pixel.c")
     endif()
     if(CONFIG_MUSE_BOARD_WAVESHARE_S3_175C OR CONFIG_MUSE_BOARD_WAVESHARE_S3_175)
         # One driver: the 1.75 differs only in pins (its BSP's) and its PWR key.
         list(APPEND srcs "boards/board_waveshare_s3_175c.c" "boards/muse_lcd_bands.c")
+    elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_143C)
+        list(APPEND srcs "boards/board_waveshare_s3_143c.c" "boards/muse_lcd_bands.c")
     elseif(CONFIG_MUSE_BOARD_AIPI)
         list(APPEND srcs "boards/board_aipi.c")
     elseif(CONFIG_MUSE_BOARD_ESPRESSIF_BOX_3)
@@ -96,7 +110,7 @@ elseif(CONFIG_HOMEHUB_VOICE)
 endif()
 
 set(muse_priv_requires
-    esp_timer esp_driver_usb_serial_jtag esp_psram nvs_flash
+    esp_timer esp_netif esp_driver_usb_serial_jtag esp_psram nvs_flash
     bt esp-tls mbedtls esp_app_format esp_http_client
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi

@@ -94,6 +94,9 @@ typedef struct {
     bool low_memory;
     bool timed_out;
     bool scheme_changed;
+    // image_fetch_buffer(): the JPEG is already here (PSRAM, owned by the fetch), no download.
+    uint8_t *mem;
+    size_t mem_len, mem_pos;
     // JPEG output placement and one MCU converted for the panel.
     int x0, y0;
     uint16_t mcu[JPEG_MCU_PIXELS];
@@ -153,6 +156,14 @@ static int fetch_read(fetch_t *f, uint8_t *buf, size_t len) {
         buf[have++] = f->peek[0];
         f->peek[0] = f->peek[1];
         f->peek_len--;
+    }
+    if (f->mem) {
+        size_t n = f->mem_len - f->mem_pos < len - have ? f->mem_len - f->mem_pos : len - have;
+        memcpy(buf + have, f->mem + f->mem_pos, n);
+        f->mem_pos += n;
+        f->bytes += n;
+        if (f->mem_pos >= f->mem_len) f->eof = true;
+        return (int)(have + n);
     }
     while (have < len && !f->eof) {
         if (internal_free() < FETCH_FLOOR_BYTES) {
@@ -335,9 +346,9 @@ static void fetch_task(void *arg) {
         .event_handler = on_http_event,
         .user_data = f,
     };
-    f->http = esp_http_client_init(&cfg);
-    int status = 0;
-    esp_err_t err = f->http ? open_following_redirects(f, &status) : ESP_ERR_NO_MEM;
+    f->http = f->mem ? NULL : esp_http_client_init(&cfg);
+    int status = f->mem ? 200 : 0;
+    esp_err_t err = f->mem ? ESP_OK : f->http ? open_following_redirects(f, &status) : ESP_ERR_NO_MEM;
     log_memory("image download connected");
     char msg[64];
     if (f->scheme_changed) {
@@ -390,6 +401,7 @@ static void fetch_task(void *arg) {
     log_memory("image download end");
     f->done(&result, f->user);
     free(f->url);
+    free(f->mem);
     free(f);
     atomic_store(&s_busy, false);
     vTaskDelete(NULL);
@@ -461,6 +473,59 @@ bool image_fetch_start(const char *url, int row, image_fetch_done_cb done,
     return true;
 }
 
+// Draws a baseline JPEG that is already in memory (copied, so the caller may free it at once).
+// No download and no TLS, so it needs far less RAM than image_fetch_start() over HTTPS.
+bool image_fetch_buffer(const uint8_t *jpeg, size_t len, int row, image_fetch_done_cb done,
+                        void *user, const char **code, const char **message) {
+    int width, height;
+    if (!led_status_display_info(&width, &height)) {
+        *code = "unsupported";
+        *message = "no display";
+        return false;
+    }
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&s_busy, &expected, true)) {
+        *code = "busy";
+        *message = "another image is still drawing";
+        return false;
+    }
+    size_t need = FETCH_STACK_BYTES + FETCH_RESERVE_BYTES;
+    if (internal_free() < need || heap_caps_get_largest_free_block(BYTE_CAPS) < FETCH_STACK_BYTES) {
+        log_memory("image draw refused");
+        atomic_store(&s_busy, false);
+        *code = "out_of_memory";
+        *message = "not enough free memory to draw";
+        return false;
+    }
+    fetch_t *f = calloc(1, sizeof(*f));
+    uint8_t *copy = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (!f || !copy) {
+        free(f);
+        free(copy);
+        atomic_store(&s_busy, false);
+        *code = "out_of_memory";
+        *message = "failed to allocate";
+        return false;
+    }
+    memcpy(copy, jpeg, len);
+    f->mem = copy;
+    f->mem_len = len;
+    f->row = row;
+    f->done = done;
+    f->user = user;
+    f->width = width;
+    f->height = height;
+    if (xTaskCreate(fetch_task, "image", FETCH_STACK_BYTES, f, 4, NULL) != pdPASS) {
+        free(f->mem);
+        free(f);
+        atomic_store(&s_busy, false);
+        *code = "out_of_memory";
+        *message = "failed to start the draw task";
+        return false;
+    }
+    return true;
+}
+
 #else
 
 bool image_fetch_start(const char *url, int row, image_fetch_done_cb done,
@@ -469,6 +534,14 @@ bool image_fetch_start(const char *url, int row, image_fetch_done_cb done,
     (void)row;
     (void)done;
     (void)user;
+    *code = "unsupported";
+    *message = "no display";
+    return false;
+}
+
+bool image_fetch_buffer(const uint8_t *jpeg, size_t len, int row, image_fetch_done_cb done,
+                        void *user, const char **code, const char **message) {
+    (void)jpeg; (void)len; (void)row; (void)done; (void)user;
     *code = "unsupported";
     *message = "no display";
     return false;
