@@ -2414,6 +2414,7 @@ static void hermes_line(cJSON *j)
     char *image = cJSON_GetStringValue(cJSON_GetObjectItem(j, "image_b64"));
     if (reply && reply[0]) {
         s_hstream.got_reply = true;
+        muse_hatch_hermes_link_note(true);   /* the relay answered: Hermes is reachable */
         msg_t &m = s_turn.msgs[0];
         if (s_turn.nmsgs == 0) {   /* a reply with no TTS chunks (speaker off / synth failed) */
             m = msg_t{};
@@ -2612,6 +2613,9 @@ static void hermes_step(void)
         if (s_hstream.h) {
             if (!hermes_stream_pump()) {   /* the exchange is over (fine or failed) */
                 if (!s_hstream.got_reply && s_turn.gen == s_gen.load()) {
+                    /* The relay did not answer a Hermes turn: record the fault so the UI
+                     * can show Hermes's own link state (it is not Muse's problem). */
+                    muse_hatch_hermes_link_note(false);
                     turn_fail(s_hstream.got_heard ? "HERMES ERROR" : "CAN'T REACH HERMES");
                 }
             }
@@ -3636,4 +3640,36 @@ extern "C" size_t muse_hatch_mp3_selftest(int16_t **pcm_out)
     vTaskDeleteWithCaps(task);
     *pcm_out = st.pcm;
     return st.n;
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Hermes link health, for the UI. The two agents are independent transports: Hermes talks
+ * to the user's Mac relay, Muse to Meta's cloud. The status display used to show only
+ * MUSE's link, so a Muse outage read as "Can't connect" even while Hermes kept working
+ * (verified on hardware: a full Hermes turn ran with Muse offline). These let the UI show
+ * each link on its own; nothing here makes a network call -- it records what the turn path
+ * already saw, so the cost is zero when no Hermes turn is happening.
+ * ------------------------------------------------------------------------------------- */
+static volatile int s_hermes_link;          /* 0 unknown, 1 ok, 2 failed */
+static volatile int64_t s_hermes_ok_us;     /* when a Hermes reply last succeeded */
+
+extern "C" void muse_hatch_hermes_link_note(bool ok)
+{
+    s_hermes_link = ok ? 1 : 2;
+    if (ok) {
+        s_hermes_ok_us = esp_timer_get_time();
+    }
+}
+
+/* 0 = no Hermes configured / not the active agent, 1 = reachable, 2 = failed recently. */
+extern "C" int muse_hatch_hermes_link(void)
+{
+    if (!CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
+        return 0;
+    }
+    if (s_hermes_link == 2 && s_hermes_ok_us
+        && (esp_timer_get_time() - s_hermes_ok_us) > 10 * 60 * 1000000LL) {
+        return 1;   /* stale failure: stop reporting a fault we have not seen for 10 min */
+    }
+    return s_hermes_link;
 }

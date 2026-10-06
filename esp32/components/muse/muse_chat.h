@@ -79,6 +79,12 @@ void muse_hatch_set_resting(bool resting);
 /* Token set and Wi-Fi up: a press can start a turn. */
 bool muse_hatch_ready(void);
 
+/* Hermes link health for the UI: 0 = not configured / not the active agent, 1 = reachable,
+ * 2 = failed recently. Hermes talks to the Mac relay, Muse to the cloud, so this is shown
+ * separately -- a Muse outage must not read as "Hermes is down". */
+int muse_hatch_hermes_link(void);
+void muse_hatch_hermes_link_note(bool ok);
+
 /* Press: connects if needed and starts streaming speech to the VM. */
 void muse_hatch_turn_begin(void);
 /* The last reply's whole text (empty before the first), for the reading view. */

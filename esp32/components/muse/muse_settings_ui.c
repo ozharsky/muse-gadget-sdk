@@ -74,7 +74,7 @@ typedef struct {
 } page_t;
 
 /* Home values. */
-static lv_obj_t *s_home_agent, *s_home_wifi, *s_home_hatch, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
+static lv_obj_t *s_home_agent, *s_home_wifi, *s_home_hatch, *s_home_hermes, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
 
 /* Wi-Fi page. */
 static lv_obj_t *s_wifi_sw, *s_wifi_status, *s_wifi_saved, *s_wifi_scan_btn, *s_wifi_scan_lbl, *s_wifi_list;
@@ -1320,6 +1320,12 @@ static void build_home(lv_obj_t *tile)
     }
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
     row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
+    if (CONFIG_MUSE_HERMES_URL[0]) {
+        /* Hermes is a separate transport (the Mac relay); show its link on its own row so a
+         * Muse outage never reads as "Hermes is down". No navigation: there is nothing to
+         * configure here -- the relay address is a build setting. */
+        row(list, LV_SYMBOL_UPLOAD, "Hermes", &s_home_hermes, NULL, NULL);
+    }
     row(list, LV_SYMBOL_BLUETOOTH, "Bluetooth", &s_home_ble, on_nav, (void *)&BLE);
     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);
     row(list, LV_SYMBOL_EYE_CLOSE, "Sleep", &s_home_sleep, on_nav, (void *)&SLEEP);
@@ -1342,6 +1348,15 @@ static void tick_home(void)
     muse_hatch_status_t h;
     muse_hatch_status(&h);
     set_text(s_home_hatch, muse_hatch_state_name(h.state));
+    if (s_home_hermes) {
+        /* Hermes's own link, independent of Muse's. "Idle" until a turn has run, since the
+         * firmware only learns the relay's state from actual turns (no polling). */
+        switch (muse_hatch_hermes_link()) {
+        case 1: set_text(s_home_hermes, "Connected"); break;
+        case 2: set_text(s_home_hermes, "Can't reach"); break;
+        default: set_text(s_home_hermes, muse_settings_agent_hermes() ? "Ready" : "Not active"); break;
+        }
+    }
 
     muse_ble_status_t b;
     muse_ble_status(&b);

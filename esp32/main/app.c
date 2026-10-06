@@ -55,6 +55,7 @@
 #include "image_fetch.h"
 #if CONFIG_HOMEHUB_LED_BACKEND_MUSE
 #include "muse_ui.h"
+#include "muse_settings.h"   /* muse_settings_agent_hermes(): is the active agent Hermes? */
 #endif
 #include "noise_tunnel.h"
 #include "led_status.h"
@@ -2870,7 +2871,17 @@ void app_run(void) {
                 if (connected) {
                     ui_set_status("auth_ok");
                     led_status_set_state(LED_STATE_AUTH_OK);
+                } else if (muse_settings_agent_hermes() && CONFIG_MUSE_HERMES_URL[0]) {
+                    // The Muse VM fetch failed, but the ACTIVE agent is Hermes, whose
+                    // transport is the Mac relay and needs no Muse credential. Reporting a
+                    // device-level failure here is what made a Muse outage look like
+                    // "Hermes is down". Stay usable; the Muse reconnect keeps retrying in
+                    // the background, and settings shows each link separately.
+                    ESP_LOGW(TAG, "Muse VM unavailable at boot; staying up for Hermes (relay path)");
+                    ui_set_status("hermes_only");
                 } else {
+                    // Either the device is on the Muse agent (which does need the VM), or
+                    // Hermes is not configured. A real failure for the active agent.
                     ui_set_status("auth_failed");
                     led_status_set_state(LED_STATE_ERROR);
                 }
