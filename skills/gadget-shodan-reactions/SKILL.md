@@ -66,6 +66,7 @@ It can also fail, and you must handle that gracefully:
 
 Guidelines:
 
+- **Approvals and permissions: ALWAYS use this command with the buttons `Approve` and `Deny`** (add a third, specific option only when it is genuinely useful, e.g. `Approve` / `Deny` / `Edit first`). Never ask for approval in plain text — the user taps the button on the gadget, or says "approve"/"deny" out loud.
 - Use it only for **short pick-one or yes/no questions** where tapping is easier than talking: choosing between a few options, confirming an action, picking a time.
 - Do not use it for long or open questions, or for anything sensitive. The text appears on a screen others may see.
 - Keep each option a few words. Labels longer than about 28 characters are rejected.
