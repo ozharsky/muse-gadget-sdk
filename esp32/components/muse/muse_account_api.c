@@ -111,6 +111,8 @@ int muse_hatch_api_find_vm(const char *device_token, const char *want_vm, muse_h
         return MUSE_HATCH_API_FAILED;
     }
     snprintf(auth, auth_len, "Bearer %s", device_token);
+    ESP_LOGI(TAG, "find_vm: token_len=%d prefix=%.5s", (int)strlen(device_token),
+             strlen(device_token) > 5 ? device_token : "short");
 
     int status = 0;
     for (int i = 0; i < ATTEMPTS; i++) {

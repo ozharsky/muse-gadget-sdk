@@ -374,6 +374,10 @@ static bool op_talk_press(void) {
     return app_confirm_pairing_press();
 }
 
+static int op_vm_bearer(char *out, size_t cap) {
+    return app_chat_bearer(out, cap);
+}
+
 static void op_reset_setup(void) {
     ESP_LOGW(TAG, "setup reset from Muse");
     app_reset_setup_async();
@@ -393,6 +397,7 @@ static const muse_link_ops_t s_ops = {
     .hatch_vm = op_hatch_vm,
     .talk_press = op_talk_press,
     .reset_setup = op_reset_setup,
+    .vm_bearer = op_vm_bearer,
     .req_ready = noise_ctrl_is_connected,
     .req_open = noise_ctrl_req_open,
     .req_send = noise_ctrl_req_send,

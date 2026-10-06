@@ -799,6 +799,25 @@ static bool resolve_vm(char *err, size_t err_cap)
         free(token);
         return true;
     }
+    /* The hatch slot may hold an identity-class token (the pairing's SDK token), which the
+     * account API refuses as a Bearer. The pairing ALSO delivered the real access token —
+     * the app layer stores + refreshes it: ask there once before giving up. */
+    if (rc == MUSE_HATCH_API_AUTH) {
+        char *bearer = static_cast<char *>(malloc(MUSE_TOKEN_MAX + 1));
+        if (bearer) {
+            int n = muse_link_vm_bearer(bearer, MUSE_TOKEN_MAX + 1);
+            if (n > 0) {
+                rc = muse_hatch_api_find_vm(bearer, want, &s_vm);
+                if (rc == 0) {
+                    ESP_LOGI(TAG, "VM %s (%s) via the app-layer bearer", s_vm.vm_id, s_vm.vm_name);
+                    free(bearer);
+                    free(token);
+                    return true;
+                }
+            }
+            free(bearer);
+        }
+    }
     if (want[0]) {
         /* Not a device token (or the API is down): try it as the VM's own token. */
         ESP_LOGW(TAG, "account API %s; using the token for VM %s directly",

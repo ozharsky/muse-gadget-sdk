@@ -71,6 +71,11 @@ bool muse_link_hatch_vm(const char *want_vm, char *vm_id, size_t id_cap, char *v
     return s_ops && s_ops->hatch_vm && s_ops->hatch_vm(want_vm, vm_id, id_cap, vm_name, name_cap, vm_token);
 }
 
+int muse_link_vm_bearer(char *out, size_t cap)
+{
+    return s_ops && s_ops->vm_bearer ? s_ops->vm_bearer(out, cap) : -1;
+}
+
 bool muse_link_talk_press(void)
 {
     return s_ops && s_ops->talk_press && s_ops->talk_press();

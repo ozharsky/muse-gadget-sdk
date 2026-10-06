@@ -786,6 +786,9 @@ static bool accept_pairing_credentials(const char *access_token,
                                        const char *refresh_token,
                                        const char *username) {
     if (!access_token || !*access_token) return false;
+    ESP_LOGI("link.app", "pairing creds: access len %d, refresh len %d, user '%s'",
+             (int)strlen(access_token), (int)(refresh_token ? strlen(refresh_token) : 0),
+             username ? username : "");
     auth_lock_take();
     bool ok = false;
     if (refresh_token && *refresh_token) {
@@ -938,6 +941,24 @@ done:
         defer_token_revocation_reset();
     }
     return ok;
+}
+
+/* The Muse chat component's session asks for its bearer here: the provisioned access
+ * token, ensured ready first (the refresh carries the SDK token, which is what binds the
+ * device to the account server-side). Length or -1. */
+int app_chat_bearer(char *out, size_t cap) {
+    if (!out || cap == 0) return -1;
+    if (!config_is_provisioned()) return -1;
+    if (!operation_gate_take(pdMS_TO_TICKS(15000), "chat bearer")) return -1;
+    bool ok = ensure_access_token_ready_with_gate_held(false, true);
+    char *access = ok ? load_token_unlocked("access_token") : NULL;
+    operation_gate_give();
+    if (!access) return -1;
+    size_t n = strlen(access);
+    if (n >= cap) { free(access); return -1; }
+    memcpy(out, access, n + 1);
+    free(access);
+    return (int)n;
 }
 
 static int fetch_vms_with_refresh_with_gate_held(vm_info_t *vms, int max) {

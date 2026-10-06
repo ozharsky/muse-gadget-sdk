@@ -65,4 +65,7 @@ void app_reset_setup_async(void);
 // for the preferred VM). *vm_token is heap; free() it.
 bool app_hatch_vm_credentials(const char *want_vm, char *vm_id, size_t id_cap,
                               char *vm_name, size_t name_cap, char **vm_token);
+/* The Muse chat component's bearer: the provisioned access token (freshened on refusal).
+ * Length stored, -1 if unavailable. */
+int app_chat_bearer(char *out, size_t cap);
 #endif
