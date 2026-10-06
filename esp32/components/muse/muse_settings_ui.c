@@ -51,9 +51,9 @@
 #define COLOR_CARD 0x0e2016
 #define COLOR_CARD_PRESSED 0x1d4a2c
 #define COLOR_ACCENT 0x4dff3c
-#define COLOR_OK 0x6ff0bf
-#define COLOR_WARN 0xffb45c
-#define COLOR_DANGER 0xff5c5c
+#define COLOR_OK 0x4dff3c      /* one green, same as the main screen's connected state */
+#define COLOR_WARN 0xffb45c    /* connecting: amber, as on the main screen */
+#define COLOR_DANGER 0xff5c5c  /* failed / destructive */
 
 typedef void (*text_done_cb_t)(const char *text);
 
@@ -319,7 +319,7 @@ static lv_obj_t *slider(lv_obj_t *list, const char *text, int lo, int hi, int va
     lv_obj_align(s, LV_ALIGN_TOP_MID, 0, 40);
     lv_slider_set_range(s, lo, hi);
     lv_slider_set_value(s, value, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s, lv_color_hex(0x2a2345), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s, lv_color_hex(0x1a3a24), LV_PART_MAIN);
     lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_TEXT), LV_PART_KNOB);
     lv_obj_set_style_pad_all(s, 6, LV_PART_KNOB);
@@ -802,8 +802,11 @@ static void tick_wifi(void)
         break;
     }
     set_text(s_wifi_status, buf);
-    lv_obj_set_style_text_color(s_wifi_status, lv_color_hex(w.state == MUSE_WIFI_CONNECTED ? COLOR_OK :
-                                                            w.state == MUSE_WIFI_FAILED ? COLOR_WARN : COLOR_DIM), 0);
+    lv_obj_set_style_text_color(s_wifi_status, lv_color_hex(
+        w.state == MUSE_WIFI_CONNECTED ? COLOR_OK
+        : w.state == MUSE_WIFI_FAILED ? COLOR_DANGER
+        : w.state == MUSE_WIFI_OFF || w.state == MUSE_WIFI_NO_NETWORK || w.state == MUSE_WIFI_NOT_NEARBY ? COLOR_DIM
+        : COLOR_WARN), 0);
 
     bool on = w.state != MUSE_WIFI_OFF;
     if (on != lv_obj_has_state(s_wifi_sw, LV_STATE_CHECKED)) {
@@ -908,7 +911,7 @@ static void tick_hatch(void)
     snprintf(buf, sizeof(buf), "%s\n%s", muse_hatch_state_name(h.state), h.detail);
     set_text(s_hatch_status, buf);
     lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
-                                                             h.state == MUSE_HATCH_UNREACHABLE ? COLOR_WARN : COLOR_DIM), 0);
+                                                             h.state == MUSE_HATCH_UNREACHABLE ? COLOR_DANGER : COLOR_DIM), 0);
 
     char host[MUSE_HOST_MAX + 1], vm[MUSE_VM_MAX + 1];
     muse_settings_hatch_host(host);
@@ -1037,7 +1040,7 @@ static void build_sound_page(lv_obj_t *tile)
     lv_obj_set_size(s_mic_bar, lv_pct(94), 10);
     lv_obj_align(s_mic_bar, LV_ALIGN_TOP_MID, 0, 26);
     lv_bar_set_range(s_mic_bar, 0, 60);   /* -70..-10 dBFS */
-    lv_obj_set_style_bg_color(s_mic_bar, lv_color_hex(0x2a2345), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_mic_bar, lv_color_hex(0x1a3a24), LV_PART_MAIN);
     lv_obj_set_style_anim_duration(s_mic_bar, 80, 0);
     note(list, "Talk at arm's length: the bar should reach green (-30 to -15 dBFS) without going orange.");
 

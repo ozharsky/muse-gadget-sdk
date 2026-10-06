@@ -19,10 +19,10 @@
 #include <ctype.h>
 #include <string.h>
 
-#define COLOR_TEXT 0xf2efff
-#define COLOR_CARD 0x1a1530
-#define COLOR_CARD_PRESSED 0x2e2552
-#define COLOR_ACCENT 0xa77dff
+#define COLOR_TEXT 0xe8fff0
+#define COLOR_CARD 0x0e2016
+#define COLOR_CARD_PRESSED 0x1d4a2c
+#define COLOR_ACCENT 0x4dff3c
 
 #define TAP_MS 1000    /* a second tap on the same key within this steps to its next character */
 #define HOLD_MS 600    /* holding a letter key this long types its digit */

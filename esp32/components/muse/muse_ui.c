@@ -76,6 +76,14 @@ static const char *TAG = "muse_ui";
 #define COLOR_LIT 0xe8fff0
 #define SETTINGS_TICK_S 0.25f
 
+/* Connection-status palette: one color per meaning, everywhere. These NEVER take the avatar
+ * accent — the accent changes with the agent and the mode (orange for the golem, green for
+ * SHODAN, cyan while listening, ...), which made the link indicator look inconsistent. */
+#define COLOR_ST_OK 0x4dff3c      /* connected / reachable */
+#define COLOR_ST_WORKING 0xffb45c /* connecting / reconnecting / joining: amber */
+#define COLOR_ST_FAULT 0xff5c5c   /* failed / unreachable */
+#define COLOR_ST_OFF 0x5fa070     /* off / not paired: dim */
+
 /* Text on 128 px screens, as in the button menu (muse_menu.c). */
 #if LV_FONT_MONTSERRAT_12
 #define FONT_COMPACT (&lv_font_montserrat_12)
@@ -134,6 +142,7 @@ static volatile int64_t s_last_frame_us;   /* when the UI task last ran a frame:
 
 static float s_level;
 static int s_shown_state = -1;
+static uint32_t s_shown_wifi_color, s_shown_ble_color, s_shown_word_color;
 static const char *s_shown_name;
 static const char *s_idle_name = "ONLINE";   /* idle's label: set by the Wi-Fi state */
 static int s_shown_lit = -1;
@@ -1340,7 +1349,7 @@ static void build_overlays(void)
     s_camera_hint = lv_btn_create(scr);
     lv_obj_set_size(s_camera_hint, 244, 46);
     lv_obj_align(s_camera_hint, LV_ALIGN_BOTTOM_MID, 0, -20);
-    lv_obj_set_style_bg_color(s_camera_hint, lv_color_hex(0x201a35), 0);
+    lv_obj_set_style_bg_color(s_camera_hint, lv_color_hex(0x0e2016), 0);
     lv_obj_set_style_bg_opa(s_camera_hint, LV_OPA_90, 0);
     lv_obj_set_style_border_color(s_camera_hint, lv_color_hex(COLOR_ACCENT), 0);
     lv_obj_set_style_border_width(s_camera_hint, 2, 0);
@@ -1365,7 +1374,7 @@ static void build_overlays(void)
     lv_obj_set_style_pad_row(s_pair, s_small ? 4 : 10, 0);
     lv_obj_set_style_radius(s_pair, s_small ? 10 : 24, 0);
     lv_obj_set_style_bg_opa(s_pair, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_pair, lv_color_hex(0x1a1530), 0);
+    lv_obj_set_style_bg_color(s_pair, lv_color_hex(0x0e2016), 0);
     lv_obj_set_style_border_color(s_pair, lv_color_hex(COLOR_ACCENT), 0);
     lv_obj_set_style_border_width(s_pair, 2, 0);
     lv_obj_remove_flag(s_pair, LV_OBJ_FLAG_SCROLLABLE);
@@ -1504,13 +1513,21 @@ static void update_chrome(float now)
         muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
     }
 
-    /* Joining, the icon blinks: the compact layout has no state label. */
+    /* Joining, the icon blinks: the compact layout has no state label. The icon's COLOR
+     * states the link at a glance, in the shared connection palette (never the avatar's
+     * accent — that one changes with agent and mode and made this look inconsistent). */
     muse_wifi_status_t w;
     muse_wifi_status(&w);
     bool joining = w.state == MUSE_WIFI_CONNECTING || w.state == MUSE_WIFI_FAILED;
     const char *wifi = w.state == MUSE_WIFI_CONNECTED || (joining && (int)(now * 2) % 2 == 0) ? LV_SYMBOL_WIFI : "";
-    if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0) {
+    uint32_t wifi_color = w.state == MUSE_WIFI_CONNECTED ? COLOR_ST_OK
+                        : w.state == MUSE_WIFI_FAILED ? COLOR_ST_FAULT
+                        : joining ? COLOR_ST_WORKING
+                        : COLOR_ST_OFF;
+    if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0 || wifi_color != s_shown_wifi_color) {
         lv_label_set_text(s_wifi_icon, wifi);
+        lv_obj_set_style_text_color(s_wifi_icon, lv_color_hex(wifi_color), 0);
+        s_shown_wifi_color = wifi_color;
     }
     s_idle_name = idle_name(w.state);
     if (w.state == MUSE_WIFI_CONNECTED && !s_sntp_started) {
@@ -1519,9 +1536,15 @@ static void update_chrome(float now)
     muse_ble_status_t b;
     muse_ble_status(&b);
     const char *ble = b.state != MUSE_BLE_OFF ? LV_SYMBOL_BLUETOOTH : "";
-    if (strcmp(ble, lv_label_get_text(s_ble_icon)) != 0) {
+    uint32_t ble_color = b.state == MUSE_BLE_CONNECTED ? COLOR_ST_OK
+                       : b.state != MUSE_BLE_OFF ? COLOR_ST_WORKING
+                       : COLOR_ST_OFF;
+    /* The color follows the STATE, not the text: an unpaired-but-advertising gadget kept
+     * the old connected green because the glyph itself had not changed. */
+    if (strcmp(ble, lv_label_get_text(s_ble_icon)) != 0 || ble_color != s_shown_ble_color) {
         lv_label_set_text(s_ble_icon, ble);
-        lv_obj_set_style_text_color(s_ble_icon, lv_color_hex(b.state == MUSE_BLE_CONNECTED ? COLOR_ACCENT : COLOR_DIM), 0);
+        lv_obj_set_style_text_color(s_ble_icon, lv_color_hex(ble_color), 0);
+        s_shown_ble_color = ble_color;
     }
 
     /* Paired, the name has done its job (picking this one out in the Muse
@@ -1739,7 +1762,19 @@ static void update_status(muse_mode_t mode, float now)
         s_shown_name = name;
     }
     if ((int)mode != s_shown_state) {
-        lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(accent), 0);
+        /* Idle's word tells the LINK ("ONLINE"), so it takes the connection palette; the
+         * other words describe what the avatar is doing, so they keep its state accent. */
+        uint32_t word_color = accent;
+        if (mode == MUSE_MODE_IDLE) {
+            muse_wifi_status_t ws;
+            muse_wifi_status(&ws);
+            word_color = ws.state == MUSE_WIFI_CONNECTED ? COLOR_ST_OK
+                       : ws.state == MUSE_WIFI_FAILED ? COLOR_ST_FAULT
+                       : ws.state == MUSE_WIFI_OFF ? COLOR_ST_OFF
+                       : COLOR_ST_WORKING;
+        }
+        lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(word_color), 0);
+        s_shown_word_color = word_color;
         if (s_ring) {
             lv_obj_set_style_arc_color(s_ring, lv_color_hex(accent), LV_PART_INDICATOR);
         } else {
@@ -1751,6 +1786,19 @@ static void update_status(muse_mode_t mode, float now)
         }
         s_shown_state = (int)mode;
         s_shown_lit = -1;
+    } else if (mode == MUSE_MODE_IDLE) {
+        /* Same mode, but the LINK can still change under the word (ONLINE -> RELINKING ->
+         * NO NETWORK): recolor it so the idle word keeps telling the truth. */
+        muse_wifi_status_t ws;
+        muse_wifi_status(&ws);
+        uint32_t word_color = ws.state == MUSE_WIFI_CONNECTED ? COLOR_ST_OK
+                            : ws.state == MUSE_WIFI_FAILED ? COLOR_ST_FAULT
+                            : ws.state == MUSE_WIFI_OFF ? COLOR_ST_OFF
+                            : COLOR_ST_WORKING;
+        if (word_color != s_shown_word_color) {
+            lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(word_color), 0);
+            s_shown_word_color = word_color;
+        }
     }
 
     /* Ring: phase progress while listening/speaking, a spinner while thinking. */
