@@ -1893,8 +1893,22 @@ static void stall_check(void *arg)
         return;
     }
     int64_t stall = now - s_last_frame_us;
-    if (stall > 20 * 1000000LL && !muse_settings_ble_on()) {
-        ESP_LOGE(TAG, "UI task stalled for 20 s: aborting for a core dump");
+    /* BLE pairing may stall frames ~10 s (a display-pause pause that recovers) and the
+     * unpair reset holds the display lock for a while more; a stall that starts within a
+     * minute of BLE activity gets a grace window before the abort instead of killing a
+     * pairing session mid-handshake (the server then marks the node unpaired and the
+     * token never lands). */
+    static int64_t s_ble_seen_us = -(1LL << 60);
+    {
+        muse_ble_status_t b;
+        muse_ble_status(&b);
+        if (b.state != MUSE_BLE_OFF) {
+            s_ble_seen_us = now;
+        }
+    }
+    bool ble_recent = (now - s_ble_seen_us) < 60 * 1000000LL;
+    if (stall > (ble_recent ? 60 : 20) * 1000000LL && !muse_settings_ble_on()) {
+        ESP_LOGE(TAG, "UI task stalled for %d s: aborting for a core dump", (int)(stall / 1000000LL));
         abort();
     } else if (stall > 5 * 1000000LL) {
         static int64_t s_warned_us;

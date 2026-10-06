@@ -125,8 +125,14 @@ static void power_off(void)
     muse_state_set_caption("GOODBYE!");
     vTaskDelay(pdMS_TO_TICKS(GOODBYE_MS));
     esp_err_t err = muse_board->power_off();
-    /* Only reached if the board couldn't power off. */
     vTaskDelay(pdMS_TO_TICKS(500));
+    if (err == ESP_OK) {
+        /* This board returns from power-off: the physical PWR button owns real power
+         * (hardware-only, the firmware can't read it). The screen is asleep; say so. */
+        muse_state_set_mode(MUSE_MODE_IDLE);
+        muse_state_set_caption("USE THE POWER BUTTON");
+        return;
+    }
     ESP_LOGE(TAG, "power-off failed (%s)", esp_err_to_name(err));
     muse_state_set_mode(MUSE_MODE_IDLE);
     muse_state_set_caption("COULDN'T POWER OFF");
