@@ -136,6 +136,8 @@ size_t muse_hatch_turn_audio_wait(const int16_t *pcm, size_t frames, int wait_ms
  */
 void muse_hatch_text_turn(char *text);
 void muse_hatch_text_cancel(void);
+/* Turns relay task auto-polling/injection on or off at runtime (bench: "task.auto off"). */
+void muse_hatch_task_auto(bool on);
 
 /*
  * Prints one "@chat" line per call (more if `text` is long): the type, then the

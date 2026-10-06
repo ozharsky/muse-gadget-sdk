@@ -732,6 +732,17 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+    if (!strncmp(line, "task.auto", 9) && (line[9] == '\0' || line[9] == ' ')) {
+        const char *v = line + 9;
+        while (*v == ' ') {
+            v++;
+        }
+        bool on = strcmp(v, "off") != 0;   /* "off" -> false; bare or "on" -> true */
+        muse_hatch_task_auto(on);
+        printf("@task.auto %s\n", on ? "on" : "off");
+        fflush(stdout);
+        return true;
+    }
     if (!strncmp(line, "react=", 6)) {
         printf("@react %s %s\n", line + 6, muse_ui_react(line + 6) ? "ok" : "unknown");
         fflush(stdout);

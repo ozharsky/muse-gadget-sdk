@@ -70,6 +70,7 @@ extern "C" {
 #include "muse_account_api.h"
 #include "muse_link.h"
 #include "muse_settings.h"
+#include "muse_state.h"
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -1793,6 +1794,103 @@ static void last_reply_add(int msg_index, const char *text)
     strlcat(store, text, LAST_REPLY_MAX);
 }
 
+/* ---- Relay tasks: [task:<agent> ...] tags in a reply ----
+ *
+ * An agent hands work to the other one with a [task:hermes ...] / [task:muse ...]
+ * tag in its reply. The tag is pulled out before the reply is spoken or captioned
+ * (strip_reply_tags, called from the main loop right before start_tts) and the
+ * extracted task is posted back to the relay from task_tick(). A reply with no
+ * tag is fine. The reply text is what this fixes; the relay must keep the tag out
+ * of the speech it synthesizes (the firmware plays relay-made MP3, so it can't
+ * un-say a tag that was already spoken). */
+struct rel_task_t {
+    char id[96];
+    char to[16];
+    char text[1024];
+    char chain[160];
+    char from[64];
+    int hops;
+    bool valid;
+};
+
+/* The first tag found in the current reply, waiting for task_tick() to post it. */
+static EXT_RAM_BSS_ATTR rel_task_t s_reply_task;
+
+/* Removes every [task:<agent> <body>] tag from `text` in place and records the
+ * first in s_reply_task. Returns true if one was found. */
+static bool strip_task_tags(char *text)
+{
+    bool found = false;
+    char *w = text;
+    for (char *r = text; *r;) {
+        if (!strncmp(r, "[task:", 6)) {
+            const char *agent = nullptr;
+            char *p = r + 6;
+            if (!strncmp(p, "hermes", 6)) {
+                agent = "hermes";
+                p += 6;
+            } else if (!strncmp(p, "muse", 4)) {
+                agent = "muse";
+                p += 4;
+            }
+            char *ws = p;
+            while (*ws == ' ' || *ws == '\t') {
+                ws++;
+            }
+            char *end = (ws != p) ? strchr(ws, ']') : nullptr;
+            if (end && end > ws) {   /* \s+ then a non-empty body */
+                if (!found) {
+                    s_reply_task.valid = true;
+                    strlcpy(s_reply_task.to, agent, sizeof(s_reply_task.to));
+                    size_t n = (size_t)(end - ws);
+                    if (n >= sizeof(s_reply_task.text)) {
+                        n = sizeof(s_reply_task.text) - 1;
+                    }
+                    memcpy(s_reply_task.text, ws, n);
+                    s_reply_task.text[n] = '\0';
+                } else {
+                    ESP_LOGI(TAG, "task: extra [task:%s ...] tag in one reply ignored", agent);
+                }
+                found = true;
+                r = end + 1;
+                while (*r == ' ') {
+                    r++;   /* swallow the gap the tag left behind */
+                }
+                continue;
+            }
+        }
+        *w++ = *r++;
+    }
+    *w = '\0';
+    if (found) {
+        while (w > text && (w[-1] == ' ' || w[-1] == '\t')) {
+            *--w = '\0';   /* a tag removed from the end: don't leave the gap */
+        }
+    }
+    return found;
+}
+
+/* Strips task tags from every reply message of the current turn, before speech. */
+static void strip_reply_tags(void)
+{
+    if (!s_turn.texts) {
+        return;
+    }
+    for (int i = 0; i < s_turn.nmsgs; i++) {
+        char *t = s_turn.texts + i * TEXT_MAX;
+        if (!t[0]) {
+            continue;
+        }
+        size_t before = s_turn.msgs[i].len;
+        if (strip_task_tags(t)) {
+            s_turn.msgs[i].len = (uint32_t)strlen(t);
+            ESP_LOGI(TAG, "task: stripped tag from reply (msg %d: %u -> %u chars)", i,
+                     (unsigned)before, (unsigned)s_turn.msgs[i].len);
+        }
+        (void)before;   /* used only by the log above (compiled out on host) */
+    }
+}
+
 static void start_tts(void)
 {
     if (s_turn.tts_msg >= 0) {
@@ -2401,6 +2499,7 @@ static void hermes_step(void)
                 }
             }
         }
+        strip_reply_tags();   /* never speak a [task:...] tag */
         start_tts();
         decode();
         check_turn();
@@ -2663,6 +2762,236 @@ static void handle(const cmd_t &cmd)
     }
 }
 
+/* ---- Relay tasks: pick up queued work and post tagged work back ----
+ *
+ * Every TASK_POLL_US, when the session is idle (a live turn holds the relay
+ * connection), the agent is Hermes, Wi-Fi is up, the screen is awake and the
+ * relay is configured, the gadget GETs its queue and injects the first ready
+ * task as a normal typed turn. A turn with a [task:<agent> ...] tag in its reply
+ * has the tag stripped (strip_reply_tags, pre-speech) and the task posted back
+ * with the hop count bumped. The whole feature is behind s_task_auto (off with
+ * the console's "task.auto off"), and every network call runs on the session
+ * task so the reply/TTS path is untouched. */
+#define TASK_POLL_US (15 * 1000000LL)
+
+static bool s_task_auto = true;          /* runtime guard: no reflash to turn it off */
+static int64_t s_task_poll_us;           /* when the queue may next be polled */
+
+/* The relay's base URL, the remote address when home is unreachable (TLS bundle). */
+static const char *task_relay_url(bool *remote)
+{
+    *remote = false;
+    if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
+        *remote = true;
+        return CONFIG_MUSE_HERMES_URL_REMOTE;
+    }
+    return CONFIG_MUSE_HERMES_URL;
+}
+
+/* GET /tasks?to=<agent>&status=ready -> the first ready task, or false. */
+static bool poll_task(const char *agent, rel_task_t *out)
+{
+    out->valid = false;
+    char url[192];
+    snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready", CONFIG_MUSE_HERMES_URL, agent);
+    bool remote = false;
+    if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
+        remote = true;
+        snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready", CONFIG_MUSE_HERMES_URL_REMOTE, agent);
+    }
+    const size_t CAP = 16 * 1024;
+    char *resp = static_cast<char *>(psram_alloc(CAP));
+    if (!resp) {
+        return false;
+    }
+    tts_buf_t buf = { resp, 0, CAP - 1, false };
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_GET;
+    cfg.timeout_ms = 8000;
+    cfg.event_handler = tts_http_evt;
+    cfg.user_data = &buf;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) {
+        heap_caps_free(resp);
+        return false;
+    }
+    esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+    esp_err_t err = esp_http_client_perform(h);
+    int status = esp_http_client_get_status_code(h);
+    esp_http_client_cleanup(h);
+    bool ok = false;
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "task: GET /tasks failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+    } else {
+        resp[buf.len] = '\0';
+        cJSON *root = cJSON_Parse(resp);
+        cJSON *tasks = root ? cJSON_GetObjectItem(root, "tasks") : nullptr;
+        cJSON *first = cJSON_IsArray(tasks) ? cJSON_GetArrayItem(tasks, 0) : nullptr;
+        if (cJSON_IsObject(first)) {
+            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(first, "id"));
+            const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(first, "text"));
+            const char *chain = cJSON_GetStringValue(cJSON_GetObjectItem(first, "chain"));
+            const char *from = cJSON_GetStringValue(cJSON_GetObjectItem(first, "from"));
+            cJSON *hops = cJSON_GetObjectItem(first, "hops");
+            if (id && id[0] && text && text[0]) {
+                strlcpy(out->id, id, sizeof(out->id));
+                strlcpy(out->text, text, sizeof(out->text));
+                strlcpy(out->chain, chain ? chain : "", sizeof(out->chain));
+                strlcpy(out->from, from ? from : "", sizeof(out->from));
+                out->hops = cJSON_IsNumber(hops) ? hops->valueint : 0;
+                out->valid = true;
+                ok = true;
+            }
+        }
+        cJSON_Delete(root);
+    }
+    heap_caps_free(resp);
+    return ok;
+}
+
+/* POST /task/take {id}: claims the task so the relay doesn't hand it out again. */
+static void task_take(const char *id)
+{
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return;
+    }
+    cJSON_AddStringToObject(body, "id", id);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        return;
+    }
+    char url[160];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/task/take", task_relay_url(&remote));
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 8000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (h) {
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_post_field(h, json, strlen(json));
+        esp_err_t err = esp_http_client_perform(h);
+        int status = esp_http_client_get_status_code(h);
+        esp_http_client_cleanup(h);
+        if (err != ESP_OK || status != 200) {
+            ESP_LOGW(TAG, "task: POST /task/take failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+        }
+    }
+    cJSON_free(json);
+}
+
+/* POST /task: hands the other agent a task from a reply's [task:...] tag. */
+static void task_post(const rel_task_t *t)
+{
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return;
+    }
+    char from[32];
+    strlcpy(from, muse_settings_agent_hermes() ? "hermes" : "muse", sizeof(from));
+    cJSON_AddStringToObject(body, "to", t->to);
+    cJSON_AddStringToObject(body, "text", t->text);
+    cJSON_AddNumberToObject(body, "hops", t->hops + 1);
+    cJSON_AddStringToObject(body, "chain", t->chain);
+    cJSON_AddStringToObject(body, "from", from);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        return;
+    }
+    char url[160];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/task", task_relay_url(&remote));
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 8000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (h) {
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_post_field(h, json, strlen(json));
+        esp_err_t err = esp_http_client_perform(h);
+        int status = esp_http_client_get_status_code(h);
+        esp_http_client_cleanup(h);
+        if (err != ESP_OK || status != 200) {
+            ESP_LOGW(TAG, "task: POST /task failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+        } else {
+            ESP_LOGI(TAG, "task: posted to %s (hops %d)", t->to, t->hops + 1);
+        }
+    }
+    cJSON_free(json);
+}
+
+/* The agent this gadget is, for the queue query. */
+static const char *task_agent(void)
+{
+    return muse_settings_agent_hermes() ? "hermes" : "muse";
+}
+
+/* Posts a reply's extracted task, if the tag produced one. Clears it either way. */
+static void task_flush_reply(void)
+{
+    if (s_reply_task.valid) {
+        if (s_reply_task.text[0]) {
+            task_post(&s_reply_task);
+        } else {
+            ESP_LOGW(TAG, "task: [task:%s ...] tag had no text; not posted", s_reply_task.to);
+        }
+        s_reply_task.valid = false;
+    }
+}
+
+/* One poll tick: only idle, awake, un-resting, and past the cadence. */
+static void task_tick(void)
+{
+    if (!s_task_auto || !CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
+        return;
+    }
+    int64_t now = now_us();
+    if (now < s_task_poll_us || s_turn.phase != P_IDLE || s_resting.load() || muse_state_asleep() ||
+        !muse_wifi_connected() || !muse_hatch_configured()) {
+        return;
+    }
+    s_task_poll_us = now + TASK_POLL_US;
+    rel_task_t task;
+    if (!poll_task(task_agent(), &task)) {
+        return;
+    }
+    task_take(task.id);
+    ESP_LOGI(TAG, "task: injected \"%s\" (id %s, hops %d, from %s)", task.text, task.id, task.hops,
+             task.from[0] ? task.from : "?");
+    char *text = static_cast<char *>(heap_caps_malloc(strlen(task.text) + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!text) {
+        text = static_cast<char *>(malloc(strlen(task.text) + 1));
+    }
+    if (!text) {
+        ESP_LOGW(TAG, "task: out of memory for the injected turn");
+        return;
+    }
+    strcpy(text, task.text);
+    cmd_t cmd{ CMD_TEXT, 0, text };
+    if (xQueueSend(s_cmds, &cmd, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "task: could not queue the injected turn");
+        free(text);
+        return;
+    }
+}
+
 static void hatch_task(void *arg)
 {
     (void)arg;
@@ -2680,6 +3009,10 @@ static void hatch_task(void *arg)
                 handle(cmd);
             }
         }
+        /* Relay tasks: poll the queue and hand back any tag a finished reply left.
+         * Self-gated to idle/awake/15 s; a no-op unless a relay URL is set. */
+        task_tick();
+        task_flush_reply();
         if (hermes_mode()) {
             /* Look up the Muse VM now, while there is RAM for the account API's TLS: later, with Hermes in use,
              * it can't be done, and switching to Muse would find no credentials ("Can't reach Muse's server"). */
@@ -2746,6 +3079,7 @@ static void hatch_task(void *arg)
             continue;
         }
         if (s_turn.phase == P_WAIT_REPLY) {
+            strip_reply_tags();   /* never speak a [task:...] tag */
             start_tts();
             decode();
         }
@@ -2907,6 +3241,12 @@ extern "C" void muse_hatch_text_turn(char *text)
 extern "C" void muse_hatch_text_cancel(void)
 {
     post(CMD_TEXT_CANCEL, 0);
+}
+
+/* Turns relay task polling/injection on or off at runtime (bench: "task.auto off"). */
+extern "C" void muse_hatch_task_auto(bool on)
+{
+    s_task_auto = on;
 }
 
 extern "C" muse_hatch_ev_t muse_hatch_turn_event(char *text, size_t cap)
