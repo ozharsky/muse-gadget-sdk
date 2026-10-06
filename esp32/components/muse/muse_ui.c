@@ -2025,9 +2025,6 @@ static void frame_tick(lv_timer_t *timer)
     if (idle && (s_idle_frames & 1)) {
         return;   /* alternate frames: half rate, no timer churn */
     }
-
-
-
     muse_pose_t pose = {
         .mode = mode,
         .t = now,
