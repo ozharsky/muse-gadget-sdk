@@ -78,7 +78,7 @@ static char s_noise_host[256] = NOISE_DEFAULT_HOST;
 #define RECONNECT_DELAY_STEP_MS   250
 #define KEEPALIVE_INTERVAL_MS     60000
 #define POWER_SAVE_QUIET_MS       1000    // noise_ctrl_set_power_save(): quiet this long,
-#define POWER_SAVE_POLL_MS        100     // then poll this often
+#define POWER_SAVE_POLL_MS        250     // then poll this often (battery: fewer CPU wakeups)
 #define IDLE_QUIET_MS             50      // otherwise quiet this long,
 #define IDLE_POLL_MS              10      // then wait on the socket at most this long
 #define STABLE_SESSION_MS         30000

@@ -374,7 +374,23 @@ void muse_battery_init(void)
 void muse_battery_note_power(const muse_power_t *p, bool on_battery)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_power = *p;
+    muse_power_t smoothed = *p;
+    /* The vendor board reports millivolts and the % curve is linear on them; a Li-ion cell
+     * sags under radio/speaker load, so the raw % swings down and back within seconds and
+     * the meter "drains fast" while the cell is fine. Exponential average on the % only
+     * (k = 1/8 per read; the mV stays raw: it IS the measurement). */
+    static float s_pct_avg = -1.0f;
+    if (s_power.battery_pct >= 0 && p->battery_pct >= 0) {
+        if (p->charging || s_pct_avg < 0.0f) {
+            s_pct_avg = (float)p->battery_pct;      /* charging: chase the real value */
+        } else {
+            s_pct_avg += ((float)p->battery_pct - s_pct_avg) / 8.0f;
+        }
+        if (s_pct_avg < 0.0f) s_pct_avg = 0.0f;
+        if (s_pct_avg > 100.0f) s_pct_avg = 100.0f;
+        smoothed.battery_pct = (int)(s_pct_avg + 0.5f);
+    }
+    s_power = smoothed;
     if (on_battery && !s_running) {
         start();
     } else if (!on_battery && s_running) {
