@@ -973,7 +973,11 @@ static int fetch_vms_with_refresh_with_gate_held(vm_info_t *vms, int max) {
 
     int count = vm_api_fetch_vms(access, vms, max);
     free(access);
-    if (count >= 0) note_vm_credentials_accepted();
+    // NOTE: a fetch_vms 200 does NOT mean the edge will accept the credential it
+    // returns -- the API can hand back a vm_auth_token the VM then refuses. Clearing
+    // the refusal floor here re-armed the retry on every cycle of exactly the loop it
+    // exists to brake (observed: a 403 every ~2 s). The real accept signal is the
+    // control WebSocket coming up; see on_ws_control_status().
     if (count != VM_API_ERR_AUTH) return count;
 
     ESP_LOGW(TAG, "VM fetch rejected token; forcing refresh");
@@ -1090,6 +1094,12 @@ static void vm_auth_refresh_task(void *arg) {
 
     ESP_LOGI(TAG, "refreshing VM credentials after tunnel auth rejection");
     if (wifi_mgr_is_connected() && config_is_provisioned()) {
+        // Force the refresh: pass access_token_rejected=true. The plain
+        // connect path below would take the "nothing complained, keep using it"
+        // branch and re-present the SAME credential the edge just refused.
+        if (!ensure_access_token_ready_with_gate_held(true, true)) {
+            ESP_LOGW(TAG, "VM credential mint/refresh failed after tunnel auth rejection");
+        }
         if (!connect_preferred_vm_with_gate_held(0)) {
             ESP_LOGW(TAG, "VM credential refresh failed after tunnel auth rejection");
         }
@@ -2476,6 +2486,10 @@ static void on_ws_control_status(const char *status) {
     if (strcmp(status, "ws_connected") == 0) {
         strcpy(s_ui_ws, "up");
         ESP_LOGI(TAG, "control WebSocket connected");
+        // The edge accepted our credential: this is the real "accepted" signal that
+        // resets the refresh-refusal backoff (a fetch_vms 200 is not -- see
+        // fetch_vms_with_refresh_with_gate_held()).
+        note_vm_credentials_accepted();
 #if CONFIG_HOMEHUB_TUNNEL
         // Control is up, but the data-plane tunnel (multiplexed stream 2) opens
         // separately and can be reset/rejected independently — so DON'T claim
@@ -2513,6 +2527,11 @@ static void on_ws_control_status(const char *status) {
         led_status_set_state(LED_STATE_WS_DISCONNECTED);
         tunnel_netif_set_link(false);
         ESP_LOGW(TAG, "control WebSocket needs fresh VM credentials: %s", status);
+        // The edge refused the credential we hold: count it, which both widens the
+        // refresh floor (1m/2m/.../30m) and stamps the attempt. Without this the
+        // fetch below returns 200 and zeroes the floor, so this spins at ~2 s
+        // forever instead of backing off.
+        note_vm_credentials_refused();
         schedule_vm_auth_refresh();
     }
 }
