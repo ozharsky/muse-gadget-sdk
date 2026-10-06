@@ -19,9 +19,11 @@
  * tools/muse/make_gifs.py builds this, against your own avatar's renderer if
  * you have one (components/muse/avatar/muse_pixel.c), and turns the frames into GIFs.
  */
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/stat.h>
 #include "muse_pixel.h"
 
@@ -71,16 +73,19 @@ static float happiness(float since_pet)
     return left > 0.4f ? 1.0f : left / 0.4f;
 }
 
-static void save(const char *path)
+static bool save(const char *path)
 {
     FILE *f = fopen(path, "wb");
+    if (!f) {
+        return false;
+    }
     fprintf(f, "P6 %d %d 255\n", N, N);
     for (int i = 0; i < N * N; i++) {
         uint16_t c = buf[i];
         uint8_t rgb[3] = { (uint8_t)(((c >> 11) & 31) * 255 / 31), (uint8_t)(((c >> 5) & 63) * 255 / 63), (uint8_t)((c & 31) * 255 / 31) };
         fwrite(rgb, 1, 3, f);
     }
-    fclose(f);
+    return fclose(f) == 0;
 }
 
 int main(int argc, char **argv)
@@ -88,16 +93,23 @@ int main(int argc, char **argv)
     const char *dir = argc > 1 ? argv[1] : ".";
     float base = 10.0f;
     muse_pixel_set_size(N);
+    mkdir(dir, 0755);       /* EEXIST for ".", ENOENT handled by the per-anim mkdir */
 
+    bool failed = false;
     for (size_t a = 0; a < sizeof(ANIMS) / sizeof(ANIMS[0]); a++) {
         const anim_t *an = &ANIMS[a];
         char path[512];
         snprintf(path, sizeof(path), "%s/%s", dir, an->name);
-        mkdir(path, 0755);
 
         int frames = (int)(an->secs / DT + 0.5f);
         int warm = (int)(WARMUP / DT + 0.5f);
-        for (int i = -warm; i < frames; i++) {
+        int wrote = 0;
+        bool ok = true;
+        if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "anim: cannot create %s: %s\n", path, strerror(errno));
+            ok = false;
+        }
+        for (int i = -warm; ok && i < frames; i++) {
             float rt = i * DT;      /* seconds into the recording */
             muse_pose_t p = {
                 .mode = an->mode,
@@ -114,10 +126,29 @@ int main(int argc, char **argv)
             if (i >= 0) {
                 muse_pixel_scale(buf, N, 0, N - 1, 0, N - 1);
                 snprintf(path, sizeof(path), "%s/%s/%03d.ppm", dir, an->name, i);
-                save(path);
+                if (!save(path)) {
+                    fprintf(stderr, "anim: cannot write %s: %s\n", path, strerror(errno));
+                    ok = false;
+                    break;
+                }
+                wrote++;
             }
         }
+        /* One line per animation as it finishes, so the driver's own count is
+         * auditable (make_gifs.py compares it against the saved GIF). */
+        fprintf(stderr, "anim: %-10s %d frames\n", an->name, wrote);
+        if (wrote == 0) {
+            fprintf(stderr, "anim: ERROR: %s rendered no frames\n", an->name);
+            failed = true;
+        }
+        if (!ok) {
+            failed = true;
+        }
         base += 100.0f;
+    }
+    if (failed) {
+        fprintf(stderr, "anim: render FAILED\n");
+        return 1;
     }
     return 0;
 }

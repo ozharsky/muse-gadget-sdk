@@ -230,7 +230,11 @@ def host_check(src):
             if p.returncode:
                 return "It crashed while drawing the animations:\n" + clip(p.stderr, 30), None
     try:
-        return None, make_gifs.render(src, os.path.join(AVATAR_DIR, "gifs"))
+        paths, merged = make_gifs.render(src, os.path.join(AVATAR_DIR, "gifs"))
+        if merged:
+            say(f"  {len(merged)} animation(s) have dead frames (identical frames the GIF drops): "
+                + ", ".join(name for name, *_ in merged))
+        return None, paths
     except ImportError:
         say("  (no GIF previews without Pillow: python3 -m pip install pillow)")
     except subprocess.CalledProcessError as e:
