@@ -587,8 +587,10 @@ static esp_err_t read_power(muse_power_t *out)
         }
     }
     out->battery_mv = mv;
-    /* Rough Li-ion curve for the meter; the vendor reports millivolts only. */
-    out->battery_pct = mv <= 3300 ? 0 : mv >= 4200 ? 100 : (mv - 3300) * 100 / 900;
+    /* Rough Li-ion curve for the meter; the vendor reports millivolts only. The 100%
+     * anchor sits at 4.10 V: the charger's CV termination relaxes to ~4.06-4.10 V resting,
+     * so a full cell idles just under 4.2 V — anchored at 4.2 the meter never reads 100. */
+    out->battery_pct = mv <= 3300 ? 0 : mv >= 4100 ? 100 : (mv - 3300) * 100 / 800;
     out->charging = gpio_get_level(CHARGE_STAT_GPIO) == 0;
     out->usb = usb_serial_jtag_is_connected();
     return ESP_OK;

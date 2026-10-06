@@ -1970,18 +1970,15 @@ static void frame_tick(lv_timer_t *timer)
     s_level += (level - s_level) * (level > s_level ? 0.6f : 0.2f);
 
     /* Idle costs less: with no audio and no interaction the face at ~15 fps reads the same
-     * (it is slow breathing light), and the freed cycles go back to Wi-Fi/backoff. On
-     * battery the standby face drops to quarter rate — the display and CPU are the drain
-     * while awake, and slow breathing light reads identically. */
+     * (it is slow breathing light), and the freed cycles go back to Wi-Fi/backoff. */
     static int s_idle_frames;
     bool idle = level < 0.02f && mode == MUSE_MODE_IDLE;
     s_idle_frames = idle ? s_idle_frames + 1 : 0;
     if (idle && (s_idle_frames & 1)) {
         return;   /* alternate frames: half rate, no timer churn */
     }
-    if (idle && muse_state_on_battery() && (s_idle_frames & 3) != 1) {
-        return;   /* on battery: quarter rate while resting */
-    }
+
+
 
     muse_pose_t pose = {
         .mode = mode,
