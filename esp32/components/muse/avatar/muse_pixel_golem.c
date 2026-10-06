@@ -731,7 +731,7 @@ static void draw_motes(float t, float bright)
         uint32_t per = 7u + ((h >> 13) & 15u);   /* 7..22 step period */
         if (((h >> 17) + fr * rate) % per <= per / 3u) {   /* ~1/3 lit at any moment */
             uint8_t under = s_fb[p];
-            uint8_t c = s_shade_hi[under];
+            uint8_t c = under < SPR_N ? s_shade_hi[under] : under;   /* guard: idx >= SPR_N is dynamic */
             if (c != under) {
                 s_fb[p] = c;
             }
@@ -760,7 +760,7 @@ static void breath_band(float t, float bright)
         }
         if (BAYER4[y & 3][x & 3] < 3 - d) {
             uint8_t under = s_fb[p];
-            uint8_t c = s_shade_hi[under];
+            uint8_t c = under < SPR_N ? s_shade_hi[under] : under;   /* guard: idx >= SPR_N is dynamic */
             if (c != under) {
                 s_fb[p] = c;
             }

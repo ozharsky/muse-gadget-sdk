@@ -34,6 +34,10 @@ you are on, because the mechanism is not the same.
    **text tags in your reply**, which it strips and turns into fields:
    - `[react:name]` (or `[react=name]`) → the reply's `react` field → the face acts it.
    - `[image:/abs/path.png]` or `MEDIA:/abs/path.png` → `image_b64` → the screen draws it.
+   - `[task:hermes <what to do>]` → queued as a real card on the Mac's Kanban board
+     (`tenant=crossagent`); the gadget picks it up when it is next on the Hermes agent and runs it
+     as a normal turn. Use it **only when the user explicitly asks you to hand Hermes a job**.
+     Put the spoken text first, then the tag on its own; the tag is stripped and never spoken.
    There is no "call `avatar.react` by name" over the relay. Use the tags instead.
 
 So: on the cloud path, call commands by name; on the Hermes/relay path, put the mood or image tag
