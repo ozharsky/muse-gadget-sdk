@@ -208,7 +208,15 @@ enum {
     R_LAUGH, R_WINK, R_SLEEPY, R_CONFUSED, R_EVIL, R_HACKED, R_POWERUP, R_BORED, R_DISGUST, R_TARGET,
     R_NERVOUS, R_PROUD,
     /* the moods the relay lists beyond the 20 (Bloop had them too) */
-    R_EXCITED, R_CONFETTI, R_SUNNY, R_RAIN, R_STORM, R_COLD, R_RAINBOW, R_COUNT
+    R_EXCITED, R_CONFETTI, R_SUNNY, R_RAIN, R_STORM, R_COLD, R_RAINBOW,
+    /* the work family (13): tools and tasks the golem acts out */
+    R_SEARCHING, R_BROWSING, R_READING, R_WRITING, R_CHECKING, R_CALCULATING, R_CALENDAR,
+    R_MONITORING, R_GENERATING, R_RUNNING, R_INVOKING, R_DELEGATING, R_REMEMBERING,
+    /* feelings (8) */
+    R_SHRUG, R_EMBARRASSED, R_SCARED, R_COOL, R_MIND_BLOWN, R_CRYING_LAUGHING, R_SAD, R_NOD,
+    /* weather (4) that suits the stone */
+    R_CLOUDY, R_WINDY, R_HOT, R_SNOW,
+    R_COUNT
 };
 
 static const struct { const char *name; float dur; } REACTIONS[R_COUNT] = {
@@ -222,6 +230,16 @@ static const struct { const char *name; float dur; } REACTIONS[R_COUNT] = {
     [R_EXCITED] = { "excited", 2.8f },   [R_CONFETTI] = { "confetti", 3.4f }, [R_SUNNY] = { "sunny", 3.0f },
     [R_RAIN] = { "rain", 3.2f },         [R_STORM] = { "storm", 3.2f },       [R_COLD] = { "cold", 3.0f },
     [R_RAINBOW] = { "rainbow", 3.2f },
+    [R_SEARCHING] = { "searching", 2.6f },   [R_BROWSING] = { "browsing", 3.0f },   [R_READING] = { "reading", 3.0f },
+    [R_WRITING] = { "writing", 3.0f },       [R_CHECKING] = { "checking", 2.4f },   [R_CALCULATING] = { "calculating", 3.0f },
+    [R_CALENDAR] = { "calendar", 3.0f },     [R_MONITORING] = { "monitoring", 2.8f }, [R_GENERATING] = { "generating", 3.0f },
+    [R_RUNNING] = { "running", 3.0f },       [R_INVOKING] = { "invoking", 2.8f },   [R_DELEGATING] = { "delegating", 2.8f },
+    [R_REMEMBERING] = { "remembering", 2.8f },
+    [R_SHRUG] = { "shrug", 2.6f },           [R_EMBARRASSED] = { "embarrassed", 2.8f }, [R_SCARED] = { "scared", 2.6f },
+    [R_COOL] = { "cool", 2.8f },             [R_MIND_BLOWN] = { "mind_blown", 2.8f },   [R_CRYING_LAUGHING] = { "crying_laughing", 2.8f },
+    [R_SAD] = { "sad", 3.0f },               [R_NOD] = { "nod", 2.4f },
+    [R_CLOUDY] = { "cloudy", 3.0f },         [R_WINDY] = { "windy", 3.0f },         [R_HOT] = { "hot", 3.0f },
+    [R_SNOW] = { "snow", 3.4f },
 };
 
 static volatile int s_react_req;     /* set from any task; the renderer picks it up */
