@@ -1,7 +1,12 @@
 # Skill Catalog
 
-43 active skills: 42 device/family skills and one shared Google Cast skill.
+44 active skills: 43 device/family skills and one shared Google Cast skill.
 Use the matching device skill for model compatibility, setup, safety and supported operations.
+
+## The gadget itself
+
+- [Muse Gadget: what the face can do](gadget-muse-face/SKILL.md) — drive your own gadget's face,
+  tap questions, image screen and speaker volume. Documents what firmware does not support yet.
 
 ## Shared protocol
 
