@@ -107,6 +107,7 @@ static hermes_stream_t s_hstream;
 #define NDJSON_LINE_MAX (16 * 1024)               /* one NDJSON line / the chat ack */
 #define SUB_LINE_MAX (256 * 1024)          /* an event line grows its buffer up to this */
 #define CHAT_PART (16 * 1024)              /* one body chunk of a long typed message */
+#define TASK_TEXT_MAX 1024                 /* the injected relay-task text cap */
 #define MP3_BUF (512 * 1024)
 #define MP3_HOLD (1441 + 4)               /* the largest MP3 frame and the next header */
 #define MP3_POLL_ROOM (SCRATCH + 8192)     /* stop reading the socket below this much MP3 room */
@@ -1816,6 +1817,12 @@ struct rel_task_t {
 /* The first tag found in the current reply, waiting for task_tick() to post it. */
 static EXT_RAM_BSS_ATTR rel_task_t s_reply_task;
 
+/* The task currently injected as a turn (empty id = none). When that turn's reply
+ * finishes, task_tick() marks it done on the board -- without this, an injected task
+ * sits in `running` forever. */
+static char s_injected_id[96];
+static bool s_injected_busy;            /* the injected turn has actually left P_IDLE */
+
 /* Removes every [task:<agent> <body>] tag from `text` in place and records the
  * first in s_reply_task. Returns true if one was found. */
 static bool strip_task_tags(char *text)
@@ -2148,6 +2155,90 @@ static bool hermes_home_reachable(void)
     }
     lwip_close(fd);
     return ok && err == 0;
+}
+
+/* A Hermes TEXT turn (an injected task): same streamed exchange as the voice path,
+ * but the text rides the query string and there is no PCM body. Mirrors
+ * hermes_request_stream() so the reply streams, TTS plays and [task:...] strips as usual. */
+static bool hermes_request_stream_text(const char *text, size_t tlen)
+{
+    char url[TASK_TEXT_MAX * 3 + 128];
+    bool remote = false;
+    const char *base = CONFIG_MUSE_HERMES_URL;
+    if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
+        base = CONFIG_MUSE_HERMES_URL_REMOTE;
+        remote = true;
+    }
+    /* percent-encode (cap the text so the query can never overrun the URL buffer) */
+    char enc[TASK_TEXT_MAX * 3 + 1];
+    size_t e = 0;
+    if (tlen > TASK_TEXT_MAX) {
+        tlen = TASK_TEXT_MAX;
+    }
+    for (size_t i = 0; i < tlen && e + 4 < sizeof(enc); i++) {
+        unsigned char c = (unsigned char)text[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            enc[e++] = (char)c;
+        } else if (c == ' ') {
+            enc[e++] = '+';
+        } else {
+            snprintf(&enc[e], 4, "%%%02X", c);
+            e += 3;
+        }
+    }
+    enc[e] = '\0';
+    snprintf(url, sizeof(url), "%s/turn?stream=1&text=%s", base, enc);
+
+    char *line = static_cast<char *>(psram_alloc(160 * 1024));
+    if (!line) {
+        turn_fail("OUT OF MEMORY");
+        return false;
+    }
+    s_hstream.line = line;
+    s_hstream.cap = 160 * 1024;
+    s_hstream.len = 0;
+    s_hstream.overflow = false;
+    s_hstream.headers_done = false;
+    s_hstream.ended = false;
+    s_hstream.got_heard = false;
+    s_hstream.got_reply = false;
+    s_hstream.react[0] = '\0';
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 100000;
+    cfg.buffer_size = 4096;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) {
+        heap_caps_free(line);
+        s_hstream.line = nullptr;
+        turn_fail("OUT OF MEMORY");
+        return false;
+    }
+    esp_http_client_set_header(h, "Content-Type", "application/json");
+    esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+    int64_t t0 = now_us();
+    esp_err_t err = esp_http_client_open(h, 0);   /* no body: the text is in the query */
+    if (err == ESP_OK) {
+        (void)esp_http_client_fetch_headers(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "task: hermes text open failed (%s)", esp_err_to_name(err));
+        esp_http_client_cleanup(h);
+        heap_caps_free(line);
+        s_hstream.line = nullptr;
+        turn_fail("CAN'T REACH HERMES");
+        return false;
+    }
+    ESP_LOGI(TAG, "task: hermes text turn opened (%lld ms)", (long long)((now_us() - t0) / 1000));
+    s_hstream.h = h;
+    s_turn.chat_us = s_turn.last_event_us = now_us();
+    return true;
 }
 
 /* One turn against the relay (compat, non-stream): PCM up, {"heard","reply"} back. Kept for
@@ -2891,6 +2982,50 @@ static void task_take(const char *id)
     cJSON_free(json);
 }
 
+/* POST /task/done {id, result}: closes an injected task once its turn has replied.
+ * Without this an injected task stays `running` on the board forever. */
+static void task_finish(const char *id, const char *result)
+{
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return;
+    }
+    cJSON_AddStringToObject(body, "id", id);
+    if (result && *result) {
+        cJSON_AddStringToObject(body, "result", result);
+    }
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        return;
+    }
+    char url[160];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/task/done", task_relay_url(&remote));
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 8000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (h) {
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_post_field(h, json, strlen(json));
+        esp_err_t err = esp_http_client_perform(h);
+        int status = esp_http_client_get_status_code(h);
+        esp_http_client_cleanup(h);
+        if (err != ESP_OK || status != 200) {
+            ESP_LOGW(TAG, "task: POST /task/done failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+        } else {
+            ESP_LOGI(TAG, "task: closed %s on the board", id);
+        }
+    }
+    cJSON_free(json);
+}
+
 /* POST /task: hands the other agent a task from a reply's [task:...] tag. */
 static void task_post(const rel_task_t *t)
 {
@@ -2956,6 +3091,49 @@ static void task_flush_reply(void)
     }
 }
 
+/* Close the board card for the injected task once its turn has run and returned to idle.
+ * s_injected_busy guards the gap between queueing the turn and it actually starting,
+ * so a task is never closed on the same tick it was injected. */
+static void task_finish_if_done(void)
+{
+    if (!s_injected_id[0]) {
+        return;
+    }
+    if (s_turn.phase != P_IDLE) {
+        s_injected_busy = true;          /* the injected turn is running */
+        return;
+    }
+    if (!s_injected_busy) {
+        return;                          /* not started yet */
+    }
+    task_finish(s_injected_id, "");
+    s_injected_id[0] = '\0';
+    s_injected_busy = false;
+}
+
+/* Injects a relay task as a Hermes text turn. Runs the same reply pipeline as a voice
+ * turn (stream, TTS, tag strip) but with no microphone. Called from task_tick() on the
+ * session task, so it must not block: it only opens the exchange. */
+static bool task_inject_turn(const char *text)
+{
+    if (!hermes_mode()) {
+        return false;                 /* tasks only ride the Hermes relay path */
+    }
+    if (s_turn.phase != P_IDLE) {
+        return false;
+    }
+    if (!turn_start(s_gen.load(), true)) {   /* true = a text turn: the text reply budget, not the voice cap */
+        return false;
+    }
+    size_t n = strlen(text);
+    if (!hermes_request_stream_text(text, n)) {
+        return false;
+    }
+    s_turn.phase = P_WAIT_REPLY;
+    ESP_LOGI(TAG, "task: text turn opened (%u bytes)", (unsigned)n);
+    return true;
+}
+
 /* One poll tick: only idle, awake, un-resting, and past the cadence. */
 static void task_tick(void)
 {
@@ -2975,21 +3153,15 @@ static void task_tick(void)
     task_take(task.id);
     ESP_LOGI(TAG, "task: injected \"%s\" (id %s, hops %d, from %s)", task.text, task.id, task.hops,
              task.from[0] ? task.from : "?");
-    char *text = static_cast<char *>(heap_caps_malloc(strlen(task.text) + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!text) {
-        text = static_cast<char *>(malloc(strlen(task.text) + 1));
-    }
-    if (!text) {
-        ESP_LOGW(TAG, "task: out of memory for the injected turn");
+    /* Inject as a Hermes text turn over the relay (the typed-turn CMD_TEXT path is
+     * Muse-only: it refuses in Hermes mode). */
+    if (!task_inject_turn(task.text)) {
+        ESP_LOGW(TAG, "task: turn start refused (busy?); leaving the card for the next poll");
         return;
     }
-    strcpy(text, task.text);
-    cmd_t cmd{ CMD_TEXT, 0, text };
-    if (xQueueSend(s_cmds, &cmd, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(TAG, "task: could not queue the injected turn");
-        free(text);
-        return;
-    }
+    /* Remember it so the board card can be closed when this turn's reply lands. */
+    strlcpy(s_injected_id, task.id, sizeof(s_injected_id));
+    s_injected_busy = false;
 }
 
 static void hatch_task(void *arg)
@@ -3012,6 +3184,7 @@ static void hatch_task(void *arg)
         /* Relay tasks: poll the queue and hand back any tag a finished reply left.
          * Self-gated to idle/awake/15 s; a no-op unless a relay URL is set. */
         task_tick();
+        task_finish_if_done();
         task_flush_reply();
         if (hermes_mode()) {
             /* Look up the Muse VM now, while there is RAM for the account API's TLS: later, with Hermes in use,
