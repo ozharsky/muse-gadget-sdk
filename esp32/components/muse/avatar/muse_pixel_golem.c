@@ -620,6 +620,157 @@ static void animate_light(float t, float speed, float level, float bright)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Continuous ambient motion: a drifting glint field over the stone plus a soft
+ * breath band. The old resting "breath" was a rigid integer whole-frame bob; at
+ * 40 ms it only fired every ~9th frame (byte-identical in between: a dead frame)
+ * and when it did fire it jumped ~845 px in one step (the burst). These two
+ * layers move a little EVERY frame and never translate the image, so the face is
+ * never a copy of its predecessor and there is no stutter. Integer/index math
+ * only in the per-pixel loops (one sinf per frame for the band phase).
+ * ------------------------------------------------------------------------- */
+
+#define MOTE_N 1200
+
+static uint32_t s_frame;                        /* render calls seen; +1 every frame */
+
+static uint8_t  s_spr_rank[SPR_N];              /* 0 = darkest .. SPR_N-1 = brightest */
+static uint8_t  s_shade_hi[SPR_N];              /* one ramp step brighter (same family) */
+static uint8_t  s_shade_lo[SPR_N];              /* one ramp step darker */
+static EXT_RAM_BSS_ATTR uint8_t  s_pix_k[W * H];      /* PSRAM: 0 = empty, else rank+1 */
+static EXT_RAM_BSS_ATTR uint16_t s_mote_px[MOTE_N];   /* PSRAM: glint-field candidates */
+static int      s_mote_n;
+static bool     s_motes_init;
+
+static void motes_init(void)
+{
+    uint8_t order[SPR_N];
+    for (int i = 0; i < SPR_N; i++) {
+        order[i] = (uint8_t)i;
+    }
+    /* rank the palette by luminance (20 entries, once) */
+    for (int a = 0; a < SPR_N; a++) {
+        for (int b = a + 1; b < SPR_N; b++) {
+            float la = 0.30f * SPR_PAL[order[a]][0] + 0.70f * SPR_PAL[order[a]][1];
+            float lb = 0.30f * SPR_PAL[order[b]][0] + 0.70f * SPR_PAL[order[b]][1];
+            if (lb < la) {
+                uint8_t tmp = order[a]; order[a] = order[b]; order[b] = tmp;
+            }
+        }
+    }
+    for (int r = 0; r < SPR_N; r++) {
+        s_spr_rank[order[r]] = (uint8_t)r;
+    }
+    for (int i = 0; i < SPR_N; i++) {
+        int r = s_spr_rank[i];
+        int lo = r > 1 ? r - 1 : 1;             /* never step a live colour down to black */
+        int hi = r < SPR_N - 1 ? r + 1 : r;
+        s_shade_lo[i] = order[lo];
+        s_shade_hi[i] = order[hi];
+    }
+    s_shade_lo[IDX_BLACK] = s_shade_hi[IDX_BLACK] = IDX_BLACK;
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            uint8_t c = SPR[y * W + x];
+            s_pix_k[y * W + x] = c == IDX_BLACK ? 0 : (uint8_t)(s_spr_rank[c] + 1);
+        }
+    }
+    /* the body pixels the glint field drifts over: a ~1/4 spatial subset of the
+     * solid stone, never the lens (rank >= 18 is the cream eye) */
+    for (int y = 3; y < H - 3; y++) {
+        for (int x = 3; x < W - 3; x++) {
+            uint8_t k = s_pix_k[y * W + x];
+            if (k == 0 || k > 17 || ((x * 3 + y * 5) & 3) != 0) {
+                continue;
+            }
+            if (s_mote_n < MOTE_N) {
+                s_mote_px[s_mote_n++] = (uint16_t)(y * W + x);
+            }
+        }
+    }
+    s_motes_init = true;
+}
+
+/* A drifting field of glints: each stone pixel catches the light on its own slow
+ * beat. Always some pixels toggling, never the whole image — the ambient layer.
+ * Driven by a monotonic frame counter (a float (uint32_t)(t*25) can stall for a
+ * frame on rounding and reintroduce a byte-identical frame). */
+static void draw_motes(float t, float bright)
+{
+    (void)t;
+    if (!s_motes_init) {
+        motes_init();
+    }
+    if (bright < 0.10f) {
+        return;
+    }
+    uint32_t fr = s_frame;
+    for (int i = 0; i < s_mote_n; i++) {
+        uint16_t p = s_mote_px[i];
+        int x = p % W, y = p / W;
+        uint32_t h = hash2(x, y);
+        uint32_t rate = 1u + ((h >> 9) & 3u);    /* 1..4 steps per frame */
+        uint32_t per = 7u + ((h >> 13) & 15u);   /* 7..22 step period */
+        if (((h >> 17) + fr * rate) % per <= per / 3u) {   /* ~1/3 lit at any moment */
+            uint8_t under = s_fb[p];
+            uint8_t c = s_shade_hi[under];
+            if (c != under) {
+                s_fb[p] = c;
+            }
+        }
+    }
+}
+
+/* A soft glow band sweeping the stone with the breath (~0.7 s). Its dithered edge
+ * moves every frame, so the body reads as breathing WITHOUT the image translating. */
+static void breath_band(float t, float bright)
+{
+    if (!s_motes_init) {
+        motes_init();
+    }
+    if (bright < 0.10f) {
+        return;
+    }
+    float ph = 0.5f + 0.5f * sinf(t * 1.4f);
+    int band = 8 + (int)(ph * 44.0f);
+    for (int i = 0; i < s_mote_n; i++) {
+        uint16_t p = s_mote_px[i];
+        int x = p % W, y = p / W;
+        int d = y > band ? y - band : band - y;
+        if (d > 2) {
+            continue;
+        }
+        if (BAYER4[y & 3][x & 3] < 3 - d) {
+            uint8_t under = s_fb[p];
+            uint8_t c = s_shade_hi[under];
+            if (c != under) {
+                s_fb[p] = c;
+            }
+        }
+    }
+}
+
+/* A single standby pip that breathes on its own, so the fully-dark OFF state is
+ * not a frozen frame (the CRT collapse leaves one pixel; it was byte-identical).
+ * The arms grow/shrink with the beat and a spark rotates round the cross — the
+ * spark guarantees a fresh pixel every frame even when the integer arm is static. */
+static void off_pip(float t)
+{
+    float s = 0.5f + 0.5f * sinf(t * 2.6f);
+    int half = 1 + (int)(s * 3.0f);              /* arms grow 1..4 px and back */
+    uint8_t c = s > 0.5f ? D_G1 : D_G0;
+    for (int x = 32 - half; x <= 32 + half; x++) {
+        px(x, 32, c);
+    }
+    for (int y = 32 - half; y <= 32 + half; y++) {
+        px(32, y, c);
+    }
+    px(32, 32, s > 0.75f ? D_G0 : D_ACC);
+    static const int spx[4] = { 0, 1, 0, -1 }, spy[4] = { -1, 0, 1, 0 };
+    int ph = (int)(s_frame % 4);                 /* the spark walks the cross */
+    px(32 + spx[ph], 32 + spy[ph], D_WHITE);
+}
+
 /* The chest emblem's core breathes; it flares with the voice. */
 static void chest_core(float t, float level, float bright)
 {
@@ -868,6 +1019,7 @@ void muse_pixel_render(const muse_pose_t *p)
     if (!s_eyes_init) {
         init_eyes();
     }
+    s_frame++;                        /* monotonic per-frame ticks for the ambient layers */
     float dt = s_look.last_t > 0 ? clampf(p->t - s_look.last_t, 0, 0.2f) : 0.04f;
     s_look.last_t = p->t;
 
@@ -1125,8 +1277,14 @@ void muse_pixel_render(const muse_pose_t *p)
             }
         }
     }
-    /* A slow breath, a hop when petted, a shake on error. */
-    int dy = iround(sinf(t * 1.4f) * 0.6f) - (happy > 0 ? (int)(fabsf(sinf(t * 9.0f)) * 2.5f * happy) : 0);
+    /* A hop when petted, a shake on error, and the acted dy offsets. The resting
+     * breath is NO LONGER an integer whole-frame bob: a ±1 px translate either fires
+     * (~845 px change) or does not (0 px), which is exactly the dead/burst pattern.
+     * The breath now lives in the continuous ambient layers below. */
+    int dy = 0;
+    if (happy > 0) {
+        dy -= (int)(fabsf(sinf(t * 9.0f)) * 3.5f * happy);
+    }
     if (rid == R_SURPRISED && rt < 0.35f) {
         dy -= 2;
     }
@@ -1193,11 +1351,12 @@ void muse_pixel_render(const muse_pose_t *p)
             }
         }
         if (vh < 3) {
-            int half = iround(32.0f * (1.0f - k * k * k));
-            for (int x = 32 - half; x <= 32 + half; x++) {
-                px(x, 32, D_G0);
-            }
+            off_pip(t);                     /* the standby dot breathes, no dead frame */
         }
     }
+    /* Continuous ambient motion, after every translation/glitch so nothing smears:
+     * the glint field + the breath band touch only body pixels and never the face. */
+    draw_motes(t, bright);
+    breath_band(t, bright);
     vignette();
 }
