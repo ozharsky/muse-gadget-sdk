@@ -626,14 +626,17 @@ static void animate_light(float t, float speed, float level, float bright)
     for (int i = 0; i < s_k3_n; i++) {
         uint16_t p = s_k3_px[i];
         int x = p % W, y = p / W;
-        /* the moss breathes: some px catch light, others fall back into shade */
+        /* the moss breathes: some px catch light, others fall back into shade.
+         * Guarded: a dynamic index (>= SPR_N) can be under these pixels during mood
+         * props, and SPR_BRIGHT/s_k3_dark are SPR_N-entry tables. */
+        uint8_t u = s_fb[p];
         uint32_t h = hash2(x, y);
-        if (((h + (uint32_t)tick) & 7u) == 0u) {
-            s_fb[p] = SPR_BRIGHT[s_fb[p]];
-        } else if (((h / 7 + (uint32_t)tick / 3) & 7u) == 3u) {
-            s_fb[p] = s_k3_dark[s_fb[p]];
-        } else if (level > 0.3f && ((hash2(x, y + 7) + (uint32_t)(t * 12.0f)) & 15u) == 0u) {
-            s_fb[p] = SPR_BRIGHT[SPR_BRIGHT[s_fb[p]]];
+        if (u < SPR_N && ((h + (uint32_t)tick) & 7u) == 0u) {
+            s_fb[p] = SPR_BRIGHT[u];
+        } else if (u < SPR_N && ((h / 7 + (uint32_t)tick / 3) & 7u) == 3u) {
+            s_fb[p] = s_k3_dark[u];
+        } else if (u < SPR_N && level > 0.3f && ((hash2(x, y + 7) + (uint32_t)(t * 12.0f)) & 15u) == 0u) {
+            s_fb[p] = SPR_BRIGHT[SPR_BRIGHT[u]];
         }
     }
 }

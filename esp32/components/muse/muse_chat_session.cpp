@@ -95,6 +95,16 @@ struct hermes_stream_t {
 };
 static hermes_stream_t s_hstream;
 
+/* The relay task currently injected as a Hermes turn (empty id = none), declared here
+ * because turn_done()/turn_fail() below record the outcome. task_finish_if_done() closes
+ * the board card once the turn is over -- without this an injected task sits in `running`
+ * forever, and without the `replied` flag a FAILED turn would be recorded as a success. */
+static char s_injected_id[96];
+static char s_injected_chain[160];      /* carried so a reply's [task:] can continue the chain */
+static int  s_injected_hops;            /* the injected task's hop count */
+static bool s_injected_busy;            /* the injected turn has actually left P_IDLE */
+static bool s_injected_replied;         /* the turn produced a reply (not a failure) */
+
 
 #define NOISE_PATH "/v1/noise"
 #define NOISE_PORT 443
@@ -1052,6 +1062,11 @@ static void turn_done(bool complete)
         muse_hatch_console("done", nullptr, "\"messages\":%d,\"complete\":%s", s_turn.nmsgs,
                            complete ? "true" : "false");
     }
+    /* Remember whether an injected task's turn actually produced a reply, so the board
+     * card is not closed as a success when the turn failed or was interrupted. */
+    if (s_injected_id[0] && complete) {
+        s_injected_replied = true;
+    }
     emit(MUSE_HATCH_EV_DONE, nullptr);
     turn_finish();
 }
@@ -1817,12 +1832,6 @@ struct rel_task_t {
 /* The first tag found in the current reply, waiting for task_tick() to post it. */
 static EXT_RAM_BSS_ATTR rel_task_t s_reply_task;
 
-/* The task currently injected as a turn (empty id = none). When that turn's reply
- * finishes, task_tick() marks it done on the board -- without this, an injected task
- * sits in `running` forever. */
-static char s_injected_id[96];
-static bool s_injected_busy;            /* the injected turn has actually left P_IDLE */
-
 /* Removes every [task:<agent> <body>] tag from `text` in place and records the
  * first in s_reply_task. Returns true if one was found. */
 static bool strip_task_tags(char *text)
@@ -1855,6 +1864,23 @@ static bool strip_task_tags(char *text)
                     }
                     memcpy(s_reply_task.text, ws, n);
                     s_reply_task.text[n] = '\0';
+                    /* Provenance for the relay's idempotency key. Without a chain the
+                     * relay keys every device-posted task on ":1", so the SECOND
+                     * handoff (and every one after) collides with the first and
+                     * silently reuses that card. Carry the chain of the task this
+                     * turn is answering so the hop cap can brake a ping-pong;
+                     * task_post() sends hops + 1 on the same chain. */
+                    if (s_injected_id[0] && s_injected_chain[0]) {
+                        strlcpy(s_reply_task.chain, s_injected_chain, sizeof(s_reply_task.chain));
+                        s_reply_task.hops = s_injected_hops;     /* task_post() adds 1 */
+                    } else {
+                        uint32_t h = 2166136261u;                /* FNV-1a: a fresh chain */
+                        for (size_t k = 0; k < n; k++) {
+                            h = (h ^ (uint8_t)s_reply_task.text[k]) * 16777619u;
+                        }
+                        snprintf(s_reply_task.chain, sizeof(s_reply_task.chain), "dev%08lx", (unsigned long)h);
+                        s_reply_task.hops = 0;
+                    }
                 } else {
                     ESP_LOGI(TAG, "task: extra [task:%s ...] tag in one reply ignored", agent);
                 }
@@ -3026,6 +3052,49 @@ static void task_finish(const char *id, const char *result)
     cJSON_free(json);
 }
 
+/* POST /task/requeue {id}: returns a running card to ready so the next poll retries it.
+ * Used when an injected turn produced no reply, so a failure is neither lost nor recorded
+ * as a success. */
+static void task_requeue(const char *id)
+{
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return;
+    }
+    cJSON_AddStringToObject(body, "id", id);
+    cJSON_AddStringToObject(body, "reason", "injected turn produced no reply");
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        return;
+    }
+    char url[160];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/task/requeue", task_relay_url(&remote));
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 8000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (h) {
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_post_field(h, json, strlen(json));
+        esp_err_t err = esp_http_client_perform(h);
+        int status = esp_http_client_get_status_code(h);
+        esp_http_client_cleanup(h);
+        if (err != ESP_OK || status != 200) {
+            ESP_LOGW(TAG, "task: POST /task/requeue failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+        } else {
+            ESP_LOGI(TAG, "task: returned %s to the queue for a retry", id);
+        }
+    }
+    cJSON_free(json);
+}
+
 /* POST /task: hands the other agent a task from a reply's [task:...] tag. */
 static void task_post(const rel_task_t *t)
 {
@@ -3093,7 +3162,10 @@ static void task_flush_reply(void)
 
 /* Close the board card for the injected task once its turn has run and returned to idle.
  * s_injected_busy guards the gap between queueing the turn and it actually starting,
- * so a task is never closed on the same tick it was injected. */
+ * so a task is never closed on the same tick it was injected.
+ * A turn that FAILED or was interrupted must not be recorded as a completed task: it is
+ * put back to `ready` (reclaim) so the next poll retries it, with the attempt counted in
+ * the log. Without this split, any failure path looked identical to success. */
 static void task_finish_if_done(void)
 {
     if (!s_injected_id[0]) {
@@ -3106,15 +3178,25 @@ static void task_finish_if_done(void)
     if (!s_injected_busy) {
         return;                          /* not started yet */
     }
-    task_finish(s_injected_id, "");
+    if (s_injected_replied) {
+        task_finish(s_injected_id, "");
+    } else {
+        /* Failed, interrupted, or timed out: release it back to the queue. */
+        ESP_LOGW(TAG, "task: turn for %s produced no reply; returning it to the queue", s_injected_id);
+        task_requeue(s_injected_id);
+    }
     s_injected_id[0] = '\0';
+    s_injected_chain[0] = '\0';
     s_injected_busy = false;
+    s_injected_replied = false;
 }
 
 /* Injects a relay task as a Hermes text turn. Runs the same reply pipeline as a voice
  * turn (stream, TTS, tag strip) but with no microphone. Called from task_tick() on the
- * session task, so it must not block: it only opens the exchange. */
-static bool task_inject_turn(const char *text)
+ * session task, so it must not block: it only opens the exchange.
+ * Returns false WITHOUT side effects if the turn cannot start -- the caller then leaves
+ * the card in `ready` for the next poll, which is why the card is taken only on success. */
+static bool task_inject_turn(const rel_task_t *t)
 {
     if (!hermes_mode()) {
         return false;                 /* tasks only ride the Hermes relay path */
@@ -3125,12 +3207,19 @@ static bool task_inject_turn(const char *text)
     if (!turn_start(s_gen.load(), true)) {   /* true = a text turn: the text reply budget, not the voice cap */
         return false;
     }
-    size_t n = strlen(text);
-    if (!hermes_request_stream_text(text, n)) {
+    size_t n = strlen(t->text);
+    if (!hermes_request_stream_text(t->text, n)) {
         return false;
     }
     s_turn.phase = P_WAIT_REPLY;
-    ESP_LOGI(TAG, "task: text turn opened (%u bytes)", (unsigned)n);
+    /* Remember the whole card so the reply can close it and continue its chain. */
+    strlcpy(s_injected_id, t->id, sizeof(s_injected_id));
+    strlcpy(s_injected_chain, t->chain, sizeof(s_injected_chain));
+    s_injected_hops = t->hops;
+    s_injected_busy = false;
+    s_injected_replied = false;
+    ESP_LOGI(TAG, "task: text turn opened (%u bytes, chain %s, hops %d)", (unsigned)n,
+             s_injected_chain[0] ? s_injected_chain : "(new)", s_injected_hops);
     return true;
 }
 
@@ -3150,18 +3239,16 @@ static void task_tick(void)
     if (!poll_task(task_agent(), &task)) {
         return;
     }
+    /* Inject FIRST, take only on success. Taking moves the card ready->running, and the
+     * poll only lists `ready`, so a card taken and then failed to inject is stranded in
+     * `running` with no path back. */
+    if (!task_inject_turn(&task)) {
+        ESP_LOGW(TAG, "task: turn start refused (busy?); left %s in ready for the next poll", task.id);
+        return;
+    }
     task_take(task.id);
     ESP_LOGI(TAG, "task: injected \"%s\" (id %s, hops %d, from %s)", task.text, task.id, task.hops,
              task.from[0] ? task.from : "?");
-    /* Inject as a Hermes text turn over the relay (the typed-turn CMD_TEXT path is
-     * Muse-only: it refuses in Hermes mode). */
-    if (!task_inject_turn(task.text)) {
-        ESP_LOGW(TAG, "task: turn start refused (busy?); leaving the card for the next poll");
-        return;
-    }
-    /* Remember it so the board card can be closed when this turn's reply lands. */
-    strlcpy(s_injected_id, task.id, sizeof(s_injected_id));
-    s_injected_busy = false;
 }
 
 static void hatch_task(void *arg)

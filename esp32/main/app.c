@@ -95,7 +95,14 @@ static const char *HEARTBEAT_TAG = "link.heartbeat";
 #define MAX_SCAN_RESULTS        25
 #define TOKEN_BUF_BYTES         2048
 #define VM_AUTH_REFRESH_RETRY_INTERVAL_US (60LL * 1000000LL)
-#define VM_AUTH_REFRESH_MAX_INTERVAL_US   (30LL * 60LL * 1000000LL)
+// Cap the ladder at 10 min, not 30: ws_connected (the only thing that clears the count)
+// cannot arrive while the floor is still running, so a longer cap just delays recovery
+// from a transient edge fault. 10 min is still ~1/1400th the 2 s spin it replaced.
+#define VM_AUTH_REFRESH_MAX_INTERVAL_US   (10LL * 60LL * 1000000LL)
+// Two reports of the same bad credential within this window (the edge's ws_auth_failed
+// and the fetch path's 401/403) count as one refusal, so the ladder advances at the
+// documented 1m/2m/4m pace.
+#define VM_AUTH_REFUSAL_DEDUPE_US         (10LL * 1000000LL)
 
 // Slow proactive refresh, on top of the reactive one. Guards against the
 // access token's real lifetime being shorter than the stated 365 days.
@@ -134,6 +141,9 @@ static int64_t s_last_periodic_token_refresh_us = 0;
 static bool s_sdk_token_report_attempted = false;
 static int64_t s_vm_auth_refresh_interval_us = VM_AUTH_REFRESH_RETRY_INTERVAL_US;
 static uint8_t s_vm_auth_refusals = 0;
+// Uptime of the last refusal counted, so the edge and the fetch path reporting the same
+// bad credential within a second do not climb the backoff ladder twice as fast.
+static int64_t s_last_vm_auth_refusal_us = 0;
 static bool s_vm_auth_refresh_pending = false;
 static atomic_bool s_setup_reset_pending = ATOMIC_VAR_INIT(false);
 static bool s_ble_started = false;
@@ -294,15 +304,25 @@ static void auth_lock_give(void) {
 // terminates that loop. This is what bounds it.
 static void note_vm_credentials_refused(void) {
     auth_lock_take();
-    if (s_vm_auth_refusals < UINT8_MAX) s_vm_auth_refusals++;
-    unsigned doublings = s_vm_auth_refusals - 1u;
+    // Count once per "episode". Both the edge (ws_auth_failed) and the fetch path report
+    // the same bad credential, and both can fire within a second of each other; counting
+    // each would climb the ladder twice as fast as intended (observed 8s -> 93s -> 128s,
+    // not the documented 1m/2m/4m). A refusal within the grace window only re-stamps.
+    int64_t now = esp_timer_get_time();
+    bool same_episode = s_last_vm_auth_refusal_us
+                        && (now - s_last_vm_auth_refusal_us) < VM_AUTH_REFUSAL_DEDUPE_US;
+    s_last_vm_auth_refusal_us = now;
+    if (!same_episode && s_vm_auth_refusals < UINT8_MAX) {
+        s_vm_auth_refusals++;
+    }
+    unsigned doublings = s_vm_auth_refusals > 0 ? s_vm_auth_refusals - 1u : 0u;
     if (doublings > 5u) doublings = 5u;
     int64_t interval = VM_AUTH_REFRESH_RETRY_INTERVAL_US << doublings;
     if (interval > VM_AUTH_REFRESH_MAX_INTERVAL_US) {
         interval = VM_AUTH_REFRESH_MAX_INTERVAL_US;
     }
     s_vm_auth_refresh_interval_us = interval;
-    s_last_vm_auth_refresh_attempt_us = esp_timer_get_time();
+    s_last_vm_auth_refresh_attempt_us = now;
     unsigned refusals = s_vm_auth_refusals;
     auth_lock_give();
     ESP_LOGW(TAG,
@@ -315,6 +335,7 @@ static void note_vm_credentials_accepted(void) {
     auth_lock_take();
     bool was_backing_off = s_vm_auth_refusals > 0;
     s_vm_auth_refusals = 0;
+    s_last_vm_auth_refusal_us = 0;
     s_vm_auth_refresh_interval_us = VM_AUTH_REFRESH_RETRY_INTERVAL_US;
     s_last_vm_auth_refresh_attempt_us = 0;
     auth_lock_give();
