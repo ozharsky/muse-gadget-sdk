@@ -453,7 +453,6 @@ static void build_button_icons(lv_obj_t *face)
 
 /* The reading view: a long press on the avatar shows the last reply in full, scrollable. */
 static lv_obj_t *s_read_box, *s_read_lbl, *s_read_close;
-static bool s_long;   /* the press that just ended was a long one: it isn't also a pet */
 
 static void read_hide(void)
 {
@@ -527,8 +526,7 @@ static void read_box_build(void)
 static void on_canvas_long(lv_event_t *e)
 {
     (void)e;
-    s_long = true;
-    read_open();
+    read_open();   /* long press = the last-message popup, and nothing else */
 }
 
 /* ---- Muse asks: a question with up to four tap choices (the ui.choose command) ---- */
@@ -657,21 +655,42 @@ static uint32_t s_gesture_ms;   /* when the last swipe happened: a swipe isn't a
  * muse_chat_session.cpp with C linkage. */
 bool muse_notif_open_pending(void);
 
-static void on_canvas_clicked(lv_event_t *e)
+/* A TAP. Registered on LV_EVENT_SHORT_CLICKED, NOT LV_EVENT_CLICKED: CLICKED is documented
+ * "sent on release ... regardless to long press", so a long press also fired it and the two
+ * gestures collided (the old code filtered that with an s_long flag). SHORT_CLICKED is never
+ * sent after a long press, so the tap and the long-press popup are independent by construction:
+ * no "was that the same press?" flag, nothing to get out of sync. */
+static void on_canvas_tap(lv_event_t *e)
 {
     (void)e;
-    if (s_long) {
-        s_long = false;
-        return;
-    }
     if (lv_tick_get() - s_gesture_ms < 400) {
-        return;
+        return;   /* a swipe just ended (the canvas isn't scrollable, so LVGL still calls it a click) */
     }
-    /* A tap on a waiting notification OPENS its agent; otherwise it's a pet. */
+    /* Tap on a waiting notification OPENS its agent; otherwise it's a pet. */
     if (muse_notif_open_pending()) {
         return;
     }
     muse_state_make_happy();
+}
+
+/* Bench: fire the face's two gestures exactly as the indev would, without a finger. Must hold
+ * the display lock -- they run LVGL from the serial task (an unlocked touch panics the device). */
+void muse_ui_face_tap(void)
+{
+    if (s_ready && s_canvas) {
+        muse_board->display_lock(-1);
+        lv_obj_send_event(s_canvas, LV_EVENT_SHORT_CLICKED, NULL);
+        muse_board->display_unlock();
+    }
+}
+
+void muse_ui_face_long(void)
+{
+    if (s_ready && s_canvas) {
+        muse_board->display_lock(-1);
+        lv_obj_send_event(s_canvas, LV_EVENT_LONG_PRESSED, NULL);
+        muse_board->display_unlock();
+    }
 }
 
 /* A level bar that pops up while you swipe, and fades after a moment. */
@@ -1163,7 +1182,7 @@ static void build_screen(void)
     lv_obj_align(s_canvas, LV_ALIGN_CENTER, CONFIG_MUSE_AVATAR_X_OFFSET, s_big_y);
     s_muse_y = s_big_y;
     lv_obj_add_flag(s_canvas, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_canvas, on_canvas_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_canvas, on_canvas_tap, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(s_canvas, on_canvas_swipe, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(s_canvas, on_canvas_swipe, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(s_canvas, on_canvas_long, LV_EVENT_LONG_PRESSED, NULL);
