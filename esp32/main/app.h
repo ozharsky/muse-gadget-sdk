@@ -45,6 +45,10 @@ bool app_wifi_forget(const char *ssid);
 // one just chosen). If paired, the heartbeat then reaches the VM (retrying
 // until the session runs). Nothing here wakes the screen.
 app_wifi_join_t app_wifi_join_saved(int timeout_ms, bool first_only);
+// Joins ONE named saved network using the password stored FOR IT (never a caller's), so a
+// network switch cannot corrupt credentials. APP_WIFI_NOT_NEARBY when the network is saved but
+// not in range RIGHT NOW (the caller should say so, not flap); APP_WIFI_FAILED otherwise.
+app_wifi_join_t app_wifi_join_named(const char *ssid, int timeout_ms);
 // When the last join that scanned, this one or the one at boot, found no saved
 // network nearby (esp_timer_get_time()); 0 if it found one.
 int64_t app_wifi_none_nearby_at(void);

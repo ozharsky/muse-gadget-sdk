@@ -816,6 +816,33 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+    if (!strncmp(line, "wifi.forget=", 12)) {
+        muse_wifi_forget(line + 12);
+        printf("@wifi.forget %s\n", line + 12);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "wifi.add=", 9)) {
+        /* Bench: re-add/replace a network's credentials: >wifi.add=<ssid>|<password>  (an
+         * empty password after the bar means an open network). */
+        char *bar = strchr(line + 9, '|');
+        char pass[MUSE_PASS_MAX + 1] = {0};
+        if (bar) {
+            *bar = '\0';
+            strlcpy(pass, bar + 1, sizeof(pass));
+        }
+        muse_settings_set_wifi(line + 9, pass);
+        printf("@wifi.add %s %s\n", line + 9, bar ? "(with password)" : "");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "wifi.switch=", 12)) {
+        /* Bench: switch to a saved network by name (the same path the Wi-Fi page uses). */
+        bool ok = muse_wifi_switch(line + 12);
+        printf("@wifi.switch %s %s\n", line + 12, ok ? "requested" : "unknown");
+        fflush(stdout);
+        return true;
+    }
     if (!strcmp(line, "face.tap")) {
         muse_ui_face_tap();
         printf("@face.tap\n");

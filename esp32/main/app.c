@@ -2345,6 +2345,54 @@ static void muse_heartbeat_pause(void) {
     xSemaphoreTake(s_muse_joined, pdMS_TO_TICKS(s_muse_napping ? 60000 : 5000));
 }
 
+// Joins ONE named saved network, with the password STORED FOR IT -- never a caller-supplied
+// one. This is the safe "switch network" primitive: it cannot overwrite credentials. Returns
+// APP_WIFI_FAILED when the name is not saved.
+app_wifi_join_t app_wifi_join_named(const char *ssid, int timeout_ms) {
+    if (!ssid || !ssid[0]) return APP_WIFI_FAILED;
+    if (!operation_gate_take(0, "Muse Wi-Fi connect")) return APP_WIFI_BUSY;
+    s_muse_napping = false;
+    wifi_known_list_t *list = malloc(sizeof(*list));
+    bool found = false;
+    bool ok = false;
+    char joined[WIFI_KNOWN_SSID_MAX + 1] = {0};
+    if (list) {
+        if (wifi_known_load(list) > 0) {
+            int k = find_saved_network(list, ssid);
+            if (k >= 0) {
+                found = true;
+                /* Only switch when the target is actually in range. Otherwise the attempt
+                 * tears down a working link, fails (reason 8 = no AP), and the keeper falls
+                 * back -- the flapping an out-of-range tap caused. */
+                if (wifi_mgr_cached_scan_has(ssid)) {
+                    if (!wifi_mgr_is_connected()) wifi_mgr_disconnect();
+                    ok = join_saved_network(list, k, timeout_ms, true, -1, joined);
+                } else {
+                    ESP_LOGI(TAG, "not switching to %s: not in range right now", ssid);
+                }
+            }
+        }
+        free(list);
+    }
+    bool paired = config_is_provisioned();
+    app_wifi_join_t result;
+    if (ok) {
+        ui_set_wifi(joined);
+        ui_set_status("wifi_connected");
+        persist_connected_wifi_channel();
+        if (paired) xSemaphoreGive(s_muse_joined);
+        result = APP_WIFI_JOINED;
+    } else if (found && !wifi_mgr_cached_scan_has(ssid)) {
+        result = APP_WIFI_NOT_NEARBY;   /* saved, but out of range: leave the current link up */
+    } else {
+        ui_set_status("wifi_failed");
+        if (paired) led_status_set_state(LED_STATE_WS_DISCONNECTED);
+        result = APP_WIFI_FAILED;
+    }
+    operation_gate_give();
+    return result;
+}
+
 app_wifi_join_t app_wifi_join_saved(int timeout_ms, bool first_only) {
     if (!operation_gate_take(0, "Muse Wi-Fi connect")) return APP_WIFI_BUSY;
     s_muse_napping = false;

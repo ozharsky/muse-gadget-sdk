@@ -275,31 +275,47 @@ static int op_wifi_saved(muse_wifi_saved_t *out, int max) {
     return n;
 }
 
-// Switch to a saved network by name: move it to the front of the saved list (so
-// JOIN_FIRST joins IT) and ask the keeper to join now. Password untouched -- Link keeps saved
-// networks' credentials itself, so Muse never needs the secret to switch.
+// Switch to a saved network by name. Joins it DIRECTLY with its own stored password
+// (app_wifi_join_named) -- it must never touch s_ssid/s_pass, which save_saved() would then
+// write back as that network's credentials (that bug wrote the wrong password and the join
+// failed). Runs in its own task: the join NVS-stack work would wedge a caller.
+struct switch_arg_t { char ssid[MUSE_SSID_MAX + 1]; };
+static void switch_task(void *arg) {
+    struct switch_arg_t *a = arg;
+    muse_state_set_caption("SWITCHING TO %s", a->ssid);
+    app_wifi_join_t r = app_wifi_join_named(a->ssid, CONNECT_TIMEOUT_MS);
+    ESP_LOGI(TAG, "wifi switch to %s: %s", a->ssid,
+             r == APP_WIFI_JOINED ? "joined"
+             : r == APP_WIFI_NOT_NEARBY ? "not in range" : "failed");
+    /* Say exactly what happened: "not in range" is not a failure, and either way it must be
+     * visible rather than a silent flapping retry. */
+    if (r == APP_WIFI_JOINED) {
+        muse_state_set_caption("JOINED %s", a->ssid);
+    } else if (r == APP_WIFI_NOT_NEARBY) {
+        muse_state_set_caption("%s NOT IN RANGE", a->ssid);
+    } else {
+        muse_state_set_caption("COULDN'T JOIN %s", a->ssid);
+    }
+    if (r == APP_WIFI_JOINED) {
+        // Joined. Do NOT touch s_ssid/s_pass/s_creds_gen here: the keeper's next join would
+        // otherwise write a half-updated credential pair back to the store. KEEP_RELOAD makes
+        // it re-read what Link actually saved, which sets them correctly.
+        keeper_kick(KEEP_RELOAD);
+    }
+    free(a);
+    vTaskDelete(NULL);
+}
+
 static bool op_wifi_switch(const char *ssid) {
     if (!ssid || !ssid[0]) return false;
-    bool found = false;
-    portENTER_CRITICAL(&s_lock);
-    int at = 0;
-    while (at < s_saved_count && strcmp(s_saved[at].ssid, ssid) != 0) at++;
-    if (at < s_saved_count && !s_saved[at].forgotten) {
-        saved_net_t picked = s_saved[at];
-        memmove(&s_saved[1], &s_saved[0], at * sizeof(s_saved[0]));
-        s_saved[0] = picked;
-        strlcpy(s_ssid, ssid, sizeof(s_ssid));
-        s_creds_gen++;
-        s_editing = true;
-        s_chosen = true;
-        found = true;
+    struct switch_arg_t *a = malloc(sizeof(*a));
+    if (!a) return false;
+    strlcpy(a->ssid, ssid, sizeof(a->ssid));
+    if (xTaskCreate(switch_task, "wifi_switch", 6144, a, 4, NULL) != pdPASS) {
+        free(a);
+        return false;
     }
-    portEXIT_CRITICAL(&s_lock);
-    if (found) {
-        keeper_kick(KEEP_SAVE);
-        keeper_kick(KEEP_WIFI);
-    }
-    return found;
+    return true;
 }
 
 static void op_wifi_forget(const char *ssid) {

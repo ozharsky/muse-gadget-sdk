@@ -674,10 +674,9 @@ static void on_wifi_saved(lv_event_t *e)
     s_forget_armed = i;
     s_forget_armed_us = now;
     if (muse_wifi_switch(s_saved[i].ssid)) {
-        muse_state_set_caption("SWITCHING TO %s", s_saved[i].ssid);
-        muse_state_poke();
+        muse_state_poke();   /* the switch task narrates the outcome */
     } else {
-        muse_state_set_caption("COULDN'T SWITCH TO %s", s_saved[i].ssid);
+        muse_state_set_caption("COULDN'T START SWITCH TO %s", s_saved[i].ssid);
         muse_state_poke();
     }
 }
