@@ -64,8 +64,10 @@ if(CONFIG_MUSE_ENABLED)
         # Face history: Bloop (Meta's) -> the Construct (muse_pixel_hermes.c) -> brief Keller trial (muse_pixel_keller.c);
         # all kept in the folder; swap the filename in these two lines to change.
         # GOLEM is the Hermes face: revert = swap muse_pixel_golem.c back to muse_pixel_hermes.c
-        list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_stone.c" "avatar/muse_pixel_switch.c")
-        foreach(f "avatar/muse_pixel.c:shodan" "avatar/muse_pixel_stone.c:stock")
+        list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_stone.c" "avatar/muse_pixel_golem.c" "avatar/muse_pixel_switch.c")
+        # Three faces: shodan (Muse), stock (Hermes default = stone), stock2 (Hermes ALT = golem,
+        # built for BEEPBOP). The golem's mood frames (golem_moods.h) ride along via its own include.
+        foreach(f "avatar/muse_pixel.c:shodan" "avatar/muse_pixel_stone.c:stock" "avatar/muse_pixel_golem.c:stock2")
             string(REPLACE ":" ";" p "${f}")
             list(GET p 0 file)
             list(GET p 1 tag)
