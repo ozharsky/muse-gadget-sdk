@@ -59,3 +59,79 @@ CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
 # the driver's ID read fails init. The vendor's own driver never reads it
 # and polls the touch registers directly, so skip it.
 CONFIG_ESP_LCD_TOUCH_CST816S_DISABLE_READ_ID=y
+
+# ---- Board settings (moved here from the untracked build sdkconfig, 2026-10-06) ----
+# These used to live ONLY in the generated build-*/sdkconfig, so a clean reconfigure
+# silently reset them (voice FX off, avatar rescaled, agent URLs gone). Secrets stay
+# out of git on purpose: restore_gadget_secrets.py re-applies the three of those.
+CONFIG_GADGET_PRODUCT_NAME="Muse Gadget"
+CONFIG_HOMEHUB_BLE_NAME_SUFFIX=""
+CONFIG_HOMEHUB_DEV_BUILD=y
+CONFIG_HOMEHUB_DISPLAY_COMMANDS=y
+# CONFIG_HOMEHUB_LED_BACKEND_DEVKIT_GPIO27 is not set
+# CONFIG_HOMEHUB_LED_BACKEND_IDEASPARK_ST7789 is not set
+# CONFIG_HOMEHUB_LED_BACKEND_NONE is not set
+# CONFIG_HOMEHUB_LED_BACKEND_PWM_RGB is not set
+# CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE is not set
+# CONFIG_HOMEHUB_LED_BACKEND_RETERMINAL_SPECTRA6 is not set
+# CONFIG_HOMEHUB_LED_BACKEND_RETERMINAL_UC8179 is not set
+# CONFIG_HOMEHUB_LED_BACKEND_SENSECAP_ST7701 is not set
+# CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING is not set
+# CONFIG_HOMEHUB_NVS_ENCRYPTION is not set
+CONFIG_HOMEHUB_PAIRING_AUTH_EPOCH=1
+# CONFIG_HOMEHUB_PAIRING_EFUSE_AUTH is not set
+# CONFIG_HOMEHUB_SHOW_AGENT_NAME is not set
+CONFIG_HOMEHUB_TOKEN_REFRESH_INTERVAL_DAYS=30
+CONFIG_HOMEHUB_TUNNEL=y
+CONFIG_HOMEHUB_WIFI_PASSWORD=""
+CONFIG_HOMEHUB_WIFI_SSID=""
+CONFIG_MUSE_AVATAR_CELL_PX=6
+CONFIG_MUSE_AVATAR_STYLE=0
+CONFIG_MUSE_AVATAR_X_OFFSET=3
+CONFIG_MUSE_AVATAR_Y_OFFSET=2
+# CONFIG_MUSE_BOARD_AIPI is not set
+# CONFIG_MUSE_BOARD_ESPRESSIF_BOX_3 is not set
+# CONFIG_MUSE_BOARD_FNK0104B is not set
+# CONFIG_MUSE_BOARD_GUITION_JC3248W535 is not set
+CONFIG_MUSE_BOARD_ID="waveshare_s3_143c"
+# CONFIG_MUSE_BOARD_M5STACK_CARDPUTER_ADV is not set
+# CONFIG_MUSE_BOARD_M5STACK_CORES3 is not set
+# CONFIG_MUSE_BOARD_M5STACK_STICKS3 is not set
+# CONFIG_MUSE_BOARD_M5STACK_STOPWATCH is not set
+# CONFIG_MUSE_BOARD_NONE is not set
+# CONFIG_MUSE_BOARD_SENSECAP_WATCHER is not set
+# CONFIG_MUSE_BOARD_WAVESHARE_S3_175 is not set
+# CONFIG_MUSE_BOARD_WAVESHARE_S3_175C is not set
+# CONFIG_MUSE_CJK_FONT is not set
+CONFIG_MUSE_DEFAULT_VOLUME=70
+CONFIG_MUSE_ENABLED=y
+CONFIG_MUSE_HATCH=y
+CONFIG_MUSE_HERMES_TTS_VOICE="en-US-Chirp3-HD-Algenib"
+CONFIG_MUSE_HERMES_URL="http://192.168.0.160:8788"
+CONFIG_MUSE_HERMES_URL_REMOTE="https://macbook-pro.tailcb1d23.ts.net:8443"
+CONFIG_MUSE_REPLY_MAX_CHARS=0
+CONFIG_MUSE_TIMEZONE="PST8PDT,M3.2.0,M11.1.0"
+CONFIG_MUSE_TTS_GOOGLE_VOICE="en-US-Chirp3-HD-Aoede"
+CONFIG_MUSE_TTS_PITCH_PCT=70
+CONFIG_MUSE_TTS_RATE_PCT=114
+CONFIG_MUSE_VOICE_FX=y
+CONFIG_MUSE_VOICE_HINT=""
+
+# Screen off on battery: the CPU drops to the crystal clock and light-sleeps between
+# button polls (muse_input.c update_power()). Same shape as sdkconfig.muse-aipi /
+# sdkconfig.muse-waveshare-s3-175c. This block was lost TWICE by reconfigures.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_BT_CTRL_MODEM_SLEEP=y
+CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1=y
+CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
+CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+# The CPU stays powered in light sleep: saving its state takes 8.5 KB of internal
+# RAM, more than Wi-Fi can spare here.
+# CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP is not set
+# Pins keep their state in light sleep. The workaround below would float them all,
+# panel and touch reset and the amp enable included.
+# CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND is not set
+CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
+CONFIG_PM_PROFILING=y
