@@ -1,0 +1,1251 @@
+// Hermes avatar: the stone god (close-up). A pale grey stone face with a gold winged helmet and two glowing eyes in dark sockets,
+// drawn from Qwen-Image 2.1 art (sprite_stone.h, 64x64). Picture-based like SHODAN: the stone and the gold are fixed pixel art;
+// what moves is light and the face. The eyes are drawn procedurally (identical solid eyes, one pupil that moves with the gaze,
+// crisp blinks) and the 20 core moods use pose deltas (brows, mouth, skin) with the firmware's own effects on top.
+// The state colours (listening blue, thinking violet, speaking amber, error red) go to the eyes and the effects; the stone keeps its look.
+// Built like the other avatars: the muse_pixel_* names get a prefix in CMakeLists.txt. See INSTALL.md.
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "muse_pixel.h"
+#include "sprite_stone.h"
+
+#if defined(__has_include) && __has_include("esp_attr.h")
+#include "esp_attr.h"   /* PSRAM placement for the frame buffer */
+#endif
+#ifndef EXT_RAM_BSS_ATTR
+#define EXT_RAM_BSS_ATTR   /* host preview builds: ordinary memory */
+#endif
+
+#define W MUSE_PX_W
+#define H MUSE_PX_H
+#define TAU 6.2831853f
+
+/* Colours past the sprite's own: the state's glow ramp, its accent, and white. */
+enum { D_G0 = SPR_N, D_G1, D_G2, D_G3, D_ACC, D_WHITE, N_PAL };
+
+typedef struct {
+    uint32_t f[4];
+    uint32_t acc;
+    float hue, sat, val;   /* how the eyes' glow is recoloured: hue shift in degrees from turquoise, scales */
+    float spread;          /* 1 keeps the glow's range of hues; near 0 squeezes them all to one */
+} scheme_t;
+
+static const scheme_t SCHEMES[MUSE_MODE_COUNT] = {
+    [MUSE_MODE_BOOT]      = { { 0xffffff, 0xd0fffd, 0x6af5ee, 0x0a8f94 }, 0x7ffffa, 0, 1.0f, 1.0f, 1.0f },
+    [MUSE_MODE_IDLE]      = { { 0xdcffff, 0x6ff7f2, 0x13d6d3, 0x087a7c }, 0x2ef0ee, 0, 1.0f, 1.0f, 1.0f },
+    [MUSE_MODE_LISTENING] = { { 0xe8f6ff, 0x78c8ff, 0x2f8fe6, 0x1a4f9e }, 0x4fa8ff, 38, 1.0f, 1.05f, 1.0f },
+    [MUSE_MODE_THINKING]  = { { 0xf4e6ff, 0xc58bff, 0x8a4dff, 0x4a2aa8 }, 0xa064ff, 100, 1.0f, 1.0f, 1.0f },
+    [MUSE_MODE_SPEAKING]  = { { 0xfff4d0, 0xffd25a, 0xe89a1c, 0x8a5410 }, 0xffc23c, -135, 1.0f, 1.1f, 1.0f },
+    [MUSE_MODE_ERROR]     = { { 0xffe0d8, 0xff5a4d, 0xc71f2e, 0x5a1020 }, 0xff3a3a, -180, 1.25f, 1.05f, 0.12f },
+    [MUSE_MODE_OFF]       = { { 0x9fb8b8, 0x4f7a7a, 0x2a4a4a, 0x142222 }, 0x2a5a5a, 0, 0.35f, 0.45f, 1.0f },
+};
+#define ANCHOR_HUE 180.0f
+
+static float s_hue, s_sat = 1.0f, s_val = 1.0f, s_spread = 1.0f;
+static float s_ramp[5][3];
+static bool s_pal_init;
+static uint16_t s_pal[N_PAL];
+static uint16_t s_pal_dim[N_PAL];
+
+static EXT_RAM_BSS_ATTR uint8_t s_fb[W * H];   /* PSRAM: internal RAM is needed for TLS */
+
+static const uint8_t BAYER4[4][4] = {
+    { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 },
+};
+
+/* ---------------------------------------------------------------------------
+ * Helpers
+ * ------------------------------------------------------------------------- */
+
+static inline float clampf(float v, float lo, float hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+static inline int iround(float v)
+{
+    return (int)(v < 0 ? v - 0.5f : v + 0.5f);
+}
+
+static inline uint32_t hash2(int x, int y)
+{
+    uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+
+static uint32_t s_rng = 8u;   /* any non-zero seed; 8 matches the Python preview renderer */
+static uint32_t irand(void)
+{
+    s_rng ^= s_rng << 13;
+    s_rng ^= s_rng >> 17;
+    s_rng ^= s_rng << 5;
+    return s_rng;
+}
+
+static float frand(void)
+{
+    return (float)(irand() & 0xffff) / 65535.0f;
+}
+
+static inline void px(int x, int y, uint8_t c)
+{
+    if ((unsigned)x < W && (unsigned)y < H) {
+        s_fb[y * W + x] = c;
+    }
+}
+
+static void ln(int x0, int y0, int x1, int y1, uint8_t c)
+{
+    int dx = abs(x1 - x0), dy = abs(y1 - y0);
+    int n = dx > dy ? dx : dy;
+    for (int i = 0; i <= n; i++) {
+        px(x0 + (n ? (x1 - x0) * i / n : 0), y0 + (n ? (y1 - y0) * i / n : 0), c);
+    }
+}
+
+static uint16_t to565f(float r, float g, float b)
+{
+    int ri = iround(r), gi = iround(g), bi = iround(b);
+    ri = ri < 0 ? 0 : ri > 255 ? 255 : ri;
+    gi = gi < 0 ? 0 : gi > 255 ? 255 : gi;
+    bi = bi < 0 ? 0 : bi > 255 ? 255 : bi;
+    return (uint16_t)(((ri >> 3) << 11) | ((gi >> 2) << 5) | (bi >> 3));
+}
+
+static void rgb_to_hsv(float r, float g, float b, float *h, float *s, float *v)
+{
+    float mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b)), d = mx - mn;
+    *v = mx;
+    *s = mx > 0 ? d / mx : 0;
+    float hh = 0;
+    if (d > 0) {
+        if (mx == r) {
+            hh = fmodf((g - b) / d, 6.0f);
+        } else if (mx == g) {
+            hh = (b - r) / d + 2.0f;
+        } else {
+            hh = (r - g) / d + 4.0f;
+        }
+        hh *= 60.0f;
+        if (hh < 0) {
+            hh += 360.0f;
+        }
+    }
+    *h = hh;
+}
+
+static void hsv_to_rgb(float h, float s, float v, float *r, float *g, float *b)
+{
+    h = fmodf(h, 360.0f);
+    if (h < 0) {
+        h += 360.0f;
+    }
+    float c = v * s, x = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f)), m = v - c;
+    float rr = 0, gg = 0, bb = 0;
+    if (h < 60) { rr = c; gg = x; }
+    else if (h < 120) { rr = x; gg = c; }
+    else if (h < 180) { gg = c; bb = x; }
+    else if (h < 240) { gg = x; bb = c; }
+    else if (h < 300) { rr = x; bb = c; }
+    else { rr = c; bb = x; }
+    *r = rr + m; *g = gg + m; *b = bb + m;
+}
+
+uint32_t muse_pixel_accent(muse_mode_t mode)
+{
+    return SCHEMES[mode < MUSE_MODE_COUNT ? mode : MUSE_MODE_IDLE].acc;
+}
+
+/* The eyes' glow slides to the state's hue; the stone and the gold only take a faint tint of the state colour. */
+static void update_palette(const scheme_t *t, float dt)
+{
+    float k = s_pal_init ? 1.0f - expf(-dt * 7.0f) : 1.0f;
+    s_hue += (t->hue - s_hue) * k;
+    s_sat += (t->sat - s_sat) * k;
+    s_val += (t->val - s_val) * k;
+    s_spread += (t->spread - s_spread) * k;
+    uint32_t tg[5] = { t->f[0], t->f[1], t->f[2], t->f[3], t->acc };
+    for (int i = 0; i < 5; i++) {
+        float tr = (float)((tg[i] >> 16) & 255), tgc = (float)((tg[i] >> 8) & 255), tb = (float)(tg[i] & 255);
+        if (!s_pal_init) {
+            s_ramp[i][0] = tr; s_ramp[i][1] = tgc; s_ramp[i][2] = tb;
+        } else {
+            s_ramp[i][0] += (tr - s_ramp[i][0]) * k;
+            s_ramp[i][1] += (tgc - s_ramp[i][1]) * k;
+            s_ramp[i][2] += (tb - s_ramp[i][2]) * k;
+        }
+    }
+    s_pal_init = true;
+    for (int i = 0; i < SPR_N; i++) {
+        float r = SPR_PAL[i][0] / 255.0f, g = SPR_PAL[i][1] / 255.0f, b = SPR_PAL[i][2] / 255.0f;
+        float h, s, v;
+        rgb_to_hsv(r, g, b, &h, &s, &v);
+        if (SPR_GLOW[i] && s > 0.12f) {
+            h = ANCHOR_HUE + s_hue + (h - ANCHOR_HUE) * s_spread;
+            s = clampf(s * s_sat, 0, 1);
+            v = clampf(v * s_val, 0, 1);
+            hsv_to_rgb(h, s, v, &r, &g, &b);
+        } else {
+            v = clampf(v * (s_val > 1.0f ? 1.0f : s_val), 0, 1);
+            hsv_to_rgb(h, s, v, &r, &g, &b);
+            r = r * 0.93f + s_ramp[4][0] / 255.0f * 0.07f * v;      /* the stone catches the glow */
+            g = g * 0.93f + s_ramp[4][1] / 255.0f * 0.07f * v;
+            b = b * 0.93f + s_ramp[4][2] / 255.0f * 0.07f * v;
+        }
+        s_pal[i] = to565f(r * 255.0f, g * 255.0f, b * 255.0f);
+        s_pal_dim[i] = to565f(r * 255.0f * 0.72f, g * 255.0f * 0.72f, b * 255.0f * 0.72f);
+    }
+    for (int i = 0; i < 4; i++) {
+        s_pal[D_G0 + i] = to565f(s_ramp[i][0], s_ramp[i][1], s_ramp[i][2]);
+        s_pal_dim[D_G0 + i] = to565f(s_ramp[i][0] * 0.72f, s_ramp[i][1] * 0.72f, s_ramp[i][2] * 0.72f);
+    }
+    s_pal[D_ACC] = to565f(s_ramp[4][0], s_ramp[4][1], s_ramp[4][2]);
+    s_pal_dim[D_ACC] = to565f(s_ramp[4][0] * 0.72f, s_ramp[4][1] * 0.72f, s_ramp[4][2] * 0.72f);
+    s_pal[D_WHITE] = to565f(255, 255, 255);
+    s_pal_dim[D_WHITE] = to565f(184, 184, 184);
+}
+
+/* ---------------------------------------------------------------------------
+ * Eye pixels of the sprite (kind 2): used for the X eyes and the glitch ghosts; the eyes themselves are drawn below.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    int n;
+    uint8_t x[32], y[32];
+    int xmin, xmax;
+} eye_t;
+
+static eye_t s_eye[2];
+static bool s_eyes_init;
+
+static void init_eyes(void)
+{
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            if (SPR_KIND[y * W + x] != 2) {
+                continue;
+            }
+            eye_t *e = &s_eye[x < 32 ? 0 : 1];
+            if (e->n < 32) {
+                e->x[e->n] = (uint8_t)x;
+                e->y[e->n] = (uint8_t)y;
+                e->n++;
+            }
+        }
+    }
+    for (int s = 0; s < 2; s++) {
+        s_eye[s].xmin = 99;
+        s_eye[s].xmax = -1;
+        for (int i = 0; i < s_eye[s].n; i++) {
+            if (s_eye[s].x[i] < s_eye[s].xmin) s_eye[s].xmin = s_eye[s].x[i];
+            if (s_eye[s].x[i] > s_eye[s].xmax) s_eye[s].xmax = s_eye[s].x[i];
+        }
+    }
+    s_eyes_init = true;
+}
+
+static struct {
+    float last_t, next_gaze, gx, gy, tx, ty, next_blink, blink_t, next_flick, flick_t;
+} s_look = { .next_gaze = 1.0f, .next_blink = 2.5f, .blink_t = -10.0f, .next_flick = 4.0f, .flick_t = -10.0f };
+
+/* Returns how closed the eyes are for a blink (0 open .. 1 shut) and updates the gaze. */
+static float look_update(const muse_pose_t *p, float dt)
+{
+    if (p->mode == MUSE_MODE_LISTENING) {
+        s_look.tx = s_look.ty = 0;
+    } else if (p->t >= s_look.next_gaze) {
+        s_look.tx = frand() * 2.0f - 1.0f;
+        s_look.ty = (frand() * 2.0f - 1.0f) * 0.6f;
+        if (p->mode == MUSE_MODE_THINKING) {
+            s_look.tx = s_look.tx < 0 ? -1.0f : 1.0f;
+            s_look.ty = -0.7f;
+        }
+        s_look.next_gaze = p->t + 1.2f + frand() * 2.6f;
+    }
+    float k = 1.0f - expf(-dt * 14.0f);
+    s_look.gx += (s_look.tx - s_look.gx) * k;
+    s_look.gy += (s_look.ty - s_look.gy) * k;
+    if (p->t >= s_look.next_blink) {
+        s_look.blink_t = p->t;
+        s_look.next_blink = p->t + 2.4f + frand() * 3.2f;
+    }
+    if (p->t >= s_look.next_flick) {
+        s_look.flick_t = p->t;
+        s_look.next_flick = p->t + 3.0f + frand() * 5.0f;
+    }
+    float b = (p->t - s_look.blink_t) / 0.2f;
+    return b >= 0 && b < 1 ? sinf(b * 3.1416f) : 0.0f;
+}
+
+/* ---------------------------------------------------------------------------
+ * Eyes: identical solid eyes, one pupil that moves with the gaze (in screen space, so both eyes look the same way),
+ * crisp lids (0 open, 0.5 half, 1 closed) with a skin eyelid and a dark lash line; a wink closes one eye as a smiling arc.
+ * ------------------------------------------------------------------------- */
+
+static inline bool eye_free(uint8_t c)
+{
+    return c == IDX_BLACK || c == IDX_DARK || c == IDX_SOCKET;
+}
+
+static void lid_fill(int side, int c0, int sx, int sy, bool arc)
+{
+    for (int yy = 0; yy < 3; yy++) {
+        int a0, a1;
+        if (yy < 2) {
+            a0 = EYE_T[yy][0];
+            a1 = EYE_T[yy][1];
+        } else if (arc) {
+            a0 = 2;
+            a1 = 6;
+        } else {
+            continue;
+        }
+        for (int xx = a0; xx <= a1; xx++) {
+            int cx = (side == 0 ? c0 + xx : c0 + 8 - xx) + sx, cy = EYE_ROW0 + yy + sy;
+            if ((unsigned)cx < W && (unsigned)cy < H && eye_free(s_fb[cy * W + cx])) {
+                s_fb[cy * W + cx] = IDX_SKIN;
+            }
+        }
+    }
+}
+
+static void draw_eyes(float gx, float gy, const float lid[2], const bool wide[2], const bool arc[2])
+{
+    int sx = iround(gx * 1.0f), dxp = iround(gx * 2.0f);
+    int sy = gy > 0.35f ? 1 : gy < -0.35f ? -1 : 0;
+    const int c0s[2] = { EYE_COL0_L, EYE_COL0_R };
+    for (int side = 0; side < 2; side++) {
+        int c0 = c0s[side];
+        float lid_s = lid[side];
+        if (lid_s >= 1.0f) {                 /* closed: skin eyelid with a dark lash line (flat, or a smiling arc for a wink) */
+            lid_fill(side, c0, sx, sy, arc[side]);
+            for (int x = 0; x < 9; x++) {
+                int col = side == 0 ? c0 + x : c0 + 8 - x;
+                px(col + sx, EYE_ROW0 + (arc[side] && x >= 2 && x <= 6 ? 3 : 2) + sy, IDX_DARK);
+            }
+            continue;
+        }
+        bool half = lid_s >= 0.5f;
+        if (half) {
+            lid_fill(side, c0, sx, sy, false);
+        }
+        /* rows of this eye: template row y in -1..4 (wide) or 0..3 */
+        int ry[6], rx0[6], rx1[6], nr = 0;
+        for (int y = wide[side] ? -1 : 0; y <= (wide[side] ? 4 : 3); y++) {
+            if (half && y <= 1) {
+                continue;                    /* a half lid hides the top rows */
+            }
+            ry[nr] = y;
+            rx0[nr] = wide[side] ? EYE_WIDE[y + 1][0] : EYE_T[y][0];
+            rx1[nr] = wide[side] ? EYE_WIDE[y + 1][1] : EYE_T[y][1];
+            nr++;
+        }
+        for (int i = 0; i < nr; i++) {
+            for (int x = rx0[i]; x <= rx1[i]; x++) {
+                int cx = (side == 0 ? c0 + x : c0 + 8 - x) + sx, cy = EYE_ROW0 + ry[i] + sy;
+                if ((unsigned)cx < W && (unsigned)cy < H && eye_free(s_fb[cy * W + cx])) {
+                    s_fb[cy * W + cx] = (x == rx0[i] || x == rx1[i]) ? IDX_EYE_R : IDX_EYE_U;
+                }
+            }
+        }
+        /* the pupil: 1x2 dark, or 2x3 on wide eyes; the column offset is in SCREEN space */
+        int pc = c0 + 4 + dxp, pcols[2], npc = 1, prow[3], npr = 0;
+        pcols[0] = pc;
+        if (wide[side]) {
+            pcols[1] = pc + 1;
+            npc = 2;
+            prow[0] = 1; prow[1] = 2; prow[2] = 3;
+            npr = 3;
+        } else if (nr >= 3) {
+            for (int i = 0; i < nr && npr < 2; i++) {
+                if (ry[i] >= 1) {
+                    prow[npr++] = ry[i];
+                }
+            }
+        } else if (nr > 0) {
+            prow[npr++] = ry[nr - 1];
+        }
+        for (int j = 0; j < npr; j++) {
+            int y = prow[j];
+            int x0 = wide[side] ? EYE_WIDE[y + 1][0] : EYE_T[y][0], x1 = wide[side] ? EYE_WIDE[y + 1][1] : EYE_T[y][1];
+            for (int k = 0; k < npc; k++) {
+                int xt = side == 0 ? pcols[k] - c0 : c0 + 8 - pcols[k];       /* back to template space for the "inside the glow" test */
+                if (x0 < xt && xt < x1) {
+                    px(pcols[k] + sx, EYE_ROW0 + y + sy, IDX_DARK);
+                }
+            }
+        }
+    }
+}
+
+static void xeyes(void)
+{
+    for (int s = 0; s < 2; s++) {
+        int cx = (s_eye[s].xmin + s_eye[s].xmax) / 2;
+        for (int d = -2; d <= 2; d++) {
+            px(cx + d, EYE_ROW0 + d, D_G1);
+            px(cx + d, EYE_ROW0 - d, D_G1);
+        }
+    }
+}
+
+/* In the state's glow colour when the eyes are bright; keeps them coloured instead of near-white. */
+static void eye_glow(float bright)
+{
+    for (int y = EYES_R0; y < EYES_R1; y++) {
+        for (int x = EYES_C0; x < EYES_C1; x++) {
+            uint8_t *c = &s_fb[y * W + x];
+            if (bright > 0.8f && *c == IDX_EYE_U) {
+                *c = D_G1;
+            }
+            if (bright > 0.5f && *c == IDX_EYE_R) {
+                *c = D_G2;
+            }
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Light: glints along the gold, embers in the helmet shadow
+ * ------------------------------------------------------------------------- */
+
+static void animate_light(float t, float speed, float level)
+{
+    int tick = (int)(t * 3.0f);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            uint8_t kind = SPR_KIND[y * W + x];
+            if (kind == 1) {
+                float ph = fmodf((float)(x * 9 + y * 13) / 96.0f - t * speed, 1.0f);
+                if (ph < 0) {
+                    ph += 1.0f;
+                }
+                if (ph < 0.10f) {
+                    s_fb[y * W + x] = D_WHITE;
+                } else if (ph < 0.22f) {
+                    s_fb[y * W + x] = D_G0;
+                }
+            } else if (kind == 3) {
+                if (((hash2(x, y) + (uint32_t)tick) & 7u) == 0u) {
+                    s_fb[y * W + x] = SPR_BRIGHT[s_fb[y * W + x]];
+                } else if (level > 0.3f && ((hash2(x, y + 7) + (uint32_t)(t * 12.0f)) & 15u) == 0u) {
+                    s_fb[y * W + x] = SPR_BRIGHT[SPR_BRIGHT[s_fb[y * W + x]]];
+                }
+            }
+        }
+    }
+}
+
+/* A ring that ripples with the voice, at the edge of the picture. */
+static void draw_wave(float t, float level)
+{
+    float lv = level < 0.12f ? 0.12f : level;
+    for (int i = 0; i < 180; i++) {
+        float a = (float)i * TAU / 180.0f;
+        float w = lv * 2.4f * sinf(a * 7.0f + t * 9.0f) + lv * 1.0f * sinf(a * 13.0f - t * 6.0f);
+        float r = 27.5f + w * 0.8f;
+        px(iround(31.5f + cosf(a) * r), iround(31.5f + sinf(a) * r), (i & 1) ? D_G1 : D_G0);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Reactions: the 20 core moods (the avatar.react command). The relay's other moods map to the nearest of these.
+ * ------------------------------------------------------------------------- */
+
+enum {
+    R_NONE, R_SMIRK, R_SCAN, R_ALERT, R_GLITCH, R_SQUINT, R_ANGRY, R_SURPRISED, R_PLEASED,
+    R_LAUGH, R_WINK, R_SLEEPY, R_CONFUSED, R_EVIL, R_HACKED, R_POWERUP, R_BORED, R_DISGUST, R_TARGET,
+    R_NERVOUS, R_PROUD, R_COUNT
+};
+
+static const struct { const char *name; float dur; } REACTIONS[R_COUNT] = {
+    [R_SMIRK] = { "smirk", 2.8f },       [R_SCAN] = { "scan", 2.6f },         [R_ALERT] = { "alert", 2.2f },
+    [R_GLITCH] = { "glitch", 1.8f },     [R_SQUINT] = { "squint", 2.6f },     [R_ANGRY] = { "angry", 2.6f },
+    [R_SURPRISED] = { "surprised", 1.8f }, [R_PLEASED] = { "pleased", 2.6f }, [R_LAUGH] = { "laugh", 2.4f },
+    [R_WINK] = { "wink", 1.6f },         [R_SLEEPY] = { "sleepy", 3.4f },     [R_CONFUSED] = { "confused", 2.6f },
+    [R_EVIL] = { "evil", 3.0f },         [R_HACKED] = { "hacked", 2.4f },     [R_POWERUP] = { "powerup", 2.4f },
+    [R_BORED] = { "bored", 3.2f },       [R_DISGUST] = { "disgust", 2.4f },   [R_TARGET] = { "target", 2.6f },
+    [R_NERVOUS] = { "nervous", 2.6f },   [R_PROUD] = { "proud", 2.8f },
+};
+
+/* Moods this face has no props for -> the nearest core mood (a judgment call; the golem drew a prop for each). */
+static const struct { const char *name, *as; } ALIASES[] = {
+    { "excited", "powerup" }, { "confetti", "pleased" }, { "sunny", "pleased" }, { "rain", "bored" }, { "storm", "angry" },
+    { "cold", "nervous" }, { "rainbow", "pleased" },
+    { "searching", "scan" }, { "browsing", "scan" }, { "reading", "squint" }, { "writing", "smirk" }, { "checking", "target" },
+    { "calculating", "squint" }, { "calendar", "bored" }, { "monitoring", "scan" }, { "generating", "powerup" }, { "running", "powerup" },
+    { "invoking", "powerup" }, { "delegating", "smirk" }, { "remembering", "confused" },
+    { "shrug", "confused" }, { "embarrassed", "nervous" }, { "scared", "nervous" }, { "cool", "smirk" }, { "mind_blown", "surprised" },
+    { "crying_laughing", "laugh" }, { "sad", "bored" }, { "nod", "proud" },
+    { "cloudy", "bored" }, { "windy", "squint" }, { "hot", "disgust" }, { "snow", "nervous" },
+};
+
+static volatile int s_react_req;     /* set from any task; the renderer picks it up */
+static int s_react_id;
+static float s_react_start;
+
+/* The relay's [react:name] (via avatar.react / the Hermes mood list). false if the name is unknown. */
+bool muse_pixel_react(const char *name)
+{
+    if (!name) {
+        return false;
+    }
+    for (size_t k = 0; k < sizeof(ALIASES) / sizeof(ALIASES[0]); k++) {
+        if (strcmp(name, ALIASES[k].name) == 0) {
+            name = ALIASES[k].as;
+            break;
+        }
+    }
+    for (int i = 1; i < R_COUNT; i++) {
+        if (strcmp(name, REACTIONS[i].name) == 0) {
+            s_react_req = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* 3x5 particles: 0 1 ? ! Z */
+enum { G_0, G_1, G_Q, G_BANG, G_Z };
+static const uint8_t GLY[5][5] = { { 7, 5, 5, 5, 7 }, { 2, 6, 2, 2, 7 }, { 7, 1, 3, 0, 2 }, { 2, 2, 2, 0, 2 }, { 7, 1, 2, 4, 7 } };
+
+static void glyph(int x, int y, int g, uint8_t c, bool outline)
+{
+    if (outline) {                                    /* a dark outline so it reads over the face */
+        for (int r = 0; r < 5; r++) {
+            for (int b = 0; b < 3; b++) {
+                if (GLY[g][r] & (4 >> b)) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        for (int dy = -1; dy <= 1; dy++) {
+                            px(x + b + dx, y + r + dy, IDX_BLACK);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (int r = 0; r < 5; r++) {
+        for (int b = 0; b < 3; b++) {
+            if (GLY[g][r] & (4 >> b)) {
+                px(x + b, y + r, c);
+            }
+        }
+    }
+}
+
+/* A stipple of the state's glow on the skin around the eyes. */
+static void eye_bloom(float k, uint8_t c)
+{
+    static const int cx[2] = { 22, 45 };
+    k *= 0.5f;
+    for (int e = 0; e < 2; e++) {
+        for (int dy = -5; dy <= 5; dy++) {
+            for (int dx = -9; dx <= 9; dx++) {
+                float d2 = (float)(dx * dx) / 5.0f + (float)(dy * dy);
+                int x = cx[e] + dx, y = EYE_ROW0 + dy;
+                if ((unsigned)x < W && (unsigned)y < H && d2 < 22.0f && ((x + y) & 1) == 0 && BAYER4[y & 3][x & 3] < (int)((1.0f - d2 / 22.0f) * 16.0f * k)) {
+                    uint8_t cur = s_fb[y * W + x];
+                    if (cur == IDX_SOCKET || cur == IDX_SKIN || (cur < SPR_N && SPR_PAL[cur][0] > 120)) {
+                        s_fb[y * W + x] = c;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* An energy ring around the head: it shows on the dark hair and background only, never over the face. */
+static void halo(float t, float k, uint8_t c)
+{
+    float pulse = sinf(t * 7.0f) * 1.2f;
+    for (int i = 0; i < 360; i += 3) {
+        float a = (float)i * TAU / 360.0f;
+        int x = iround(31.5f + cosf(a) * (29.0f + pulse)), y = iround(31.5f + sinf(a) * (29.0f + pulse));
+        if (BAYER4[(i / 3) & 3][((i / 3) >> 2) & 3] < (int)(k * 16.0f) && (unsigned)x < W && (unsigned)y < H && s_fb[y * W + x] <= 4) {
+            s_fb[y * W + x] = c;
+        }
+    }
+}
+
+/* A crackle of lightning from each eye's outer corner, redrawn every few frames so it jumps. */
+static void lightning(float t, uint8_t c1, uint8_t c2)
+{
+    int seed = (int)(t * 14.0f);
+    for (int side = -1; side <= 1; side += 2) {
+        int x = side < 0 ? 16 : 51, y = 26;
+        for (int seg = 0; seg < 4; seg++) {
+            int nx = x + side * (3 + (int)(hash2(seed, seg + side) % 3u));
+            int ny = y + (int)(hash2(seed + 7, seg * 3 + side) % 7u) - 3;
+            ln(x, y, nx, ny, c1);
+            px(nx, ny + 1, c2);
+            x = nx;
+            y = ny;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Effects
+ * ------------------------------------------------------------------------- */
+
+static void glitch(int bands, int max_shift, int y_lo, int y_hi)
+{
+    uint8_t tmp[W];
+    for (int b = 0; b < bands; b++) {
+        int y0 = y_lo + (int)(irand() % (uint32_t)(y_hi - y_lo));
+        int h = 1 + (int)(irand() % 4);
+        int sh = (1 + (int)(irand() % (uint32_t)max_shift)) * ((irand() & 1) ? 1 : -1);
+        for (int y = y0; y < y0 + h && y < H; y++) {
+            uint8_t *row = &s_fb[y * W];
+            memset(tmp, IDX_BLACK, W);
+            for (int x = 0; x < W; x++) {
+                int nx = x + sh;
+                if ((unsigned)nx < W) {
+                    tmp[nx] = row[x];
+                }
+            }
+            memcpy(row, tmp, W);
+        }
+    }
+}
+
+static void shift_rows(int dy)
+{
+    if (dy > 0) {
+        memmove(&s_fb[dy * W], &s_fb[0], (size_t)(H - dy) * W);
+        memset(&s_fb[0], IDX_BLACK, (size_t)dy * W);
+    } else if (dy < 0) {
+        memmove(&s_fb[0], &s_fb[-dy * W], (size_t)(H + dy) * W);
+        memset(&s_fb[(H + dy) * W], IDX_BLACK, (size_t)(-dy) * W);
+    }
+}
+
+static void shift_cols(int dx)
+{
+    uint8_t tmp[W];
+    for (int y = 0; y < H; y++) {
+        memset(tmp, IDX_BLACK, W);
+        for (int x = 0; x < W; x++) {
+            int nx = x + dx;
+            if ((unsigned)nx < W) {
+                tmp[nx] = s_fb[y * W + x];
+            }
+        }
+        memcpy(&s_fb[y * W], tmp, W);
+    }
+}
+
+/* The screen is round: fade the corners out so the square has no edges. */
+static EXT_RAM_BSS_ATTR uint8_t s_vig[W * H];   /* PSRAM */
+
+static void vignette(void)
+{
+    static bool init;
+    if (!init) {
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                float dx = (float)x - 31.5f, dy = (float)y - 31.5f;
+                float d = sqrtf(dx * dx + dy * dy);
+                s_vig[y * W + x] = (uint8_t)(clampf((32.5f - d) / 3.5f, 0, 1) * 16.0f + 0.5f);
+            }
+        }
+        init = true;
+    }
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            uint8_t k = s_vig[y * W + x];
+            if (k < 16 && BAYER4[y & 3][x & 3] >= k) {
+                s_fb[y * W + x] = IDX_BLACK;
+            }
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Poses: brows, mouth and skin dither in (4x4 Bayer); the eye zones switch crisply at half weight.
+ * ------------------------------------------------------------------------- */
+
+static void pose(int id, float w, bool eyes)
+{
+    if (w <= 0.001f) {
+        return;
+    }
+    const pose_t *p = &POSE_TABLE[id];
+    int thr = (int)lrintf(w * 16.0f);
+    for (int k = 0; k < p->n; k++) {
+        int pos = p->pos[k];
+        if (w >= 0.999f || BAYER4[(pos >> 6) & 3][pos & 3] < thr) {
+            s_fb[pos] = p->val[k];
+        }
+    }
+    if (eyes && w >= 0.5f && p->zone) {
+        for (int k = 0; k < EYE_ZONE_N; k++) {
+            s_fb[EYE_ZONE_POS[k]] = p->zone[k];
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Scaling to the screen (as the SDK expects)
+ * ------------------------------------------------------------------------- */
+
+#define MAP_MAX 512
+static EXT_RAM_BSS_ATTR uint8_t s_map[MAP_MAX];   /* PSRAM */
+static int s_size;
+
+void muse_pixel_set_size(int px_size)
+{
+    s_size = px_size < MAP_MAX ? px_size : MAP_MAX;
+    bool grid = s_size >= 3 * W;
+    for (int i = 0; i < s_size; i++) {
+        int cell = i * W / s_size;
+        bool edge = grid && (i + 1) * W / s_size != cell;
+        s_map[i] = (uint8_t)(cell | (edge ? 0x80 : 0));
+    }
+}
+
+void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1)
+{
+    int n = x1 - x0 + 1;
+    const uint8_t *xmap = &s_map[x0];
+    const uint16_t *prev = NULL;
+    uint8_t prev_m = 0;
+    for (int y = y0; y <= y1; y++, dst += stride_px) {
+        uint8_t m = s_map[y];
+        if (prev && m == prev_m) {
+            memcpy(dst, prev, n * sizeof(uint16_t));
+            continue;
+        }
+        const uint8_t *row = &s_fb[(m & 0x7f) * W];
+        if (m & 0x80) {
+            for (int i = 0; i < n; i++) {
+                dst[i] = s_pal_dim[row[xmap[i] & 0x7f]];
+            }
+        } else {
+            for (int i = 0; i < n; i++) {
+                uint8_t xm = xmap[i];
+                uint8_t c = row[xm & 0x7f];
+                dst[i] = xm & 0x80 ? s_pal_dim[c] : s_pal[c];
+            }
+        }
+        prev = dst;
+        prev_m = m;
+    }
+}
+
+/* Agent-switch transition: tears the frame in sideways bands and sprinkles it with noise; amp 0..1. */
+void muse_pixel_glitch(float amp)
+{
+    if (amp <= 0.01f) {
+        return;
+    }
+    uint8_t row[W];
+    for (int y = 0; y < H; y += 3) {
+        int sh = (int)((frand() - 0.5f) * 2.0f * amp * 26.0f);
+        if (!sh) {
+            continue;
+        }
+        for (int j = y; j < y + 3 && j < H; j++) {
+            uint8_t *r = &s_fb[j * W];
+            for (int x = 0; x < W; x++) {
+                row[x] = r[((x - sh) % W + W) % W];
+            }
+            memcpy(r, row, W);
+        }
+    }
+    int n = (int)(amp * 0.10f * W * H);
+    for (int i = 0; i < n; i++) {
+        s_fb[(int)(frand() * (H - 1)) * W + (int)(frand() * (W - 1))] = (frand() < 0.5f) ? D_ACC : D_WHITE;
+    }
+    if (frand() < amp * 0.6f) {
+        int y = (int)(frand() * (H - 3)), x0 = (int)(frand() * 40), len = 8 + (int)(frand() * 24);
+        for (int j = 0; j < 2; j++) {
+            for (int x = x0; x < x0 + len && x < W; x++) {
+                s_fb[(y + j) * W + x] = D_ACC;
+            }
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * One frame
+ * ------------------------------------------------------------------------- */
+
+void muse_pixel_render(const muse_pose_t *p)
+{
+    if (!s_eyes_init) {
+        init_eyes();
+    }
+    float dt = s_look.last_t > 0 ? clampf(p->t - s_look.last_t, 0, 0.2f) : 0.04f;
+    s_look.last_t = p->t;
+
+    muse_mode_t mode = p->mode;
+    float t = p->t, level = clampf(p->level, 0, 1);
+    float happy = mode == MUSE_MODE_ERROR ? 0 : p->happy;
+    int rq = s_react_req;
+    if (rq) {
+        s_react_req = 0;
+        s_react_id = rq;
+        s_react_start = t;
+    }
+    int rid = R_NONE;
+    float rt = 0, rk = 0;
+    if (s_react_id != R_NONE) {
+        rt = t - s_react_start;
+        float dur = REACTIONS[s_react_id].dur;
+        if (rt >= dur) {
+            s_react_id = R_NONE;
+        } else {
+            rid = s_react_id;
+            rk = clampf(fminf(rt / 0.15f, (dur - rt) / 0.4f), 0, 1);
+        }
+    }
+    const scheme_t *tgt = &SCHEMES[mode];
+    if (rid == R_ANGRY || rid == R_EVIL || (rid == R_ALERT && (((int)(rt * 4.0f)) & 1) == 0) ||
+        (rid == R_TARGET && rt > 1.3f)) {
+        tgt = &SCHEMES[MUSE_MODE_ERROR];
+    } else if (rid == R_DISGUST) {
+        tgt = &SCHEMES[MUSE_MODE_SPEAKING];           /* a sickly amber */
+    } else if (rid == R_SLEEPY) {
+        tgt = &SCHEMES[MUSE_MODE_OFF];                /* the light dims */
+    } else if (rid == R_HACKED && (((int)(rt * 9.0f)) % 5) == 0) {
+        tgt = &SCHEMES[MUSE_MODE_THINKING];           /* a violet flicker */
+    }
+    update_palette(tgt, dt);
+    float close = look_update(p, dt);
+
+    /* Per-mode parameters. */
+    float bright = 0.6f, pulse = 0.35f, widen = 0, mouth = 0;
+    bool xeye = false;
+    int shake = 0;
+    switch (mode) {
+    case MUSE_MODE_LISTENING:
+        widen = 1.0f;
+        bright = 0.9f;
+        pulse = 0.55f + level * 0.8f;
+        break;
+    case MUSE_MODE_THINKING:
+        pulse = 0.9f;
+        bright = 0.7f;
+        break;
+    case MUSE_MODE_SPEAKING:
+        bright = 1.0f;
+        pulse = 0.7f + level * 1.2f;
+        mouth = level * 1.1f + 0.15f * fabsf(sinf(t * 29.0f));
+        break;
+    case MUSE_MODE_ERROR:
+        xeye = (((int)(t * 11.0f)) % 5) != 0;
+        shake = p->mode_t < 0.6f ? (((int)(t * 30.0f)) & 1 ? 2 : -2) : 0;
+        pulse = 1.4f;
+        bright = 1.0f;
+        break;
+    default:
+        break;
+    }
+    float bloom = 0, wink_s = 0;
+    int face_pose[2] = { -1, -1 };
+    float face_w[2] = { 0, 0 };
+    int nface = 0;
+#define FACE(id, w) do { face_pose[nface] = (id); face_w[nface] = (w); nface++; } while (0)
+    switch (rid) {
+    case R_SMIRK:
+        bright = 1.0f; bloom = 0.6f; FACE(POSE_SMIRK, rk);
+        break;
+    case R_SQUINT:
+        bright = 0.5f; FACE(POSE_SQUINT, rk);
+        break;
+    case R_SURPRISED:
+        widen = 1.0f; bright = 1.0f; bloom = 0.8f; FACE(POSE_SURPRISED, rk);
+        break;
+    case R_PLEASED:
+        happy = fmaxf(happy, rk); bloom = 0.6f; FACE(POSE_PLEASED, rk);
+        break;
+    case R_ANGRY:
+        bright = 1.0f; bloom = 1.0f; FACE(POSE_ANGRY, rk);
+        break;
+    case R_EVIL:
+        bright = 1.0f; bloom = 1.0f; FACE(POSE_EVIL, rk);
+        break;
+    case R_SCAN:
+        bright = 0.9f; bloom = 0.5f;
+        break;
+    case R_GLITCH:
+        if (((int)(t * 20.0f)) % 3 == 0) {
+            FACE(POSE_CLOSED, 1.0f);
+        }
+        break;
+    case R_LAUGH: {
+        bool laughing = sinf(t * 26.0f) > -0.2f;
+        FACE(laughing ? POSE_LAUGH : POSE_PLEASED, rk);
+        break;
+    }
+    case R_WINK: {
+        bright = 1.0f; bloom = 0.7f;
+        float e = fminf(clampf((rt - 0.25f) / 0.16f, 0, 1), clampf((1.12f - rt) / 0.16f, 0, 1));
+        wink_s = e * e * (3.0f - 2.0f * e);            /* eased: the lid and the face move over ~4 frames each way */
+        FACE(POSE_WINK, wink_s);
+        if (wink_s >= 0.5f) {
+            shake = -1;                                /* a one-pixel lean toward the winking side */
+        }
+        break;
+    }
+    case R_SLEEPY:
+        bright = 0.3f;
+        FACE(POSE_SLEEPY, clampf(rt / 1.2f, 0, 1));
+        FACE(POSE_CLOSED, clampf((rt - 1.8f) / 1.2f, 0, 0.85f) * ((rk >= 1.0f || rt < 1.0f) ? 1.0f : rk));
+        break;
+    case R_CONFUSED:
+        FACE(((int)(t * 2.6f)) & 1 ? POSE_CONFUSED_L : POSE_CONFUSED_R, rk);
+        break;
+    case R_BORED:
+        bright = 0.4f; FACE(POSE_BORED, rk);
+        break;
+    case R_DISGUST:
+        bright = 0.7f; FACE(POSE_DISGUST, rk);
+        break;
+    case R_NERVOUS:
+        widen = 1.0f; FACE(((int)(t * 7.0f)) & 1 ? POSE_NERVOUS_L : POSE_NERVOUS_R, rk);
+        break;
+    case R_PROUD:
+        bright = 1.0f; bloom = 0.5f; FACE(POSE_PROUD, rk);
+        break;
+    case R_POWERUP:
+        bright = 1.0f; bloom = clampf(rt * 1.2f, 0, 1); FACE(POSE_TARGET, clampf(rt * 2.0f, 0, 1));
+        break;
+    case R_TARGET:
+        bright = 1.0f; FACE(POSE_TARGET, rk);
+        break;
+    case R_ALERT:
+        FACE(POSE_ALERT, rk);
+        break;
+    default:
+        break;
+    }
+    if ((rid == R_ALERT || rid == R_ANGRY || rid == R_EVIL) && rt < 0.6f) {
+        shake = ((int)(t * 30.0f)) & 1 ? 1 : -1;
+    }
+    if (rid == R_NERVOUS) {
+        shake = ((int)(t * 40.0f)) & 1 ? 1 : 0;
+    }
+    if (happy > 0) {
+        bright = 1.0f;
+        widen = 0.8f;
+        pulse += happy;
+    }
+    float boot = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 1.5f, 0, 1) : 1.0f;
+    float off = mode == MUSE_MODE_OFF ? clampf(p->mode_t / 1.3f, 0, 1) : 0.0f;
+    float eyes_open = 1.0f;
+    if (mode == MUSE_MODE_BOOT) {
+        eyes_open = clampf((p->mode_t - 0.9f) / 0.25f, 0, 1);
+        bright = p->mode_t > 0.9f && p->mode_t < 1.25f ? 1.0f : bright;
+    }
+    if (mode == MUSE_MODE_OFF) {
+        eyes_open = clampf(1.0f - p->mode_t / 0.45f, 0, 1);
+    }
+
+    memcpy(s_fb, SPR, sizeof(s_fb));
+    for (int i = 0; i < W * H; i++) {
+        if (SPR_KIND[i] == 2) {
+            s_fb[i] = IDX_BLACK;                       /* the eyes are drawn below (or by a pose) */
+        }
+    }
+    animate_light(t, 0.45f + pulse * 0.9f, level);
+    if (bloom > 0) {
+        eye_bloom(bloom, D_G3);
+    }
+    if (xeye) {
+        xeyes();
+    } else {
+        float gx = s_look.gx, gy = s_look.gy;
+        if (rid == R_SCAN) {
+            gx = 0.0f;
+            gy = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
+        }
+        float blink = close < 0.3f ? 0.0f : close < 0.85f ? 0.5f : 1.0f;
+        float lid;
+        if (mode == MUSE_MODE_BOOT || mode == MUSE_MODE_OFF) {
+            float lq = 1.0f - eyes_open;
+            lid = lq < 0.34f ? 0.0f : lq < 0.67f ? 0.5f : 1.0f;
+        } else {
+            lid = fmaxf(blink, mode == MUSE_MODE_THINKING ? 0.5f : 0.0f);
+        }
+        float lids[2] = { lid, lid };
+        bool wides[2], arcs[2] = { false, false };
+        wides[0] = wides[1] = (mode == MUSE_MODE_LISTENING || (widen > 0.5f && nface == 0));
+        if (rid == R_WINK) {
+            float lidl = wink_s < 0.2f ? 0.0f : wink_s < 0.65f ? 0.5f : 1.0f;
+            lids[0] = lidl;
+            lids[1] = 0.0f;
+            wides[0] = wides[1] = false;
+            arcs[0] = true;
+            gx = gy = 0.0f;
+        }
+        draw_eyes(gx, gy, lids, wides, arcs);
+        for (int i = 0; i < nface; i++) {
+            pose(face_pose[i], face_w[i], face_pose[i] != POSE_WINK);
+        }
+        if (happy > 0 && nface == 0) {
+            pose(POSE_PLEASED, happy, true);
+        }
+    }
+    if (mode == MUSE_MODE_SPEAKING && mouth > 0.22f) {
+        pose(mouth > 0.9f ? POSE_MOUTH_2 : POSE_MOUTH_1, 1.0f, true);
+    }
+    if (!xeye) {
+        eye_glow(bright);
+    }
+    if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
+        draw_wave(t, level);
+    }
+    if (rid != R_NONE) {
+        int tick = (int)(t * 12.0f);
+        switch (rid) {
+        case R_SMIRK:
+            halo(t, 0.25f * rk, D_G3);
+            break;
+        case R_SCAN: {                                         /* a sweep down the face, mapping it as it goes */
+            int y = 12 + (int)(rt / REACTIONS[R_SCAN].dur * 42.0f);
+            for (int yy = 12; yy < y - 2; yy += 3) {
+                for (int x = 10; x < 53; x++) {
+                    uint8_t u = s_fb[yy * W + x];
+                    if (((x + yy) & 1) == 0 && u < SPR_N && SPR_PAL[u][0] > 120) {
+                        s_fb[yy * W + x] = D_G2;               /* scanned rows keep a faint grid */
+                    }
+                }
+            }
+            for (int x = 8; x < 55; x++) {
+                px(x, y, D_WHITE);
+                px(x, y - 1, D_G0);
+                px(x, y - 2, D_G2);
+            }
+            if (rt > 0.3f && ((tick & 3) == 0)) {
+                glyph(48 + (tick & 1) * 3, y - 6, (tick >> 1) & 1 ? G_0 : G_1, D_G1, true);
+            }
+            break;
+        }
+        case R_ALERT:
+            halo(t, 0.9f, D_G1);
+            if ((((int)(rt * 6.0f)) & 1) == 0) {
+                glyph(51, 5, G_BANG, D_WHITE, true);
+            }
+            break;
+        case R_GLITCH:
+            for (int k = 0; k < 5; k++) {                      /* binary digits spilling through */
+                glyph(4 + (int)(hash2(tick, k) % 54u), 4 + (int)(hash2(tick + 3, k) % 50u), hash2(k, tick) & 1, k & 1 ? D_G0 : D_G2, false);
+            }
+            break;
+        case R_SQUINT:
+            if (((int)(rt * 3.0f)) & 1) {
+                glyph(51, 10, G_Q, D_G1, true);
+            }
+            break;
+        case R_ANGRY:
+            halo(t, 0.9f, D_G1);
+            if (tick & 1) {
+                lightning(t, D_WHITE, D_G0);
+            }
+            break;
+        case R_EVIL:
+            halo(t, 1.0f, D_G1);
+            if (tick & 1) {
+                lightning(t, D_G0, D_WHITE);
+            }
+            break;
+        case R_SURPRISED:
+            glyph(51, 5, G_BANG, D_WHITE, true);
+            break;
+        case R_PLEASED:
+            halo(t, 0.5f * rk, D_G1);
+            if (tick & 1) {                                    /* twinkles by the eyes */
+                static const int tw[2][2] = { { 13, 24 }, { 50, 24 } };
+                for (int i = 0; i < 2; i++) {
+                    int cx = tw[i][0], cy = tw[i][1];
+                    px(cx, cy, D_WHITE); px(cx - 1, cy + 1, D_G0); px(cx + 1, cy + 1, D_G0); px(cx, cy + 2, D_G0);
+                }
+            }
+            break;
+        case R_LAUGH:
+            halo(t, (tick & 1) ? 0.5f : 0.1f, D_G2);
+            break;
+        case R_WINK:
+            if (wink_s >= 0.5f) {
+                static const int sm[7][2] = { { 22, 49 }, { 21, 49 }, { 20, 48 }, { 19, 47 }, { 41, 49 }, { 42, 48 }, { 43, 47 } };
+                for (int i = 0; i < 7; i++) {                  /* the smile pulls up at both ends, more on the winking side */
+                    px(sm[i][0], sm[i][1], IDX_BLACK);
+                }
+                for (int cx = 18; cx < 25; cx++) {             /* the cheek rises under the shut eye */
+                    uint8_t c = s_fb[30 * W + cx];
+                    if (c == IDX_SKIN || c == IDX_STONE_L || c == IDX_HI2) {
+                        s_fb[30 * W + cx] = IDX_HI;
+                    }
+                }
+            }
+            if (rt > 0.3f && rt < 0.95f) {                     /* a spark by the open eye */
+                px(51, 23, D_WHITE); px(50, 23, D_G0); px(52, 23, D_G0); px(51, 22, D_G0); px(51, 24, D_G0);
+            }
+            break;
+        case R_SLEEPY:
+            for (int k = 0; k < 3; k++) {                      /* Zs drifting up */
+                int y = 24 - (int)fmodf(rt * 6.0f + (float)k * 8.0f, 22.0f);
+                if (y > 2) {
+                    glyph(51 + k * 3 + (int)(sinf(rt * 2.0f + (float)k) * 1.5f), y, G_Z, k == 0 ? D_WHITE : D_G0, true);
+                }
+            }
+            break;
+        case R_CONFUSED:
+            if (((int)(rt * 4.0f)) & 1) {
+                glyph(46, 4, G_Q, D_G0, true);
+            }
+            break;
+        case R_HACKED:
+            for (int x = 1; x < 63; x += 3) {                  /* digits raining down */
+                if (hash2(x, 5) % 3u) {
+                    continue;
+                }
+                int head = ((int)(t * (20.0f + (float)(hash2(x, 9) % 20u)) + (float)(hash2(x, 2) % 70u))) % 76 - 8;
+                glyph(x, head, hash2(x, tick) & 1, D_G0, false);
+                glyph(x, head - 7, hash2(x, tick + 1) & 1, D_G2, false);
+                glyph(x, head - 14, hash2(x, tick + 2) & 1, D_G3, false);
+            }
+            break;
+        case R_POWERUP:
+            for (int k = 0; k < 3; k++) {                      /* rings pouring outward */
+                float r = fmodf(rt * 22.0f + (float)k * 9.0f, 30.0f);
+                if (r > 8.0f) {
+                    for (int i = 0; i < 64; i += 2) {
+                        float a2 = (float)i * TAU / 64.0f;
+                        px(iround(31.5f + cosf(a2) * r), iround(31.5f + sinf(a2) * r), r < 18.0f ? D_G0 : D_G2);
+                    }
+                }
+            }
+            halo(t, clampf(rt * 0.8f, 0, 1), D_G1);
+            break;
+        case R_BORED:
+            for (int k = 0; k < 3; k++) {
+                if (rt > 0.5f + (float)k * 0.6f) {
+                    px(46 + k * 3, 8, D_WHITE);
+                }
+            }
+            break;
+        case R_TARGET: {                                       /* brackets close in, then lock */
+            float k = clampf(rt / 1.2f, 0, 1);
+            int sz = 29 - (int)(k * 19.0f);
+            int cx = 31, cy = 31;
+            uint8_t c = rt > 1.3f ? D_G0 : D_WHITE;
+            for (int sx = -1; sx <= 1; sx += 2) {
+                for (int sy = -1; sy <= 1; sy += 2) {
+                    int x = cx + sx * sz, y = cy + sy * sz;
+                    ln(x, y, x - sx * 5, y, c);
+                    ln(x, y, x, y - sy * 5, c);
+                }
+            }
+            if (rt > 1.2f && (((int)(rt * 8.0f)) & 1) == 0) {
+                ln(cx - 14, cy, cx - 6, cy, D_WHITE); ln(cx + 6, cy, cx + 14, cy, D_WHITE);
+                ln(cx, cy - 14, cx, cy - 6, D_WHITE); ln(cx, cy + 6, cx, cy + 14, D_WHITE);
+            }
+            break;
+        }
+        case R_NERVOUS: {                                      /* a bead of sweat */
+            int y = 16 + (int)fmodf(rt * 9.0f, 20.0f);
+            px(53, y, D_G0); px(52, y + 1, D_G0); px(53, y + 1, D_WHITE); px(54, y + 1, D_G0); px(53, y + 2, D_G0);
+            break;
+        }
+        case R_PROUD:
+            halo(t * 0.5f, 0.35f + 0.3f * sinf(t * 3.0f), D_G1);
+            break;
+        default:
+            break;
+        }
+        if (rid == R_GLITCH && (tick & 3) == 0) {              /* a split image: ghosts of the eyes */
+            for (int e = 0; e < 2; e++) {
+                for (int i = 0; i < s_eye[e].n; i++) {
+                    px(s_eye[e].x[i] + 2, s_eye[e].y[i], D_G3);
+                    px(s_eye[e].x[i] - 2, s_eye[e].y[i], D_WHITE);
+                }
+            }
+        }
+    }
+    /* A slow breath, a hop when petted, a shake on error. */
+    int dy = iround(sinf(t * 1.4f) * 0.6f) - (happy > 0 ? (int)(fabsf(sinf(t * 9.0f)) * 2.5f * happy) : 0);
+    if (rid == R_SURPRISED && rt < 0.35f) {
+        dy -= 2;
+    }
+    if (rid == R_LAUGH) {
+        dy += ((int)(t * 11.0f)) & 1 ? -1 : 0;
+    } else if (rid == R_SLEEPY && rt > 0.8f) {
+        dy += 1 + (rt > 2.0f ? 1 : 0);
+    } else if (rid == R_PROUD) {
+        dy -= 1;
+    } else if (rid == R_WINK && wink_s >= 0.5f) {
+        dy -= 1;
+    } else if (rid == R_BORED) {
+        dy += 1;
+    }
+    if (dy) {
+        shift_rows(dy);
+    }
+    if (shake) {
+        shift_cols(shake);
+    }
+
+    /* Signal trouble. */
+    if (rid == R_HACKED) {
+        glitch(4, 5, 4, 60);
+    }
+    if (rid == R_GLITCH) {
+        glitch(8, 8, 4, 60);
+        if (((int)(t * 25.0f)) % 4 == 0) {
+            shift_cols(2);
+        }
+    } else if (rid == R_ANGRY) {
+        glitch(2, 3, 6, 58);
+    }
+    if (mode == MUSE_MODE_ERROR) {
+        glitch(5, 6, 4, 60);
+    } else if (mode == MUSE_MODE_SPEAKING) {
+        glitch(1 + (int)(level * 3.0f), 2 + (int)(level * 2.0f), 6, 58);
+    } else if (mode == MUSE_MODE_BOOT) {
+        glitch((int)((1.0f - boot) * 6.0f), 5, 4, 60);
+    } else if (happy > 0.2f) {
+        glitch(2, 3, 6, 58);
+    } else if (fmodf(t, 6.3f) < 0.12f) {
+        glitch(1, 2, 6, 58);   /* now and then, even at rest */
+    }
+
+    if (mode == MUSE_MODE_BOOT && boot < 1.0f) {
+        float r = boot * 38.0f;
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                float dx = (float)x - 31.5f, dd = (float)y - 31.5f;
+                float d = sqrtf(dx * dx + dd * dd);
+                if (d > r + 1.0f) {
+                    s_fb[y * W + x] = (irand() & 31) == 0 ? D_G2 : IDX_BLACK;
+                } else if (d > r - 1.0f) {
+                    s_fb[y * W + x] = D_G0;   /* the scan ring */
+                }
+            }
+        }
+    }
+
+    if (mode == MUSE_MODE_OFF && off > 0.45f) {
+        float k = clampf((off - 0.45f) / 0.55f, 0, 1);
+        int vh = iround(32.0f * (1.0f - k) * (1.0f - k));
+        for (int y = 0; y < H; y++) {
+            if (abs(y - 32) > vh) {
+                memset(&s_fb[y * W], IDX_BLACK, W);
+            }
+        }
+        if (vh < 3) {
+            int half = iround(32.0f * (1.0f - k * k * k));
+            for (int x = 32 - half; x <= 32 + half; x++) {
+                px(x, 32, D_G0);
+            }
+        }
+    }
+    vignette();
+}
