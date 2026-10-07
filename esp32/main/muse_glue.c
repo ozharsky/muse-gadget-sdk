@@ -306,8 +306,30 @@ static void switch_task(void *arg) {
     vTaskDelete(NULL);
 }
 
+// Is ssid in the device's OWN scan results (glue's s_aps, filled by the settings scan)?
+// app.c's wifi_mgr cache is a different store the settings scan never fills, so checking
+// there read stale data and said "not in range" for a network right in front of it.
+static bool ap_visible_locked(const char *ssid) {
+    for (int i = 0; i < s_ap_count; i++) {
+        if (strcmp(s_aps[i].ssid, ssid) == 0) return true;
+    }
+    return false;
+}
+
 static bool op_wifi_switch(const char *ssid) {
     if (!ssid || !ssid[0]) return false;
+    // Range check HERE, from what the device last actually scanned. No scan yet (s_scan_gen 0)
+    // means we cannot say -- let the join itself decide rather than block a real switch.
+    bool visible = true;
+    portENTER_CRITICAL(&s_lock);
+    if (s_scan_gen > 0) visible = ap_visible_locked(ssid);
+    portEXIT_CRITICAL(&s_lock);
+    if (!visible) {
+        ESP_LOGI(TAG, "wifi switch to %s: not in the device's scan results", ssid);
+        muse_state_set_caption("%s NOT IN RANGE", ssid);
+        muse_state_poke();
+        return true;   // handled: the user gets a straight answer, link left alone
+    }
     struct switch_arg_t *a = malloc(sizeof(*a));
     if (!a) return false;
     strlcpy(a->ssid, ssid, sizeof(a->ssid));

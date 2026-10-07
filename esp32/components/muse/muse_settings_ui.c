@@ -15,6 +15,8 @@
  */
 
 #include "muse_settings_ui.h"
+#include "avatar/icon_hermes.h"
+#include "avatar/icon_meta.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,8 +85,6 @@ static muse_wifi_ap_t s_aps[MAX_APS];
 static muse_wifi_saved_t s_saved[MUSE_WIFI_SAVED_MAX];
 static lv_obj_t *s_saved_vals[MUSE_WIFI_SAVED_MAX];
 static int s_saved_n = -1;   /* as listed; -1 before the first fill */
-static int s_forget_armed = -1;
-static int64_t s_forget_armed_us;
 static char s_join_ssid[MUSE_SSID_MAX + 1];
 
 /* Hatch page. */
@@ -660,25 +660,25 @@ static void on_wifi_other(lv_event_t *e)
 }
 
 /* Two taps within a few seconds forget a saved network. */
-/* A saved network: TAP switches to it; a SECOND tap within 4 s forgets it. (Before, a tap
- * only armed forget, so there was no way to move to another saved network from here.) */
-static void on_wifi_saved(lv_event_t *e)
+/* A saved network: TAP switches to it; LONG-PRESS forgets it. One gesture, one meaning --
+ * the old "tap to arm forget, tap again to forget" made a plain tap look like it only forgot,
+ * and lost the network if you tapped twice. Forgetting is destructive, so it takes a hold. */
+static void on_wifi_saved_tap(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
-    int64_t now = esp_timer_get_time();
-    if (s_forget_armed == i && now - s_forget_armed_us < 4000000) {
-        muse_wifi_forget(s_saved[i].ssid);
-        s_forget_armed = -1;
-        return;
-    }
-    s_forget_armed = i;
-    s_forget_armed_us = now;
-    if (muse_wifi_switch(s_saved[i].ssid)) {
-        muse_state_poke();   /* the switch task narrates the outcome */
-    } else {
+    if (!muse_wifi_switch(s_saved[i].ssid)) {
         muse_state_set_caption("COULDN'T START SWITCH TO %s", s_saved[i].ssid);
         muse_state_poke();
     }
+    /* success/failure is narrated by the switch task itself */
+}
+
+static void on_wifi_saved_hold(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    muse_wifi_forget(s_saved[i].ssid);
+    muse_state_set_caption("FORGOT %s", s_saved[i].ssid);
+    muse_state_poke();
 }
 
 static bool same_saved(const muse_wifi_saved_t *a, int n)
@@ -703,29 +703,24 @@ static void rebuild_saved_list(void)
     }
     memcpy(s_saved, saved, n * sizeof(saved[0]));
     s_saved_n = n;
-    s_forget_armed = -1;
     s_shown_scan_gen = UINT32_MAX;   /* re-mark the saved ones in the scan list */
     lv_obj_clean(s_wifi_saved);
     if (n) {
         note(s_wifi_saved, "Saved networks");
     }
     for (int i = 0; i < n; i++) {
-        row(s_wifi_saved, LV_SYMBOL_WIFI, saved[i].ssid, &s_saved_vals[i], on_wifi_saved, (void *)(intptr_t)i);
+        lv_obj_t *r = row(s_wifi_saved, LV_SYMBOL_WIFI, saved[i].ssid, &s_saved_vals[i],
+                         on_wifi_saved_tap, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(r, on_wifi_saved_hold, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
     }
 }
 
 static void tick_saved_list(const muse_wifi_status_t *w)
 {
-    if (s_forget_armed >= 0 && esp_timer_get_time() - s_forget_armed_us >= 4000000) {
-        s_forget_armed = -1;
-    }
     for (int i = 0; i < s_saved_n; i++) {
         const char *text = "";
         uint32_t color = COLOR_DIM;
-        if (i == s_forget_armed) {
-            text = "Tap to forget";
-            color = COLOR_DANGER;
-        } else if (w->state == MUSE_WIFI_CONNECTED && !strcmp(w->ssid, s_saved[i].ssid)) {
+        if (w->state == MUSE_WIFI_CONNECTED && !strcmp(w->ssid, s_saved[i].ssid)) {
             text = "Connected";
             color = COLOR_OK;
         } else if (s_saved[i].hidden) {
@@ -768,7 +763,6 @@ static void build_wifi_page(lv_obj_t *tile)
     s_wifi = page(tile, "WI-FI", true, &list);
     s_shown_scan_gen = UINT32_MAX;   /* the lists start empty */
     s_saved_n = -1;
-    s_forget_armed = -1;
     s_wifi_sw = switch_row(list, "Wi-Fi", muse_settings_wifi_on(), on_wifi_sw);
     s_wifi_status = note(list, "");
 
@@ -784,7 +778,7 @@ static void build_wifi_page(lv_obj_t *tile)
         snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
         lv_label_set_text(mac, buf);
     }
-    note(list, "Muse remembers up to 8 networks. Tap a saved one to switch to it; tap it twice to forget it.");
+    note(list, "Tap a saved network to switch to it. Hold it to forget it.");
 }
 
 static void tick_wifi(void)
@@ -1326,11 +1320,44 @@ static void tick_usage(void)
 
 /* A tappable row whose NAME label is returned so it can be re-labelled, plus a right-side
  * check label. row() returns only the value label; the agent rows need the name too. */
-static lv_obj_t *agent_row(lv_obj_t *list, const char *icon, lv_obj_t **name_out,
+/* A row's icon is the agent's OWN mark (a real image), not a generic UI symbol: Meta's logo
+ * for Muse, the Hermes character for the Hermes slots. Built once from the embedded
+ * RGB565A8 data; NULL falls back to no icon. */
+static const lv_image_dsc_t *agent_icon(int idx)
+{
+    static lv_image_dsc_t meta_dsc, hermes_dsc;
+    static bool built;
+    if (!built) {
+        built = true;
+        meta_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        meta_dsc.header.cf = LV_COLOR_FORMAT_RGB565A8;
+        meta_dsc.header.w = ICON_META_W;
+        meta_dsc.header.h = ICON_META_H;
+        meta_dsc.header.stride = ICON_META_W * 2;
+        meta_dsc.data = ICON_META_DATA;
+        meta_dsc.data_size = sizeof(ICON_META_DATA);
+        hermes_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        hermes_dsc.header.cf = LV_COLOR_FORMAT_RGB565A8;
+        hermes_dsc.header.w = ICON_HERMES_W;
+        hermes_dsc.header.h = ICON_HERMES_H;
+        hermes_dsc.header.stride = ICON_HERMES_W * 2;
+        hermes_dsc.data = ICON_HERMES_DATA;
+        hermes_dsc.data_size = sizeof(ICON_HERMES_DATA);
+    }
+    return idx == MUSE_AGENT_MUSE ? &meta_dsc : &hermes_dsc;
+}
+
+static lv_obj_t *agent_row(lv_obj_t *list, const lv_image_dsc_t *icon, lv_obj_t **name_out,
                            lv_obj_t **check_out, lv_event_cb_t cb, void *user)
 {
     lv_obj_t *c = card(list, true);
-    label(c, &lv_font_montserrat_20, COLOR_ACCENT, icon);
+    if (icon) {
+        lv_obj_t *img = lv_image_create(c);
+        lv_image_set_src(img, icon);
+        lv_obj_set_size(img, 28, 28);
+    } else {
+        label(c, &lv_font_montserrat_20, COLOR_ACCENT, LV_SYMBOL_SHUFFLE);
+    }
     lv_obj_t *t = label(c, &lv_font_montserrat_20, COLOR_TEXT, "");
     lv_obj_set_flex_grow(t, 1);
     lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
@@ -1378,10 +1405,8 @@ static void build_agents_page(lv_obj_t *tile)
     note(list, "Talk to one of these. Two quick taps of the talk button also cycles them.");
     for (int i = 0; i < AGENT_COUNT; i++) {
         int idx = AGENT_CHOICES[i];
-        agent_row(list,
-                  idx == MUSE_AGENT_MUSE ? LV_SYMBOL_EYE_OPEN
-                                         : (idx == MUSE_AGENT_HERMES ? LV_SYMBOL_UPLOAD : LV_SYMBOL_SHUFFLE),
-                  &s_agent_labels[i], &s_agent_checks[i], on_agent_pick, (void *)(intptr_t)i);
+        agent_row(list, agent_icon(idx), &s_agent_labels[i], &s_agent_checks[i],
+                  on_agent_pick, (void *)(intptr_t)i);
     }
     row(list, LV_SYMBOL_EDIT, "Alt profile name...", NULL, on_agent_profile, NULL);
     note(list, "The alt slot is one of your own Hermes profiles: set its name to enable it. "

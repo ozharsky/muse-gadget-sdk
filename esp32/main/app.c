@@ -2361,15 +2361,10 @@ app_wifi_join_t app_wifi_join_named(const char *ssid, int timeout_ms) {
             int k = find_saved_network(list, ssid);
             if (k >= 0) {
                 found = true;
-                /* Only switch when the target is actually in range. Otherwise the attempt
-                 * tears down a working link, fails (reason 8 = no AP), and the keeper falls
-                 * back -- the flapping an out-of-range tap caused. */
-                if (wifi_mgr_cached_scan_has(ssid)) {
-                    if (!wifi_mgr_is_connected()) wifi_mgr_disconnect();
-                    ok = join_saved_network(list, k, timeout_ms, true, -1, joined);
-                } else {
-                    ESP_LOGI(TAG, "not switching to %s: not in range right now", ssid);
-                }
+                /* The caller (muse_glue) already checked range against the device's own scan
+                 * results; joining here is the switch itself. */
+                if (!wifi_mgr_is_connected()) wifi_mgr_disconnect();
+                ok = join_saved_network(list, k, timeout_ms, true, -1, joined);
             }
         }
         free(list);
@@ -2382,8 +2377,6 @@ app_wifi_join_t app_wifi_join_named(const char *ssid, int timeout_ms) {
         persist_connected_wifi_channel();
         if (paired) xSemaphoreGive(s_muse_joined);
         result = APP_WIFI_JOINED;
-    } else if (found && !wifi_mgr_cached_scan_has(ssid)) {
-        result = APP_WIFI_NOT_NEARBY;   /* saved, but out of range: leave the current link up */
     } else {
         ui_set_status("wifi_failed");
         if (paired) led_status_set_state(LED_STATE_WS_DISCONNECTED);
