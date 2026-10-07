@@ -30,3 +30,4 @@ muse-simulator.ppm
 
 # graft's local repository settings — not committed.
 /.graft/
+esp32/debug/
