@@ -23,3 +23,6 @@ ota_0,     app,  ota_0,   0x20000,  0x3E0000,
 ota_1,     app,  ota_1,   0x400000, 0x3E0000,
 prod_data, data, 0x40,    0x7E0000, 0x1000,
 prod_bak,  data, 0x41,    0x7E1000, 0x1000,
+# The panic backtrace catcher: a crash writes the task snapshot here; read it
+# with espcoredump read_flash. Trimmed dump (32 tasks) fits the 120 KB.
+coredump,  data, coredump, 0x7E2000, 0x1E000,

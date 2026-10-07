@@ -54,6 +54,11 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # EXT_RAM_BSS_ATTR (Muse's chat turn, the tunnel batch).
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # CONFIG_SPIRAM_IGNORE_NOTFOUND is not set
+# Panic evidence: the 2026-10-06 boot panics lost their backtraces because coredump
+# went to UART with nobody listening. Now to flash, trimmed for the 120 KB partition.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+# CONFIG_ESP_COREDUMP_ENABLE_TO_UART is not set
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=32
 CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
 # The CST816S on this panel doesn't answer the chip-ID register (0xA7);
 # the driver's ID read fails init. The vendor's own driver never reads it
