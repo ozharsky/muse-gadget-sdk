@@ -652,6 +652,11 @@ void muse_ui_agent_switch(bool hermes)
 
 static uint32_t s_gesture_ms;   /* when the last swipe happened: a swipe isn't also a pet */
 
+/* The session's reverse-channel hook: opens the agent that raised a pending notification and
+ * returns true, or false when nothing is waiting (so the tap is an ordinary pet). Defined in
+ * muse_chat_session.cpp with C linkage. */
+bool muse_notif_open_pending(void);
+
 static void on_canvas_clicked(lv_event_t *e)
 {
     (void)e;
@@ -660,6 +665,10 @@ static void on_canvas_clicked(lv_event_t *e)
         return;
     }
     if (lv_tick_get() - s_gesture_ms < 400) {
+        return;
+    }
+    /* A tap on a waiting notification OPENS its agent; otherwise it's a pet. */
+    if (muse_notif_open_pending()) {
         return;
     }
     muse_state_make_happy();

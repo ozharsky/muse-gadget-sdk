@@ -63,6 +63,10 @@ extern bool image_fetch_start(const char *url, int row, void (*done)(const draw_
 
 static bool bench_ui_command(const char *line);
 
+/* muse_chat_session.cpp's reverse-channel hook (defined there with C linkage): opens the agent
+ * that raised a waiting notification. Used by the face tap and the bench ">notif.tap". */
+bool muse_notif_open_pending(void);
+
 static void draw_done(const draw_result_t *r, void *user)
 {
     (void)user;
@@ -805,6 +809,19 @@ static bool bench_ui_command(const char *line)
         muse_settings_agent_alt(alt);   /* stored name, so this echo tells the truth */
         printf("@agent.profile '%s'%s\n", alt, alt[0] ? "" : " (cleared; the cycle skips ALT)");
         fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "notif.tap")) {
+        /* Bench: act as a face tap on a waiting notification -- opens its agent. */
+        printf("@notif.tap %s\n", muse_notif_open_pending() ? "opened" : "none");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "notif=", 6)) {
+        /* Bench: present a notification line as if the relay sent it (text only; use /notifications
+         * for the real path with an agent). Opens nothing -- there is no relay id behind it. */
+        muse_state_set_caption("%s", line + 6);
+        muse_state_poke();
         return true;
     }
     if (!strcmp(line, "tap") || !strncmp(line, "tap=", 4)) {

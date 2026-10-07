@@ -71,6 +71,7 @@ extern "C" {
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_state.h"
+#include "muse_voice.h"
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -3311,6 +3312,215 @@ static void task_tick(void)
              task.from[0] ? task.from : "?");
 }
 
+/* ---- Notifications: the REVERSE channel (relay -> device, unprompted) ----
+ *
+ * The task path is poll-for-WORK: the relay hands the gadget a job. This is the other
+ * direction: the relay hands the gadget a LINE to present on its own, labelled with the EXACT
+ * agent that raised it. When one arrives and the gadget is idle, it looks up, plays its mood,
+ * chirps and prints the line; tapping the face OPENS that agent -- switching to the right slot
+ * (and, for an ALT profile, loading its name) so the next thing you say reaches the agent that
+ * notified, never a generic default. Behind the same s_task_auto guard as the task path.
+ *
+ * The slot ("which agent") is decided on the RELAY (notifications.resolve_agent) and arrives as
+ * is_default: True -> the Hermes slot, False -> the ALT slot loaded with `agent`. */
+#define NOTIF_POLL_US (15 * 1000000LL)     /* idle nudge poll (matches the task cadence) */
+#define NOTIF_MIN_GAP_US (45 * 1000000LL)  /* at most one presented nudge every 45 s */
+
+struct rel_notif_t {
+    char id[40];
+    char agent[MUSE_AGENT_PROFILE_MAX + 1];
+    bool is_default;
+    char label[40];
+    char mood[24];
+    char text[240];
+    bool valid;
+};
+
+static int64_t s_notif_poll_us;
+static int s_notif_fail_streak;
+/* A presented nudge waiting for a tap. While one is pending we neither present another (no
+ * stacking) nor re-present this one (it is acked on arrival). */
+static bool s_notif_pending;
+static bool s_notif_default;
+static char s_notif_agent[MUSE_AGENT_PROFILE_MAX + 1];
+static char s_notif_label[40];
+static int64_t s_notif_gap_us;   /* earliest time the next nudge may be presented */
+
+extern "C" void muse_ui_agent_switch(bool hermes);   /* muse_ui.h has no C++ guards */
+
+/* GET /notifications -> the newest unread nudge, or false. *reachable: the relay answered. */
+static bool poll_notification(rel_notif_t *out, bool *reachable)
+{
+    out->valid = false;
+    if (reachable) {
+        *reachable = false;
+    }
+    char url[160];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/notifications", task_relay_url(&remote));
+    const size_t CAP = 8 * 1024;
+    char *resp = static_cast<char *>(psram_alloc(CAP));
+    if (!resp) {
+        return false;
+    }
+    tts_buf_t buf = { resp, 0, CAP - 1, false };
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_GET;
+    cfg.timeout_ms = 2500;
+    cfg.event_handler = tts_http_evt;
+    cfg.user_data = &buf;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) {
+        heap_caps_free(resp);
+        return false;
+    }
+    esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+    esp_err_t err = esp_http_client_perform(h);
+    int status = esp_http_client_get_status_code(h);
+    esp_http_client_cleanup(h);
+    bool ok = false;
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "notif: GET /notifications failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+    } else {
+        if (reachable) {
+            *reachable = true;
+        }
+        resp[buf.len] = '\0';
+        cJSON *root = cJSON_Parse(resp);
+        cJSON *arr = root ? cJSON_GetObjectItem(root, "notifications") : nullptr;
+        cJSON *first = cJSON_IsArray(arr) ? cJSON_GetArrayItem(arr, 0) : nullptr;
+        if (cJSON_IsObject(first)) {
+            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(first, "id"));
+            const char *agent = cJSON_GetStringValue(cJSON_GetObjectItem(first, "agent"));
+            const char *label = cJSON_GetStringValue(cJSON_GetObjectItem(first, "label"));
+            const char *mood = cJSON_GetStringValue(cJSON_GetObjectItem(first, "mood"));
+            const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(first, "text"));
+            cJSON *isd = cJSON_GetObjectItem(first, "is_default");
+            if (id && id[0] && text && text[0]) {
+                strlcpy(out->id, id, sizeof(out->id));
+                strlcpy(out->agent, agent ? agent : "", sizeof(out->agent));
+                strlcpy(out->label, label ? label : "", sizeof(out->label));
+                strlcpy(out->mood, mood ? mood : "", sizeof(out->mood));
+                strlcpy(out->text, text, sizeof(out->text));
+                out->is_default = cJSON_IsTrue(isd);
+                out->valid = true;
+                ok = true;
+            }
+        }
+        cJSON_Delete(root);
+    }
+    heap_caps_free(resp);
+    return ok;
+}
+
+/* POST /notifications/ack {id}: mark it presented so the next poll returns the one behind it. */
+static void notif_ack(const char *id)
+{
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return;
+    }
+    cJSON_AddStringToObject(body, "id", id);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        return;
+    }
+    char url[160];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/notifications/ack", task_relay_url(&remote));
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 8000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (h) {
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_post_field(h, json, strlen(json));
+        (void)esp_http_client_perform(h);
+        esp_http_client_cleanup(h);
+    }
+    free(json);
+}
+
+/* Show one nudge on the glass: look up, its mood, a chirp, and the line with a tap hint. */
+static void notif_present(const rel_notif_t *n)
+{
+    s_notif_pending = true;
+    s_notif_default = n->is_default;
+    strlcpy(s_notif_agent, n->agent, sizeof(s_notif_agent));
+    strlcpy(s_notif_label, n->label[0] ? n->label : n->agent, sizeof(s_notif_label));
+    if (n->mood[0]) {
+        (void)muse_ui_react(n->mood);   /* an unknown mood just returns false, no harm */
+    }
+    muse_voice_request_chirp();
+    char cap[280];
+    snprintf(cap, sizeof(cap), "%s  |  TAP TO OPEN", n->text);
+    muse_state_set_caption("%s", cap);
+    muse_state_poke();
+    notif_ack(n->id);   /* one presentation per nudge */
+    s_notif_gap_us = now_us() + NOTIF_MIN_GAP_US;
+    ESP_LOGI(TAG, "notif from %s (%s): %s", n->agent, n->is_default ? "hermes" : "alt", n->text);
+}
+
+/* Idle poll: only when a poll can act on the result (idle, awake, un-resting, hermes mode). */
+static void notif_tick(void)
+{
+    if (!s_task_auto || !CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
+        return;
+    }
+    if (s_notif_pending) {
+        return;   /* one at a time: a nudge on screen waits for the tap */
+    }
+    int64_t now = now_us();
+    if (now < s_notif_poll_us || now < s_notif_gap_us || s_turn.phase != P_IDLE || s_resting.load() ||
+        muse_state_asleep() || !muse_wifi_connected() || !muse_hatch_configured()) {
+        return;
+    }
+    s_notif_poll_us = now + NOTIF_POLL_US;
+    rel_notif_t n;
+    bool reachable = false;
+    if (!poll_notification(&n, &reachable)) {
+        if (!reachable) {
+            s_notif_fail_streak = s_notif_fail_streak < 4 ? s_notif_fail_streak + 1 : 4;
+            s_notif_poll_us = now + NOTIF_POLL_US * (1LL << s_notif_fail_streak);
+        }
+        return;
+    }
+    s_notif_fail_streak = 0;
+    notif_present(&n);
+}
+
+/* Called from the face-tap. -> true when a nudge was waiting (its agent was opened), false to
+ * let the tap be an ordinary pet. Opening switches the SLOT and loads the profile for ALT, so
+ * the turn you speak next reaches the exact agent that notified. */
+extern "C" bool muse_notif_open_pending(void)
+{
+    if (!s_notif_pending) {
+        return false;
+    }
+    s_notif_pending = false;
+    if (s_notif_default) {
+        muse_settings_set_agent(MUSE_AGENT_HERMES);
+    } else {
+        muse_settings_set_agent_profile(s_notif_agent);
+        muse_settings_set_agent(MUSE_AGENT_HERMES_ALT);
+    }
+    muse_ui_agent_switch(true);
+    muse_state_set_caption("OPENED %s", s_notif_label);
+    muse_state_poke();
+    ESP_LOGI(TAG, "notif: opened '%s' (%s)", s_notif_label, s_notif_default ? "hermes" : "alt");
+    return true;
+}
+
 static void hatch_task(void *arg)
 {
     (void)arg;
@@ -3331,6 +3541,7 @@ static void hatch_task(void *arg)
         /* Relay tasks: poll the queue and hand back any tag a finished reply left.
          * Self-gated to idle/awake/15 s; a no-op unless a relay URL is set. */
         task_tick();
+        notif_tick();
         task_finish_if_done();
         task_flush_reply();
         if (hermes_mode()) {
