@@ -250,7 +250,7 @@ static void aux_key(bool pressed, bool edge)
 /* Talk button: push-to-talk, or Select while the menu is open. Asleep, the
  * press wakes and is posted as a waking one: muse_voice records only if it's
  * still held once awake. */
-/* Three quick taps of the talk button switch the agent (Muse / Hermes). */
+/* Two quick taps of the talk button switch the agent (Muse / Hermes). */
 static void count_tap(bool pressed)
 {
 #ifdef CONFIG_MUSE_HERMES_URL
@@ -267,9 +267,9 @@ static void count_tap(bool pressed)
     }
     taps = (taps && now - last_tap <= pdMS_TO_TICKS(1200)) ? taps + 1 : 1;
     last_tap = now;
-    if (taps >= 3) {
+    if (taps >= 2) {
         taps = 0;
-        ESP_LOGI(TAG, "triple tap: switching agent");
+        ESP_LOGI(TAG, "double tap: switching agent");
         muse_settings_set_agent_hermes(!muse_settings_agent_hermes());
     }
 #endif
