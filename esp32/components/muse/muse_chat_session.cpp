@@ -921,6 +921,23 @@ static bool hermes_mode(void)
     return CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes();
 }
 
+/* The relay profile query for the active agent: "&profile=<name>" for the ALT Hermes
+ * slot, empty for Muse and for the default Hermes (agents.json routes the bare paths).
+ * The name is validated [A-Za-z0-9_-] at set time (muse_settings_set_agent_profile), so it
+ * is URL-safe as-is. */
+static const char *agent_profile_query(void)
+{
+    static char q[MUSE_AGENT_PROFILE_MAX + 16];
+    char name[MUSE_AGENT_PROFILE_MAX + 1];
+    muse_settings_agent_profile(name);
+    q[0] = '\0';
+    if (name[0] && muse_settings_agent_hermes()) {
+        snprintf(q, sizeof(q), "&profile=%s", name);
+    }
+    return q;
+}
+
+
 static bool ensure_connected(void)
 {
     if (s_connected || hermes_mode()) {
@@ -2214,7 +2231,7 @@ static bool hermes_request_stream_text(const char *text, size_t tlen)
         }
     }
     enc[e] = '\0';
-    snprintf(url, sizeof(url), "%s/turn?stream=1&text=%s", base, enc);
+    snprintf(url, sizeof(url), "%s/turn?stream=1&text=%s%s", base, enc, agent_profile_query());
 
     char *line = static_cast<char *>(psram_alloc(160 * 1024));
     if (!line) {
@@ -2271,10 +2288,11 @@ static bool hermes_request_stream_text(const char *text, size_t tlen)
  * a fallback if ?stream=1 ever misbehaves; not called by the streaming path. */
 [[maybe_unused]] static bool hermes_request(void)
 {
-    const char *url = CONFIG_MUSE_HERMES_URL "/turn";
+    char url[256];
+    snprintf(url, sizeof(url), "%s/turn%s", CONFIG_MUSE_HERMES_URL, agent_profile_query());
     bool remote = false;
     if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
-        url = CONFIG_MUSE_HERMES_URL_REMOTE "/turn";
+        snprintf(url, sizeof(url), "%s/turn%s", CONFIG_MUSE_HERMES_URL_REMOTE, agent_profile_query());
         remote = true;
         ESP_LOGI(TAG, "hermes: home relay unreachable, using the remote address");
     }
@@ -2472,10 +2490,11 @@ static void hermes_dispatch_line(char *line, size_t len)
 /* Starts a streamed turn: opens the HTTP exchange; hermes_stream_pump() drives it. */
 static bool hermes_request_stream(void)
 {
-    const char *url = CONFIG_MUSE_HERMES_URL "/turn?stream=1";
+    char url[256];
+    snprintf(url, sizeof(url), "%s/turn?stream=1%s", CONFIG_MUSE_HERMES_URL, agent_profile_query());
     bool remote = false;
     if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
-        url = CONFIG_MUSE_HERMES_URL_REMOTE "/turn?stream=1";
+        snprintf(url, sizeof(url), "%s/turn?stream=1%s", CONFIG_MUSE_HERMES_URL_REMOTE, agent_profile_query());
         remote = true;
         ESP_LOGI(TAG, "hermes: home relay unreachable, using the remote address");
     }
@@ -2927,11 +2946,13 @@ static bool poll_task(const char *agent, rel_task_t *out, bool *reachable)
         *reachable = false;
     }
     char url[192];
-    snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready", CONFIG_MUSE_HERMES_URL, agent);
+    snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready%s", CONFIG_MUSE_HERMES_URL, agent,
+             agent_profile_query());
     bool remote = false;
     if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
         remote = true;
-        snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready", CONFIG_MUSE_HERMES_URL_REMOTE, agent);
+        snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready%s", CONFIG_MUSE_HERMES_URL_REMOTE,
+                 agent, agent_profile_query());
     }
     const size_t CAP = 16 * 1024;
     char *resp = static_cast<char *>(psram_alloc(CAP));
@@ -3126,6 +3147,14 @@ static void task_post(const rel_task_t *t)
     strlcpy(from, muse_settings_agent_hermes() ? "hermes" : "muse", sizeof(from));
     cJSON_AddStringToObject(body, "to", t->to);
     cJSON_AddStringToObject(body, "text", t->text);
+    /* Which relay profile originated it, so the board/agents.json can tell the slots
+     * apart. The task bridge only knows muse|hermes (spec section 6), so this rides as
+     * metadata, not as a new target. */
+    char prof[MUSE_AGENT_PROFILE_MAX + 1];
+    muse_settings_agent_profile(prof);
+    if (prof[0]) {
+        cJSON_AddStringToObject(body, "profile", prof);
+    }
     cJSON_AddNumberToObject(body, "hops", t->hops + 1);
     cJSON_AddStringToObject(body, "chain", t->chain);
     cJSON_AddStringToObject(body, "from", from);

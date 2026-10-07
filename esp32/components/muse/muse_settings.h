@@ -70,6 +70,8 @@ void muse_settings_hatch_vm(char out[MUSE_VM_MAX + 1]);
 void muse_settings_hatch_token(char out[MUSE_TOKEN_MAX + 1]);
 size_t muse_settings_hatch_token_len(void);
 
+#define MUSE_AGENT_PROFILE_MAX 32   /* a Hermes profile name (agents.json key) */
+
 void muse_settings_set_volume(int pct);
 void muse_settings_set_speaker_on(bool on);
 void muse_settings_set_mic_gain(int db);
@@ -77,8 +79,28 @@ void muse_settings_set_brightness(int pct);
 void muse_settings_set_sleep_s(int secs);
 void muse_settings_set_wifi_on(bool on);
 void muse_settings_set_ble_on(bool on);
-bool muse_settings_agent_hermes(void);   /* which agent answers: false = Muse */
+/* Which agent answers. Muse is the Meta cloud; the two Hermes slots are the Mac relay
+ * against different Hermes PROFILES (agents.json on the relay routes by name). The ALT
+ * slot stays dormant until a profile name is set, so a device that never sets one cycles
+ * exactly as it did with the old boolean. */
+enum {
+    MUSE_AGENT_MUSE = 0,
+    MUSE_AGENT_HERMES = 1,        /* the relay's default profile */
+    MUSE_AGENT_HERMES_ALT = 2,    /* the relay profile named by muse_settings_agent_profile() */
+    MUSE_AGENT_COUNT,
+};
+
+int muse_settings_agent(void);
+/* True for either Hermes slot: the 20+ call sites that only ask "Hermes or Muse?" use this. */
+bool muse_settings_agent_hermes(void);
+/* The Hermes profile name ("" = the relay's default). Only meaningful off the MUSE slot. */
+void muse_settings_agent_profile(char out[MUSE_AGENT_PROFILE_MAX + 1]);
+
+void muse_settings_set_agent(int idx);
+/* Kept for the boolean toggle: true = HERMES, false = MUSE (never jumps to ALT). */
 void muse_settings_set_agent_hermes(bool hermes);
+/* The profile the ALT slot points at; empty disables ALT (the cycle skips it). */
+esp_err_t muse_settings_set_agent_profile(const char *name);
 /* A network name is remembered first among the saved ones and joined now;
  * an empty ssid forgets every saved network. */
 void muse_settings_set_wifi(const char *ssid, const char *pass);

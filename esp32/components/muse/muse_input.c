@@ -269,8 +269,16 @@ static void count_tap(bool pressed)
     last_tap = now;
     if (taps >= 2) {
         taps = 0;
-        ESP_LOGI(TAG, "double tap: switching agent");
-        muse_settings_set_agent_hermes(!muse_settings_agent_hermes());
+        /* Cycle Muse -> Hermes -> Hermes ALT -> Muse. The ALT slot only joins the cycle
+         * once a profile name exists (the relay cannot route an unnamed profile). */
+        char alt[MUSE_AGENT_PROFILE_MAX + 1];
+        muse_settings_agent_profile(alt);
+        int next = (muse_settings_agent() + 1) % MUSE_AGENT_COUNT;
+        if (next == MUSE_AGENT_HERMES_ALT && !alt[0]) {
+            next = MUSE_AGENT_MUSE;
+        }
+        ESP_LOGI(TAG, "double tap: agent %d -> %d", muse_settings_agent(), next);
+        muse_settings_set_agent(next);
     }
 #endif
 }
@@ -667,8 +675,14 @@ static bool console_command(char *line, bool whole)
         char *json = heap_caps_malloc(cap, MUSE_BIG_CAPS);
         if (json) {
             muse_ble_status_json(json, cap);
-            printf("@status {\"board\":\"%s\",\"chat\":%s,\"device\":%s}\n", muse_board->name,
-                   CHAT_OVER_SERIAL, json);
+            char alt[MUSE_AGENT_PROFILE_MAX + 1];
+            muse_settings_agent_profile(alt);
+            printf("@status {\"board\":\"%s\",\"chat\":%s,"
+                   "\"agent\":{\"idx\":%d,\"name\":\"%s\",\"profile\":\"%s\"},"
+                   "\"device\":%s}\n",
+                   muse_board->name, CHAT_OVER_SERIAL,
+                   muse_settings_agent(),
+                   muse_settings_agent() == MUSE_AGENT_MUSE ? "muse" : "hermes", alt, json);
             fflush(stdout);
             free(json);
         }
@@ -761,8 +775,35 @@ static bool bench_ui_command(const char *line)
         return true;
     }
     if (!strncmp(line, "agent=", 6)) {
-        muse_settings_set_agent_hermes(!strcmp(line + 6, "hermes"));
-        printf("@agent %s\n", muse_settings_agent_hermes() ? "hermes" : "muse");
+        const char *v = line + 6;
+        if (!strcmp(v, "muse")) {
+            muse_settings_set_agent(MUSE_AGENT_MUSE);
+        } else if (!strcmp(v, "hermes")) {
+            muse_settings_set_agent(MUSE_AGENT_HERMES);
+        } else if (!strcmp(v, "alt") || !strcmp(v, "2")) {
+            muse_settings_set_agent(MUSE_AGENT_HERMES_ALT);
+        } else if (!strcmp(v, "0")) {
+            muse_settings_set_agent(MUSE_AGENT_MUSE);
+        } else if (!strcmp(v, "1")) {
+            muse_settings_set_agent(MUSE_AGENT_HERMES);
+        } else {
+            printf("@agent.error unknown \"%s\": muse|hermes|alt|0|1|2\n", v);
+            fflush(stdout);
+            return true;
+        }
+        char alt[MUSE_AGENT_PROFILE_MAX + 1];
+        muse_settings_agent_profile(alt);
+        printf("@agent %d %s%s%s\n", muse_settings_agent(),
+               muse_settings_agent() == MUSE_AGENT_MUSE ? "muse" : "hermes",
+               alt[0] ? " " : "", alt);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "agent.profile=", 14)) {
+        muse_settings_set_agent_profile(line + 14);
+        char alt[MUSE_AGENT_PROFILE_MAX + 1];
+        muse_settings_agent_profile(alt);
+        printf("@agent.profile '%s'%s\n", alt, alt[0] ? "" : " (cleared; the cycle skips ALT)");
         fflush(stdout);
         return true;
     }

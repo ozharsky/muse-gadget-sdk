@@ -39,7 +39,8 @@ static struct {
     uint16_t sleep_s;
     bool wifi_on;
     bool ble_on;
-    bool agent_hermes;
+    uint8_t agent;                       /* 0 Muse, 1 Hermes, 2 Hermes ALT */
+    char agent_alt_profile[MUSE_AGENT_PROFILE_MAX + 1];   /* the ALT slot's relay profile name */
     char ssid[MUSE_SSID_MAX + 1];
     char pass[MUSE_PASS_MAX + 1];
     char host[MUSE_HOST_MAX + 1];
@@ -152,8 +153,10 @@ esp_err_t muse_settings_init(void)
         s.ble_on = b;
     }
     if (nvs_get_u8(s_nvs, "agent", &b) == ESP_OK) {
-        s.agent_hermes = b;
+        /* Old value is the same 0/1 (Muse/Hermes) the new enum keeps for those slots. */
+        s.agent = b < MUSE_AGENT_COUNT ? b : MUSE_AGENT_HERMES;
     }
+    load_str("agent_alt", s.agent_alt_profile, sizeof(s.agent_alt_profile));
     load_str("ssid", s.ssid, sizeof(s.ssid));
     load_str("pass", s.pass, sizeof(s.pass));
     load_str("host", s.host, sizeof(s.host));
@@ -181,7 +184,11 @@ int muse_settings_brightness(void) { return s.brightness; }
 int muse_settings_sleep_s(void) { return s.sleep_s; }
 bool muse_settings_wifi_on(void) { return s.wifi_on; }
 bool muse_settings_ble_on(void) { return s.ble_on; }
-bool muse_settings_agent_hermes(void) { return s.agent_hermes; }
+int muse_settings_agent(void) { return s.agent; }
+bool muse_settings_agent_hermes(void) { return s.agent != MUSE_AGENT_MUSE; }
+void muse_settings_agent_profile(char out[MUSE_AGENT_PROFILE_MAX + 1]) {
+    strlcpy(out, s.agent == MUSE_AGENT_HERMES_ALT ? s.agent_alt_profile : "", MUSE_AGENT_PROFILE_MAX + 1);
+}
 
 /* Home Link owns the saved networks (this is the first); the local copy is only a fallback. */
 void muse_settings_wifi(char ssid[MUSE_SSID_MAX + 1], char pass[MUSE_PASS_MAX + 1])
@@ -262,11 +269,49 @@ void muse_settings_set_wifi_on(bool on)
     notify(MUSE_SETTING_WIFI);
 }
 
+void muse_settings_set_agent(int idx)
+{
+    if (idx >= MUSE_AGENT_COUNT) {
+        idx = MUSE_AGENT_HERMES;
+    }
+    /* The ALT slot with no profile name would strand the user on a relay target that
+     * cannot resolve: fall through to Muse so the cycle stays honest. */
+    if (idx == MUSE_AGENT_HERMES_ALT && !s.agent_alt_profile[0]) {
+        idx = MUSE_AGENT_MUSE;
+    }
+    s.agent = (uint8_t)idx;
+    save_u8("agent", s.agent);
+    notify(MUSE_SETTING_AGENT);
+}
+
 void muse_settings_set_agent_hermes(bool hermes)
 {
-    s.agent_hermes = hermes;
-    save_u8("agent", hermes);
-    notify(MUSE_SETTING_AGENT);
+    muse_settings_set_agent(hermes ? MUSE_AGENT_HERMES : MUSE_AGENT_MUSE);
+}
+
+esp_err_t muse_settings_set_agent_profile(const char *name)
+{
+    /* Keep it to the characters the relay can put in a URL path; anything else would be
+     * a profile that cannot be routed to. */
+    char clean[MUSE_AGENT_PROFILE_MAX + 1] = {0};
+    size_t n = 0;
+    for (const char *p = name ? name : ""; *p && n < MUSE_AGENT_PROFILE_MAX; p++) {
+        char ch = *p;
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+            clean[n++] = ch;
+        }
+    }
+    strlcpy(s.agent_alt_profile, clean, sizeof(s.agent_alt_profile));
+    nvs_set_str(s_nvs, "agent_alt", s.agent_alt_profile);
+    nvs_commit(s_nvs);
+    /* A profile name now exists, or was just cleared: if ALT was the active slot and the
+     * name is gone, drop back to Muse rather than pointing at nothing. */
+    if (!s.agent_alt_profile[0] && s.agent == MUSE_AGENT_HERMES_ALT) {
+        muse_settings_set_agent(MUSE_AGENT_MUSE);
+    }
+    ESP_LOGI(TAG, "agent alt profile: '%s'", s.agent_alt_profile);
+    return ESP_OK;
 }
 
 void muse_settings_set_ble_on(bool on)

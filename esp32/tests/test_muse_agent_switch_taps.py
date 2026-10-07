@@ -40,6 +40,7 @@ class AgentSwitchTaps(unittest.TestCase):
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define TAG "tap-test"
 #define ESP_LOGI(...) ((void)0)
@@ -51,9 +52,17 @@ static TickType_t xTaskGetTickCount(void) { return g_now; }
 /* The guard reads the first byte: a non-empty string keeps the gesture enabled. */
 #define CONFIG_MUSE_HERMES_URL "http://relay.test"
 
-static bool g_agent_hermes;
-static bool muse_settings_agent_hermes(void) { return g_agent_hermes; }
-static void muse_settings_set_agent_hermes(bool v) { g_agent_hermes = v; }
+/* A stand-in for the settings agent slot: idx + the ALT profile name. */
+#define MUSE_AGENT_MUSE 0
+#define MUSE_AGENT_HERMES 1
+#define MUSE_AGENT_HERMES_ALT 2
+#define MUSE_AGENT_COUNT 3
+#define MUSE_AGENT_PROFILE_MAX 32
+static int g_agent = MUSE_AGENT_MUSE;
+static char g_alt[64] = "";
+static int muse_settings_agent(void) { return g_agent; }
+static void muse_settings_agent_profile(char *out) { strcpy(out, g_alt); }
+static void muse_settings_set_agent(int idx) { g_agent = idx; }
 
 ''' + function(src, 'count_tap') + r'''
 
@@ -65,29 +74,46 @@ static void tap(TickType_t t_press, TickType_t t_release) {
 int main(int argc, char **argv) {
     assert(argc == 2);
     switch (atoi(argv[1])) {
-    case 0:  /* two quick taps switch the agent, and two more switch it back */
-        assert(g_agent_hermes == false);
+    case 0:  /* two quick taps switch Muse -> Hermes; with no ALT profile the cycle
+              * is the old two-way toggle, so two more taps come back to Muse */
+        assert(g_agent == MUSE_AGENT_MUSE);
         tap(1000, 1050);
-        assert(g_agent_hermes == false);   /* one tap: nothing */
+        assert(g_agent == MUSE_AGENT_MUSE);      /* one tap: nothing */
         tap(1200, 1250);
-        assert(g_agent_hermes == true);    /* two taps: switch */
+        assert(g_agent == MUSE_AGENT_HERMES);    /* two taps: switch */
         tap(1400, 1450);
         tap(1600, 1650);
-        assert(g_agent_hermes == false);   /* and back */
+        assert(g_agent == MUSE_AGENT_MUSE);      /* and back */
         break;
     case 1:  /* taps further apart than the window do not accumulate */
         tap(1000, 1050);
         tap(2600, 2650);                   /* 1550 ms after the first release */
-        assert(g_agent_hermes == false);
+        assert(g_agent == MUSE_AGENT_MUSE);
         break;
     case 2:  /* a long press is a talk press, not a tap */
         g_now = 1000; count_tap(true);
         g_now = 1500; count_tap(false);    /* 500 ms hold: resets the count */
-        assert(g_agent_hermes == false);
+        assert(g_agent == MUSE_AGENT_MUSE);
         tap(1700, 1750);                   /* one quick tap after it */
-        assert(g_agent_hermes == false);
+        assert(g_agent == MUSE_AGENT_MUSE);
         tap(1900, 1950);                   /* the second quick tap switches */
-        assert(g_agent_hermes == true);
+        assert(g_agent == MUSE_AGENT_HERMES);
+        break;
+    case 3:  /* WITH an ALT profile, two taps cycle Muse -> Hermes -> ALT -> Muse */
+        strcpy(g_alt, "trading");
+        g_agent = MUSE_AGENT_MUSE;
+        tap(1000, 1050); tap(1200, 1250);
+        assert(g_agent == MUSE_AGENT_HERMES);
+        tap(1400, 1450); tap(1600, 1650);
+        assert(g_agent == MUSE_AGENT_HERMES_ALT);
+        tap(1800, 1850); tap(2000, 2050);
+        assert(g_agent == MUSE_AGENT_MUSE);
+        break;
+    case 4:  /* WITHOUT a profile the ALT slot is skipped even from Hermes */
+        strcpy(g_alt, "");
+        g_agent = MUSE_AGENT_HERMES;
+        tap(1000, 1050); tap(1200, 1250);
+        assert(g_agent == MUSE_AGENT_MUSE);
         break;
     default: return 2;
     }
@@ -108,3 +134,9 @@ int main(int argc, char **argv) {
 
     def test_long_press_is_not_a_tap(self):
         subprocess.run([str(self.binary), '2'], check=True)
+
+    def test_with_an_alt_profile_the_cycle_is_three_way(self):
+        subprocess.run([str(self.binary), '3'], check=True)
+
+    def test_without_a_profile_the_alt_slot_is_skipped(self):
+        subprocess.run([str(self.binary), '4'], check=True)

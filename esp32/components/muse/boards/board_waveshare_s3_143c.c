@@ -44,6 +44,7 @@
  */
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"      /* the ext0 wake pin's pull-up */
 #include "driver/i2s_std.h"
 #include "driver/i2s_tdm.h"
 #include "driver/usb_serial_jtag.h"
@@ -596,12 +597,28 @@ static esp_err_t read_power(muse_power_t *out)
     return ESP_OK;
 }
 
+/* A real software "off": there is no PMU and the PWR switch is hardware-only, so the
+ * deepest the firmware can go is deep sleep -- screen dark, chip at microamp draw (the
+ * PWR latch rail stays up, but nothing runs). Wake is BOOT (GPIO0), the one button this
+ * board has. Chosen after the unit's PWR switch died: without this, a dead switch meant
+ * no way to stop the device at all. */
 static esp_err_t power_off(void)
 {
-    /* Single-button board: BOOT is push-to-talk, and holding it must not
-     * kill the board mid-sentence. The physical PWR button handles power,
-     * so software power-off is a no-op here. */
-    return ESP_OK;
+    set_brightness(0);
+    panel_sleep(true);
+    esp_lcd_panel_disp_on_off(s_panel, false);
+    /* Wait for BOOT to be released, or the held-low line wakes us the instant we sleep. */
+    while (gpio_get_level(GPIO_NUM_0) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    vTaskDelay(pdMS_TO_TICKS(80));
+    /* GPIO0 is RTC-capable on the S3; ext0 wake on low is the same pattern the other
+     * button-only boards use (board_espressif_box_3.c, board_fnk0104b.c). */
+    ESP_RETURN_ON_ERROR(esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0), TAG, "boot wake");
+    rtc_gpio_pullup_en(GPIO_NUM_0);
+    rtc_gpio_pulldown_dis(GPIO_NUM_0);
+    esp_deep_sleep_start();
+    return ESP_FAIL;   /* not reached */
 }
 
 static const muse_board_t s_board = {

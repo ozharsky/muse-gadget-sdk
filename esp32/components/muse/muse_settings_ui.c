@@ -1322,7 +1322,15 @@ static const page_t POWER = { &s_power, build_power_page };
 static void on_agent(lv_event_t *e)
 {
     (void)e;
-    muse_settings_set_agent_hermes(!muse_settings_agent_hermes());
+    /* Same cycle as the double-tap: Muse -> Hermes -> Hermes ALT -> Muse, ALT skipped
+     * until a profile name is set (muse_settings_set_agent() enforces the skip too). */
+    char alt[MUSE_AGENT_PROFILE_MAX + 1];
+    muse_settings_agent_profile(alt);
+    int next = (muse_settings_agent() + 1) % MUSE_AGENT_COUNT;
+    if (next == MUSE_AGENT_HERMES_ALT && !alt[0]) {
+        next = MUSE_AGENT_MUSE;
+    }
+    muse_settings_set_agent(next);
 }
 
 static void build_home(lv_obj_t *tile)
@@ -1357,7 +1365,19 @@ static void tick_home(void)
     set_text(s_home_wifi, w.state == MUSE_WIFI_CONNECTED ? w.ssid : WIFI_VALUES[w.state]);
 
     if (s_home_agent) {
-        set_text(s_home_agent, muse_settings_agent_hermes() ? "Hermes" : "Muse");
+        char alt[MUSE_AGENT_PROFILE_MAX + 1];
+        muse_settings_agent_profile(alt);
+        switch (muse_settings_agent()) {
+        case MUSE_AGENT_HERMES_ALT:
+            set_text(s_home_agent, alt[0] ? alt : "Alt");
+            break;
+        case MUSE_AGENT_HERMES:
+            set_text(s_home_agent, "Hermes");
+            break;
+        default:
+            set_text(s_home_agent, "Muse");
+            break;
+        }
     }
     muse_hatch_status_t h;
     muse_hatch_status(&h);
@@ -1369,6 +1389,7 @@ static void tick_home(void)
         case 1: set_text(s_home_hermes, "Connected"); break;
         case 2: set_text(s_home_hermes, "Can't reach"); break;
         default: set_text(s_home_hermes, muse_settings_agent_hermes() ? "Ready" : "Not active"); break;
+        /* (unchanged: true for either Hermes slot, so ALT reads Ready too) */
         }
     }
 
