@@ -44,6 +44,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_link.c"
         "muse_ble.c")
     list(APPEND embed "transition.pcm")   # the agent-switch sound (muse_voice.c)
+    list(APPEND embed "notif.pcm")        # the notification chime (muse_voice.c)
     if(CONFIG_MUSE_HATCH)
         list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
         list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest

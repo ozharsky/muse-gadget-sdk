@@ -38,6 +38,10 @@ float muse_voice_monitor_db(void);
 /* Plays a short chirp at the current volume (when idle). */
 void muse_voice_request_chirp(void);
 
+/* Plays the notification chime (notif.pcm) and speaks the queued line. */
+void muse_voice_request_notif(void);
+void muse_voice_request_notif_speak(void);
+
 /* Plays the agent-switch sound at the current volume (when idle). */
 void muse_voice_request_transition(void);
 

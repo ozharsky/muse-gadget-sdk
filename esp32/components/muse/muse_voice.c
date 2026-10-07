@@ -74,6 +74,8 @@ static volatile bool s_chirp;
 static volatile bool s_transition;
 static volatile bool s_loopback;
 static volatile bool s_mp3test;
+static volatile bool s_notif_chime;   /* play the notification sound */
+static volatile bool s_notif_speak;   /* speak a queued notification line */
 
 /*
  * Pre-roll: while idle the mic keeps running into this ring, so a recording
@@ -830,7 +832,7 @@ static void voice_task(void *arg)
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
             bool battery = muse_state_on_battery();
-            bool rest = asleep && battery && !s_chirp && !s_transition && !s_mp3test && !s_loopback;
+            bool rest = asleep && battery && !s_chirp && !s_transition && !s_mp3test && !s_notif_chime && !s_notif_speak && !s_loopback;
 #if HOLD_NOTES
             /* A press goes first: send_held() leaves it queued and returns
              * without backing off, so retrying before it's read would spin. */
@@ -881,6 +883,41 @@ static void voice_task(void *arg)
                     }
                     muse_audio_write_plain(buf, n);
                 }
+                pre_reset();
+            }
+            if (s_notif_chime) {
+                s_notif_chime = false;
+                /* The embedded notification chime: raw 16 kHz mono PCM, played plain (no Muse
+                 * voice FX). Same 1-byte-aligned embed caveat as transition.pcm. */
+                extern const uint8_t notif_pcm_start[] asm("_binary_notif_pcm_start");
+                extern const uint8_t notif_pcm_end[] asm("_binary_notif_pcm_end");
+                static int16_t nbuf[MUSE_AUDIO_CHUNK];
+                size_t nf = (size_t)(notif_pcm_end - notif_pcm_start) / 2;
+                for (size_t i = 0; i < nf; i += MUSE_AUDIO_CHUNK) {
+                    size_t m = nf - i < MUSE_AUDIO_CHUNK ? nf - i : MUSE_AUDIO_CHUNK;
+                    const uint8_t *b = notif_pcm_start + i * 2;
+                    for (size_t j = 0; j < m; j++) {
+                        nbuf[j] = (int16_t)(b[2 * j] | (b[2 * j + 1] << 8));
+                    }
+                    muse_audio_write_plain(nbuf, m);
+                }
+                pre_reset();
+            }
+            if (s_notif_speak) {
+                s_notif_speak = false;
+                int16_t *pcm = NULL;
+                size_t n = muse_hatch_notif_pcm(&pcm);   /* Google TTS -> 16k mono PCM */
+                if (n && pcm) {
+                    muse_state_set_level(muse_audio_level(pcm, n));
+                    for (size_t i = 0; i < n; i += MUSE_AUDIO_CHUNK) {
+                        muse_audio_write(pcm + i, n - i < MUSE_AUDIO_CHUNK ? n - i : MUSE_AUDIO_CHUNK);
+                    }
+                    ESP_LOGI(TAG, "notif spoken: %.2fs", (double)n / MUSE_AUDIO_RATE);
+                }
+                if (pcm) {
+                    free(pcm);
+                }
+                muse_state_set_level(0);
                 pre_reset();
             }
             if (s_mp3test) {
@@ -986,6 +1023,16 @@ void muse_voice_request_loopback(void)
 {
     s_loopback = true;
     muse_state_nudge();
+}
+
+void muse_voice_request_notif(void)
+{
+    s_notif_chime = true;   /* the sound first; the text follows via notif_speak */
+}
+
+void muse_voice_request_notif_speak(void)
+{
+    s_notif_speak = true;
 }
 
 void muse_voice_request_mp3test(void)

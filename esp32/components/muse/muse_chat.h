@@ -145,6 +145,9 @@ void muse_hatch_text_cancel(void);
 /* Turns relay task auto-polling/injection on or off at runtime (bench: "task.auto off"). */
 void muse_hatch_task_auto(bool on);
 
+/* Voice task: decode a queued notification line to PCM (the voice task owns the speaker). */
+size_t muse_hatch_notif_pcm(int16_t **pcm_out);
+
 /*
  * Prints one "@chat" line per call (more if `text` is long): the type, then the
  * printf-style `fields` (JSON members, or NULL), then `text` escaped (or none).

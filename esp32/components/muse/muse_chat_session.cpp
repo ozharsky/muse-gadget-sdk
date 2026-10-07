@@ -3326,6 +3326,82 @@ static void task_tick(void)
  *
  * The slot ("which agent") is decided on the RELAY (notifications.resolve_agent) and arrives as
  * is_default: True -> the Hermes slot, False -> the ALT slot loaded with `agent`. */
+/* The text a nudge wants spoken, set by notif_present and consumed by the voice task. Kept
+ * short: a nudge is a line, and the speaker is the voice task's alone (same law as mp3test). */
+#define NOTIF_SPEAK_MAX 96
+static char s_notif_speak[NOTIF_SPEAK_MAX];
+
+struct notif_pcm_t { TaskHandle_t caller; int16_t *pcm; size_t n; };
+
+/* Google TTS for one line -> 16 kHz mono PCM (PSRAM). Mirrors the reply's fetch_tts + decode,
+ * but self-contained so it never touches the turn state machine. 0 on any failure. */
+static size_t notif_decode(const char *text, int16_t **pcm_out)
+{
+    *pcm_out = nullptr;
+    if (!fetch_tts(text) || s_turn.mp3_len == 0) {
+        return 0;
+    }
+    int16_t *out = (int16_t *)heap_caps_malloc(256 * 1024, MALLOC_CAP_SPIRAM);
+    if (!out) {
+        return 0;
+    }
+    static mp3dec_t dec;
+    mp3dec_init(&dec);
+    resampler_t rs;
+    bool rs_init = false;
+    size_t off = 0, frames = 0;
+    while (s_turn.mp3_len - off > 0 && frames < 96 * 1024) {
+        mp3dec_frame_info_t info;
+        int samples = mp3dec_decode_frame(&dec, s_turn.mp3 + off, s_turn.mp3_len - off, s_pcm, &info);
+        if (!info.frame_bytes) {
+            break;
+        }
+        off += info.frame_bytes;
+        if (!samples) {
+            continue;
+        }
+        if (info.channels == 2) {
+            for (int k = 0; k < samples; k++) {
+                s_pcm[k] = (s_pcm[2 * k] + s_pcm[2 * k + 1]) / 2;
+            }
+        }
+        if (!rs_init) {
+            resampler_init(&rs, info.hz, MIC_RATE);
+            rs_init = true;
+        }
+        frames += resample(&rs, s_pcm, samples, out + frames);
+    }
+    s_turn.mp3_len = 0;
+    if (!frames) {
+        heap_caps_free(out);
+        return 0;
+    }
+    *pcm_out = out;
+    return frames;
+}
+
+/* Runs the decode on its own PSRAM-stack task (Google TLS + minimp3 need the stack), like the
+ * mp3 selftest: the voice task calls it and gets back the PCM to write. */
+extern "C" size_t muse_hatch_notif_pcm(int16_t **pcm_out)
+{
+    notif_pcm_t st = { xTaskGetCurrentTaskHandle(), nullptr, 0 };
+    auto body = [](void *arg) {
+        auto *st = (notif_pcm_t *)arg;
+        st->n = notif_decode(s_notif_speak, &st->pcm);
+        xTaskNotifyGive(st->caller);
+        vTaskSuspend(NULL);
+    };
+    TaskHandle_t task;
+    if (xTaskCreatePinnedToCoreWithCaps(body, "notif_pcm", 40 * 1024, &st, 5, &task, 0,
+                                        MALLOC_CAP_SPIRAM) != pdPASS) {
+        return 0;
+    }
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    vTaskDeleteWithCaps(task);
+    *pcm_out = st.pcm;
+    return st.n;
+}
+
 #define NOTIF_POLL_US (15 * 1000000LL)     /* idle nudge poll (matches the task cadence) */
 #define NOTIF_MIN_GAP_US (45 * 1000000LL)  /* at most one presented nudge every 45 s */
 #define NOTIF_PENDING_TTL_US (120 * 1000000LL)  /* un-tapped: stop blocking + stop being stale */
@@ -3460,6 +3536,7 @@ static void notif_ack(const char *id)
 /* Show one nudge on the glass: look up, its mood, a chirp, and the line with a tap hint. */
 static void notif_present(const rel_notif_t *n)
 {
+    muse_state_set_asleep(false);   /* wake the screen: the nudge is meant to be SEEN */
     s_notif_pending = true;
     s_notif_until = now_us() + NOTIF_PENDING_TTL_US;
     s_notif_default = n->is_default;
@@ -3468,7 +3545,11 @@ static void notif_present(const rel_notif_t *n)
     if (n->mood[0]) {
         (void)muse_ui_react(n->mood);   /* an unknown mood just returns false, no harm */
     }
-    muse_voice_request_chirp();
+    muse_voice_request_notif();   /* the notification chime (notif.pcm) */
+    if (strlen(n->text) <= NOTIF_SPEAK_MAX - 1) {
+        strlcpy(s_notif_speak, n->text, sizeof(s_notif_speak));
+        muse_voice_request_notif_speak();   /* the voice task speaks it (owns the speaker) */
+    }
     char cap[300];
     /* The caption box is TWO lines of ~16 chars. A short nudge keeps the hint on its OWN line
      * (a wide "text | TAP TO OPEN" wrapped mid-word and read like a truncated sentence); a
@@ -3497,6 +3578,8 @@ static void notif_tick(void)
         return;
     }
     int64_t now = now_us();
+    /* Poll while ASLEEP too -- that is the point: a nudge should wake the screen itself. The
+     * power cost is bounded (a poll only every 15 s, and only when a poll could act). */
     if (s_notif_pending && now > s_notif_until) {
         s_notif_pending = false;   /* never tapped: stop blocking; a face tap is a pet again */
         ESP_LOGI(TAG, "notif: %s went stale (untapped)", s_notif_label);
@@ -3505,10 +3588,12 @@ static void notif_tick(void)
         return;   /* one at a time: a nudge on screen waits for the tap */
     }
     if (now < s_notif_poll_us || now < s_notif_gap_us || s_turn.phase != P_IDLE || s_resting.load() ||
-        muse_state_asleep() || !muse_wifi_connected() || !muse_hatch_configured()) {
+        !muse_wifi_connected() || !muse_hatch_configured()) {
         return;
     }
-    s_notif_poll_us = now + NOTIF_POLL_US;
+    /* Awake: the snappy cadence. Asleep: slower, so leaving the radio up to catch a nudge is
+     * not a battery tax (a nudge then wakes the screen within ~a minute). */
+    s_notif_poll_us = now + (muse_state_asleep() ? 60 * 1000000LL : NOTIF_POLL_US);
     rel_notif_t n;
     bool reachable = false;
     if (!poll_notification(&n, &reachable)) {
