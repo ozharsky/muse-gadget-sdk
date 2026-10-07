@@ -1354,7 +1354,7 @@ static lv_obj_t *agent_row(lv_obj_t *list, const lv_image_dsc_t *icon, lv_obj_t 
     if (icon) {
         lv_obj_t *img = lv_image_create(c);
         lv_image_set_src(img, icon);
-        lv_obj_set_size(img, 28, 28);
+        lv_obj_set_size(img, ICON_META_W, ICON_META_H);   /* both icons are the same 40x40 */
     } else {
         label(c, &lv_font_montserrat_20, COLOR_ACCENT, LV_SYMBOL_SHUFFLE);
     }
