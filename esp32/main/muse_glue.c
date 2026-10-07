@@ -275,6 +275,33 @@ static int op_wifi_saved(muse_wifi_saved_t *out, int max) {
     return n;
 }
 
+// Switch to a saved network by name: move it to the front of the saved list (so
+// JOIN_FIRST joins IT) and ask the keeper to join now. Password untouched -- Link keeps saved
+// networks' credentials itself, so Muse never needs the secret to switch.
+static bool op_wifi_switch(const char *ssid) {
+    if (!ssid || !ssid[0]) return false;
+    bool found = false;
+    portENTER_CRITICAL(&s_lock);
+    int at = 0;
+    while (at < s_saved_count && strcmp(s_saved[at].ssid, ssid) != 0) at++;
+    if (at < s_saved_count && !s_saved[at].forgotten) {
+        saved_net_t picked = s_saved[at];
+        memmove(&s_saved[1], &s_saved[0], at * sizeof(s_saved[0]));
+        s_saved[0] = picked;
+        strlcpy(s_ssid, ssid, sizeof(s_ssid));
+        s_creds_gen++;
+        s_editing = true;
+        s_chosen = true;
+        found = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (found) {
+        keeper_kick(KEEP_SAVE);
+        keeper_kick(KEEP_WIFI);
+    }
+    return found;
+}
+
 static void op_wifi_forget(const char *ssid) {
     if (!ssid || !ssid[0]) {
         op_wifi_set("", "");
@@ -406,6 +433,7 @@ static const muse_link_ops_t s_ops = {
     .wifi_nap = op_wifi_nap,
     .wifi_saved = op_wifi_saved,
     .wifi_forget = op_wifi_forget,
+    .wifi_switch = op_wifi_switch,
 };
 
 // ---- Keeper: joins a saved network and applies BLE, on an internal stack ----

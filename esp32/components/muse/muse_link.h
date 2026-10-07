@@ -45,6 +45,11 @@ typedef enum {
 /* A reply frame of a request on Link's session: see noise_ctrl_req_cb in main/noise_control.h. */
 typedef void (*muse_link_req_cb)(void *ctx, int status, const uint8_t *data, size_t len, bool end);
 
+/* Switch to a SAVED network by name (muse_link.c -> the ops vtable -> Link). Moves it to the
+ * front of the saved list and joins it; the password is Link's own, so no secret is needed.
+ * False when the name is not a saved network. */
+bool muse_wifi_switch(const char *ssid);
+
 typedef struct {
     void (*wifi_status)(muse_wifi_status_t *out);
     void (*wifi_apply)(void);                     /* on/off or credentials changed */
@@ -71,6 +76,7 @@ typedef struct {
     void (*wifi_nap)(bool nap);                   /* screen off a while: leave Wi-Fi until false */
     int (*wifi_saved)(muse_wifi_saved_t *out, int max);   /* most recently joined first */
     void (*wifi_forget)(const char *ssid);        /* one saved network; empty forgets them all */
+    bool (*wifi_switch)(const char *ssid);        /* switch to a saved network by name */
     int (*vm_bearer)(char *out, size_t cap);      /* a fresh chat bearer from the app layer */
 } muse_link_ops_t;
 

@@ -227,6 +227,11 @@ int muse_wifi_saved(muse_wifi_saved_t *out, int max)
     return s_ops && s_ops->wifi_saved ? s_ops->wifi_saved(out, max) : 0;
 }
 
+bool muse_wifi_switch(const char *ssid)
+{
+    return s_ops && s_ops->wifi_switch ? s_ops->wifi_switch(ssid) : false;
+}
+
 void muse_wifi_forget(const char *ssid)
 {
     if (s_ops && s_ops->wifi_forget) {

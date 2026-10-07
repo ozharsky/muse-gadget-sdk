@@ -2542,6 +2542,11 @@ static bool hermes_request_stream(void)
         } else {
             ESP_LOGI(TAG, "hermes stream: body written (%d bytes, %lld ms)", written,
                      (long long)((now_us() - t0) / 1000));
+            /* The note has left the device: tell the voice task, so it can say "note sent,
+             * waiting" while the agent thinks (Muse shows this; Hermes did not). */
+            if (s_turn.gen == s_gen.load()) {
+                emit(MUSE_HATCH_EV_SENT, nullptr);
+            }
         }
     }
     if (err != ESP_OK) {
@@ -3429,6 +3434,7 @@ static char s_notif_label[40];
 static int64_t s_notif_gap_us;   /* earliest time the next nudge may be presented */
 
 extern "C" void muse_ui_agent_switch(bool hermes);   /* muse_ui.h has no C++ guards */
+extern "C" void muse_input_poke(void);              /* muse_input.h has no C++ guards either */
 
 /* GET /notifications -> the newest unread nudge, or false. *reachable: the relay answered. */
 static bool poll_notification(rel_notif_t *out, bool *reachable)
@@ -3536,7 +3542,11 @@ static void notif_ack(const char *id)
 /* Show one nudge on the glass: look up, its mood, a chirp, and the line with a tap hint. */
 static void notif_present(const rel_notif_t *n)
 {
-    muse_state_set_asleep(false);   /* wake the screen: the nudge is meant to be SEEN */
+    /* Wake the screen so the nudge is SEEN. On battery the UI task is PAUSED while asleep, and
+     * only the input task resumes it -- so poke that task too, or the display stays paused while
+     * "awake" and the UI stall watchdog aborts the board. */
+    muse_state_set_asleep(false);
+    muse_input_poke();
     s_notif_pending = true;
     s_notif_until = now_us() + NOTIF_PENDING_TTL_US;
     s_notif_default = n->is_default;

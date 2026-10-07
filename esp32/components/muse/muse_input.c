@@ -955,6 +955,13 @@ esp_err_t muse_input_start(QueueHandle_t queue)
     return ESP_OK;
 }
 
+void muse_input_poke(void)
+{
+    if (s_input) {
+        xTaskNotifyGive(s_input);
+    }
+}
+
 void muse_input_request_power_off(void)
 {
     s_power_off_requested = true;

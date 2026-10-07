@@ -660,6 +660,8 @@ static void on_wifi_other(lv_event_t *e)
 }
 
 /* Two taps within a few seconds forget a saved network. */
+/* A saved network: TAP switches to it; a SECOND tap within 4 s forgets it. (Before, a tap
+ * only armed forget, so there was no way to move to another saved network from here.) */
 static void on_wifi_saved(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -671,6 +673,13 @@ static void on_wifi_saved(lv_event_t *e)
     }
     s_forget_armed = i;
     s_forget_armed_us = now;
+    if (muse_wifi_switch(s_saved[i].ssid)) {
+        muse_state_set_caption("SWITCHING TO %s", s_saved[i].ssid);
+        muse_state_poke();
+    } else {
+        muse_state_set_caption("COULDN'T SWITCH TO %s", s_saved[i].ssid);
+        muse_state_poke();
+    }
 }
 
 static bool same_saved(const muse_wifi_saved_t *a, int n)
@@ -776,8 +785,7 @@ static void build_wifi_page(lv_obj_t *tile)
         snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
         lv_label_set_text(mac, buf);
     }
-    note(list, "Muse remembers up to 8 networks and joins the strongest one in range. Tap a saved one twice to "
-               "forget it.");
+    note(list, "Muse remembers up to 8 networks. Tap a saved one to switch to it; tap it twice to forget it.");
 }
 
 static void tick_wifi(void)

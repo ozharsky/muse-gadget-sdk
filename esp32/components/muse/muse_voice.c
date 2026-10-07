@@ -374,7 +374,10 @@ static bool hatch_reply(bool *delivered)
             case MUSE_HATCH_EV_SENT:
                 *delivered = true;
                 if (!speaking && !replied) {
-                    muse_state_set_caption("NOTE SENT - WAITING FOR MUSE");
+                    /* The agent name depends on the transport: the relay is Hermes (or an ALT
+                     * profile), Muse is Muse. Hermes agents never showed this before. */
+                    muse_state_set_caption(muse_settings_agent_hermes() ? "NOTE SENT - WAITING FOR AGENT"
+                                                                        : "NOTE SENT - WAITING FOR MUSE");
                 }
                 break;
             case MUSE_HATCH_EV_STATUS:

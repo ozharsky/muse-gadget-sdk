@@ -47,6 +47,12 @@ typedef struct {
 esp_err_t muse_input_start(QueueHandle_t queue);
 
 /* Plays the goodbye animation and powers off (from the input task). */
+/* Wakes the input task out of a long wait_buttons()/delay so update_power() re-evaluates now.
+ * Needed whenever another task changes sleep state (e.g. a notification waking the screen):
+ * without it the input task can sit in a 10 s wait while the display stays paused, and the UI
+ * stall watchdog then aborts. */
+void muse_input_poke(void);
+
 void muse_input_request_power_off(void);
 
 /* Reboots the board (from the input task): the menu's Restart, the settings page,
