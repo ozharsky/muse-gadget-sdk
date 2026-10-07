@@ -24,6 +24,8 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"     /* esp_restart: the restart paths */
+#include "esp_timer.h"      /* the talk-button hold timer */
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #if CONFIG_PM_ENABLE
@@ -83,6 +85,10 @@ static const char *TAG = "muse_input";
 #define DOUBLE_TICKS 35        /* 350 ms: a second aux press within this toggles phone setup */
 
 #define GOODBYE_MS 1500        /* let the goodbye animation play */
+#define HOLD_RESTART_MS 20000  /* talk-button hold: in-hand restart when the screen freezes.
+                                * A voice note already stops at 15 s (MAX_SECS), so a hold
+                                * this long is unambiguous. This board has NO reset key --
+                                * only BOOT and the (hardware-only) PWR switch. */
 #define HINT_TICKS 60          /* 0.6 s: warn that holding powers off */
 #define LONG_TICKS 150         /* 1.5 s: power off */
 #define SLEEP_CHECK_MS 100
@@ -96,6 +102,7 @@ static TaskHandle_t s_input;
 static bool s_talk_down;
 static bool s_cpu_low;      /* display stopped and the CPU allowed to sleep */
 static volatile bool s_power_off_requested;
+static volatile bool s_restart_requested;   /* menu / console / hold: reboot the board */
 static volatile bool s_nap_now;   /* ">nap": asleep, as if on battery, nap without waiting WIFI_NAP_MS */
 
 static void post(muse_ptt_t type, bool wake)
@@ -499,6 +506,26 @@ static void input_task(void *arg)
             power_off();
         }
 
+        /* Restart requests and the talk-button hold. The hold is the only in-hand
+         * recovery on this board (no reset key, no readable PWR); a voice note stops
+         * at 15 s, so 20 s of solid holding means "restart", not "talk". */
+        static int64_t s_talk_down_us;
+        if (s_talk_down && !s_talk_down_us) {
+            s_talk_down_us = esp_timer_get_time();
+        } else if (!s_talk_down) {
+            s_talk_down_us = 0;
+        } else if (esp_timer_get_time() - s_talk_down_us >= (int64_t)HOLD_RESTART_MS * 1000) {
+            ESP_LOGW(TAG, "talk held %d s: forcing a restart", HOLD_RESTART_MS / 1000);
+            s_restart_requested = true;
+        }
+        if (s_restart_requested) {
+            s_restart_requested = false;
+            ESP_LOGI(TAG, "restarting");
+            muse_state_set_caption("RESTARTING...");
+            vTaskDelay(pdMS_TO_TICKS(400));   /* let the caption land, then cut */
+            esp_restart();
+        }
+
         TickType_t now = xTaskGetTickCount();
         if (now - checked >= pdMS_TO_TICKS(SLEEP_CHECK_MS)) {
             checked = now;
@@ -672,6 +699,13 @@ static bool console_command(char *line, bool whole)
         s_nap_now = true;
         return true;
     }
+    if (!strcmp(line, "reboot") || !strcmp(line, "restart")) {
+        printf("@reboot ok\n");
+        fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(150));   /* let the ack reach the host */
+        esp_restart();
+        return true;
+    }
     if (!strncmp(line, "face=", 5)) {
         set_face(line + 5);
         return true;
@@ -808,6 +842,7 @@ static void serial_task(void *arg)
             free(line);
         } else if (c == 'd' || c == 'u') {
             muse_state_poke();
+            s_talk_down = c == 'd';   /* bench keys act as the physical button, hold included */
             post(c == 'd' ? MUSE_PTT_DOWN : MUSE_PTT_UP, false);
         }
     }
@@ -827,4 +862,9 @@ esp_err_t muse_input_start(QueueHandle_t queue)
 void muse_input_request_power_off(void)
 {
     s_power_off_requested = true;
+}
+
+void muse_input_request_restart(void)
+{
+    s_restart_requested = true;
 }

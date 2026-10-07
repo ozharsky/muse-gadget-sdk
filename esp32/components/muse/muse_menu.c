@@ -74,6 +74,7 @@ typedef enum {
     ITEM_RESET,
     ITEM_SLEEP_NOW,
     ITEM_POWER,
+    ITEM_RESTART,
     ITEM_CLOSE,
     ITEM_COUNT,
 } item_t;
@@ -91,6 +92,7 @@ static const char *const ITEM_NAMES[ITEM_COUNT] = {
     [ITEM_RESET] = "Reset pairing",
     [ITEM_SLEEP_NOW] = "Screen off",
     [ITEM_POWER] = "Power off",
+    [ITEM_RESTART] = "Restart",
     [ITEM_CLOSE] = "Close menu",
 };
 
@@ -108,6 +110,7 @@ static const char *const ITEM_ACTIONS[ITEM_COUNT] = {
     [ITEM_RESET] = "Select",
     [ITEM_SLEEP_NOW] = "Select",
     [ITEM_POWER] = "Select",
+    [ITEM_RESTART] = "Select",
     [ITEM_CLOSE] = "Close",
 };
 
@@ -434,6 +437,10 @@ static void activate(int item, int direction)
         return;
     case ITEM_POWER:
         show(VIEW_POWER);
+        return;
+    case ITEM_RESTART:
+        muse_menu_close();
+        muse_input_request_restart();
         return;
     case ITEM_CLOSE:
     default:

@@ -152,3 +152,37 @@ int main(int argc, char **argv) {
 
     def test_bidirectional_values(self):
         subprocess.run([str(self.binary), '2'], check=True)
+
+class MenuItemTables(unittest.TestCase):
+    """Every item in the enum must have a name, an action hint, and an activate branch.
+
+    A missing ITEM_NAMES entry prints "(null)" on the glass (the exact bug the Power
+    page shipped with on the 143C), and a missing activate branch falls into default
+    and closes the menu instead of doing the thing. Both are silent at compile time."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.menu = (ROOT / 'components/muse/muse_menu.c').read_text()
+        enum = re.search(r'typedef enum \{.*?\} item_t;', cls.menu, re.S)[0]
+        cls.items = [i for i in re.findall(r'\b(ITEM_[A-Z_]+)\b', enum) if i != 'ITEM_COUNT']
+
+    def test_every_item_has_a_name_and_an_action(self):
+        names = re.search(r'ITEM_NAMES\[ITEM_COUNT\] = \{(.*?)\};', self.menu, re.S)[0]
+        actions = re.search(r'ITEM_ACTIONS\[ITEM_COUNT\] = \{(.*?)\};', self.menu, re.S)[0]
+        for item in self.items:
+            with self.subTest(item=item):
+                self.assertIn(f'[{item}] =', names)
+                self.assertIn(f'[{item}] =', actions)
+
+    def test_every_item_has_an_activate_branch(self):
+        body = re.search(r'static void activate\(int item, int direction\)\n\{(.*?)\n\}', self.menu, re.S)[0]
+        for item in self.items:
+            if item == 'ITEM_CLOSE':
+                continue          # deliberately served by the default arm
+            with self.subTest(item=item):
+                self.assertIn(f'case {item}:', body)
+
+    def test_restart_requests_a_reboot(self):
+        body = re.search(r'static void activate\(int item, int direction\)\n\{(.*?)\n\}', self.menu, re.S)[0]
+        seg = body.split('case ITEM_RESTART:')[1].split('return;')[0]
+        self.assertIn('muse_input_request_restart()', seg)

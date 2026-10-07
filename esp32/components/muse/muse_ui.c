@@ -1955,7 +1955,14 @@ static void stall_check(void *arg)
         }
     }
     bool ble_recent = (now - s_ble_seen_us) < 60 * 1000000LL;
-    if (stall > (ble_recent ? 60 : 20) * 1000000LL && !muse_settings_ble_on()) {
+    int64_t limit_us = (ble_recent ? 60 : 20) * 1000000LL;
+    if (muse_settings_ble_on() && limit_us < 600LL * 1000000LL) {
+        /* BLE left on: pairing pauses are legitimately minutes-long, so no quick
+         * abort -- but a frozen screen must not wait FOREVER. 10 minutes is the
+         * hard ceiling; anything sooner needs the talk-button hold (muse_input.c). */
+        limit_us = 600LL * 1000000LL;
+    }
+    if (stall > limit_us) {
         ESP_LOGE(TAG, "UI task stalled for %d s: aborting for a core dump", (int)(stall / 1000000LL));
         abort();
     } else if (stall > 5 * 1000000LL) {
