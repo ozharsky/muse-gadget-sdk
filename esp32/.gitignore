@@ -26,8 +26,21 @@ dependencies.lock
 
 .claude/
 
-# Your own avatar (tools/muse/AVATAR_RECIPE.md): built when present, never committed.
-components/muse/avatar/
+# Faces: the BUILT ones are tracked (branch self-contained); other files dropped
+# here stay ignored (tools/muse/AVATAR_RECIPE.md for your own experiments).
+components/muse/avatar/*
+!components/muse/avatar/muse_pixel.c
+!components/muse/avatar/muse_pixel_golem.c
+!components/muse/avatar/muse_pixel_hermes.c
+!components/muse/avatar/muse_pixel_keller.c
+!components/muse/avatar/muse_pixel_bloop.c
+!components/muse/avatar/muse_pixel_switch.c
+!components/muse/avatar/shodan_poses.h
+!components/muse/avatar/sprite_data.h
+!components/muse/avatar/sprite_golem.h
+!components/muse/avatar/sprite_construct.h
+!components/muse/avatar/sprite_keller.h
+!components/muse/avatar/golem_moods.h
 
 # Local debug artifacts (not tracked).
 *.log
