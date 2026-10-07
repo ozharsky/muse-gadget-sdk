@@ -463,7 +463,9 @@ static void eye_bloom(float k, uint8_t c)
                 int x = cx[e] + dx, y = 33 + dy;
                 if (d2 < 30.0f && ((x + y) & 1) == 0 && BAYER4[y & 3][x & 3] < (int)((1.0f - d2 / 30.0f) * 16.0f * k)) {
                     uint8_t cur = s_fb[y * W + x];
-                    if (cur == IDX_SOCKET || cur == IDX_SKIN || SPR_PAL[cur][0] > 120) {
+                    /* Guard the palette read: the light pass paints dynamic indices
+                     * (>= SPR_N) into s_fb; SPR_PAL has only SPR_N entries. */
+                    if (cur == IDX_SOCKET || cur == IDX_SKIN || (cur < SPR_N && SPR_PAL[cur][0] > 120)) {
                         s_fb[y * W + x] = c;
                     }
                 }

@@ -161,8 +161,8 @@ static void eye_bloom(float k, uint8_t c)
                 int x = cx[e] + dx, y = 23 + dy;
                 if (d2 < 22.0f && ((x + y) & 1) == 0 && BAYER4[y & 3][x & 3] < (int)((1.0f - d2 / 22.0f) * 16.0f * k)) {
                     uint8_t cur = s_fb[y * W + x];
-                    if (cur == IDX_SOCKET || cur == IDX_SKIN || SPR_PAL[cur][0] > 110) {
-                        s_fb[y * W + x] = c;
+                    if (cur == IDX_SOCKET || cur == IDX_SKIN || (cur < SPR_N && SPR_PAL[cur][0] > 110)) {
+                        s_fb[y * W + x] = c;   /* guard: dynamic idx (>= SPR_N) has no SPR_PAL row */
                     }
                 }
             }
@@ -189,7 +189,8 @@ static void draw_wave(float t, float level)
             }
             uint8_t cur = pxat(x, y);
             uint8_t c = (i & 1) ? D_G1 : D_G0;
-            if (SPR_PAL[cur][1] > 60 && SPR_PAL[cur][1] >= SPR_PAL[cur][0]) {
+            /* Guard: a dynamic index (>= SPR_N) is glow already, not stone -- skip it. */
+            if (cur < SPR_N && SPR_PAL[cur][1] > 60 && SPR_PAL[cur][1] >= SPR_PAL[cur][0]) {
                 continue;                                /* don't paint over the golem itself */
             }
             if (BAYER4[y & 3][x & 3] < (int)(fade * 16.0f)) {
@@ -809,11 +810,11 @@ static void chest_core(float t, float level, float bright)
             int x = cx + dx, y = cy + dy;
             if (d2 < rr) {
                 uint8_t cur = pxat(x, y);
-                /* glow over the emblem: the dark keyhole (the whole dark-teal family),
-                 * the plate's bronze, and the pale-gold rims */
-                float pv = fmaxf(SPR_PAL[cur][0], fmaxf(SPR_PAL[cur][1], SPR_PAL[cur][2])) / 255.0f;
-                bool dark_teal = pv < 0.12f && SPR_PAL[cur][2] >= SPR_PAL[cur][0];
-                bool gold_fam = SPR_PAL[cur][0] > 60 && SPR_PAL[cur][0] >= SPR_PAL[cur][2];
+                /* Guard: dynamic indices (>= SPR_N) from the light pass have no SPR_PAL row;
+                 * treat them as already glowing (paint the hot centre only). */
+                float pv = cur < SPR_N ? fmaxf(SPR_PAL[cur][0], fmaxf(SPR_PAL[cur][1], SPR_PAL[cur][2])) / 255.0f : 0.0f;
+                bool dark_teal = cur < SPR_N && pv < 0.12f && SPR_PAL[cur][2] >= SPR_PAL[cur][0];
+                bool gold_fam = cur < SPR_N && SPR_PAL[cur][0] > 60 && SPR_PAL[cur][0] >= SPR_PAL[cur][2];
                 if (dark_teal || gold_fam) {
                     if (d2 < (float)(hot * hot) * 0.45f) {
                         px(x, y, D_G0);                          /* the hot centre */
@@ -1289,8 +1290,9 @@ void muse_pixel_render(const muse_pose_t *p)
                     continue;
                 }
                 uint8_t under = pxat(x, y);
-                bool goldish = SPR_PAL[under][0] > 60 && SPR_PAL[under][0] >= SPR_PAL[under][2];
-                bool darkish = fmaxf(SPR_PAL[under][0],
+                /* Guard: under can be a dynamic index (>= SPR_N) after the light pass. */
+                bool goldish = under < SPR_N && SPR_PAL[under][0] > 60 && SPR_PAL[under][0] >= SPR_PAL[under][2];
+                bool darkish = under < SPR_N && fmaxf(SPR_PAL[under][0],
                                      fmaxf(SPR_PAL[under][1], SPR_PAL[under][2])) < 0.14f * 255.0f;
                 if (goldish || darkish) {
                     px(x, y, c);

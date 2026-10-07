@@ -152,8 +152,8 @@ static void eye_bloom(float k, uint8_t c)
                 int x = cx[e] + dx, y = 28 + dy;
                 if (d2 < 30.0f && ((x + y) & 1) == 0 && BAYER4[y & 3][x & 3] < (int)((1.0f - d2 / 30.0f) * 16.0f * k)) {
                     uint8_t cur = s_fb[y * W + x];
-                    if (cur == IDX_SOCKET || cur == IDX_SKIN || SPR_PAL[cur][0] > 110) {
-                        s_fb[y * W + x] = c;
+                    if (cur == IDX_SOCKET || cur == IDX_SKIN || (cur < SPR_N && SPR_PAL[cur][0] > 110)) {
+                        s_fb[y * W + x] = c;   /* guard: dynamic idx (>= SPR_N) has no SPR_PAL row */
                     }
                 }
             }
@@ -519,7 +519,7 @@ static void chest_core(float t, float level, float bright)
             int x = cx + dx, y = cy + dy;
             if (d2 < 16.0f && ((x + y) & 1) == 0) {
                 uint8_t cur = pxat(x, y);
-                if (cur == IDX_SOCKET || cur == IDX_DARK || SPR_PAL[cur][2] > 90) {
+                if (cur == IDX_SOCKET || cur == IDX_DARK || (cur < SPR_N && SPR_PAL[cur][2] > 90)) {
                     float k = (1.0f - d2 / 16.0f) * (0.35f + 0.4f * beat) * bright;
                     if (BAYER4[y & 3][x & 3] < (int)(k * 16.0f)) {
                         px(x, y, D_G2);
