@@ -109,6 +109,11 @@ static lv_obj_t *s_batt_status, *s_batt_level, *s_batt_drain, *s_batt_full, *s_b
     *s_batt_busy, *s_batt_awake;
 static int64_t s_batt_shown_us;
 
+/* Agents page. */
+static const int AGENT_CHOICES[] = { MUSE_AGENT_MUSE, MUSE_AGENT_HERMES, MUSE_AGENT_HERMES_ALT };
+#define AGENT_COUNT (int)(sizeof(AGENT_CHOICES) / sizeof(AGENT_CHOICES[0]))
+static lv_obj_t *s_agents, *s_agent_labels[AGENT_COUNT], *s_agent_checks[AGENT_COUNT];
+
 /* Text entry page. */
 static lv_obj_t *s_text_title, *s_text_ta;
 static lv_obj_t *s_text_kp;                 /* a screen under 2" */
@@ -360,7 +365,7 @@ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
 
 static void drop(lv_obj_t *p)
 {
-    lv_obj_t **const pages[] = { &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_usage, &s_power, &s_text };
+    lv_obj_t **const pages[] = { &s_agents, &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_usage, &s_power, &s_text };
     for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
         if (*pages[i] == p) {
             *pages[i] = NULL;
@@ -1310,6 +1315,92 @@ static void tick_usage(void)
 
 /* ---------- Home ---------- */
 
+/* ---------- Agents ---------- */
+
+/* A tappable row whose NAME label is returned so it can be re-labelled, plus a right-side
+ * check label. row() returns only the value label; the agent rows need the name too. */
+static lv_obj_t *agent_row(lv_obj_t *list, const char *icon, lv_obj_t **name_out,
+                           lv_obj_t **check_out, lv_event_cb_t cb, void *user)
+{
+    lv_obj_t *c = card(list, true);
+    label(c, &lv_font_montserrat_20, COLOR_ACCENT, icon);
+    lv_obj_t *t = label(c, &lv_font_montserrat_20, COLOR_TEXT, "");
+    lv_obj_set_flex_grow(t, 1);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_ACCENT, "");
+    lv_obj_set_style_max_width(v, 130, 0);
+    lv_obj_add_event_cb(c, cb, LV_EVENT_CLICKED, user);
+    *name_out = t;
+    *check_out = v;
+    return c;
+}
+
+static void on_agent_pick(lv_event_t *e)
+{
+    /* Direct, not a cycle: tap the one you want. ALT with no profile name cannot be routed,
+     * so refuse it here rather than strand the turn. */
+    int idx = AGENT_CHOICES[(int)(intptr_t)lv_event_get_user_data(e)];
+    if (idx == MUSE_AGENT_HERMES_ALT) {
+        char alt[MUSE_AGENT_PROFILE_MAX + 1];
+        muse_settings_agent_alt(alt);
+        if (!alt[0]) {
+            return;
+        }
+    }
+    muse_settings_set_agent(idx);
+}
+
+static void on_agent_profile_done(const char *name)
+{
+    muse_settings_set_agent_profile(name);
+}
+
+static void on_agent_profile(lv_event_t *e)
+{
+    (void)e;
+    char alt[MUSE_AGENT_PROFILE_MAX + 1];
+    muse_settings_agent_alt(alt);
+    open_text("Alt profile", alt, false, MUSE_AGENT_PROFILE_MAX, "e.g. beepbop",
+              on_agent_profile_done, s_agents);
+}
+
+static void build_agents_page(lv_obj_t *tile)
+{
+    lv_obj_t *list;
+    s_agents = page(tile, "AGENTS", true, &list);
+    note(list, "Talk to one of these. Two quick taps of the talk button also cycles them.");
+    for (int i = 0; i < AGENT_COUNT; i++) {
+        int idx = AGENT_CHOICES[i];
+        agent_row(list,
+                  idx == MUSE_AGENT_MUSE ? LV_SYMBOL_EYE_OPEN
+                                         : (idx == MUSE_AGENT_HERMES ? LV_SYMBOL_UPLOAD : LV_SYMBOL_SHUFFLE),
+                  &s_agent_labels[i], &s_agent_checks[i], on_agent_pick, (void *)(intptr_t)i);
+    }
+    row(list, LV_SYMBOL_EDIT, "Alt profile name...", NULL, on_agent_profile, NULL);
+    note(list, "The alt slot is one of your own Hermes profiles: set its name to enable it. "
+               "Its looks and voice come from that profile.");
+}
+
+static void tick_agents(void)
+{
+    char name[MUSE_AGENT_PROFILE_MAX + 1];
+    char alt[MUSE_AGENT_PROFILE_MAX + 1];
+    muse_settings_agent_alt(alt);
+    int cur = muse_settings_agent();
+    for (int i = 0; i < AGENT_COUNT; i++) {
+        int idx = AGENT_CHOICES[i];
+        bool off = (idx == MUSE_AGENT_HERMES_ALT && !alt[0]);   /* can't be routed yet */
+        muse_settings_agent_name(idx, name);
+        set_text(s_agent_labels[i], name);
+        set_text(s_agent_checks[i], idx == cur ? LV_SYMBOL_OK : "");
+        lv_obj_set_style_text_color(s_agent_labels[i], lv_color_hex(off ? COLOR_DIM : COLOR_TEXT), 0);
+        lv_obj_t *r = lv_obj_get_parent(s_agent_labels[i]);
+        if (r) {
+            lv_obj_set_style_opa(r, off ? LV_OPA_60 : LV_OPA_COVER, 0);
+        }
+    }
+}
+
 static const page_t WIFI = { &s_wifi, build_wifi_page };
 static const page_t HATCH = { &s_hatch, build_hatch_page };
 static const page_t BLE = { &s_ble, build_ble_page };
@@ -1318,27 +1409,14 @@ static const page_t SLEEP = { &s_sleep, build_sleep_page };
 static const page_t BATTERY = { &s_battery, build_battery_page };
 static const page_t USAGE = { &s_usage, build_usage_page };
 static const page_t POWER = { &s_power, build_power_page };
-
-static void on_agent(lv_event_t *e)
-{
-    (void)e;
-    /* Same cycle as the double-tap: Muse -> Hermes -> Hermes ALT -> Muse, ALT skipped
-     * until a profile name is set (muse_settings_set_agent() enforces the skip too). */
-    char alt[MUSE_AGENT_PROFILE_MAX + 1];
-    muse_settings_agent_profile(alt);
-    int next = (muse_settings_agent() + 1) % MUSE_AGENT_COUNT;
-    if (next == MUSE_AGENT_HERMES_ALT && !alt[0]) {
-        next = MUSE_AGENT_MUSE;
-    }
-    muse_settings_set_agent(next);
-}
+static const page_t AGENTS = { &s_agents, build_agents_page };
 
 static void build_home(lv_obj_t *tile)
 {
     lv_obj_t *list;
     s_home = page(tile, "SETTINGS", false, &list);
     if (CONFIG_MUSE_HERMES_URL[0]) {
-        row(list, LV_SYMBOL_SHUFFLE, "Agent", &s_home_agent, on_agent, NULL);
+        row(list, LV_SYMBOL_SHUFFLE, "Agents", &s_home_agent, on_nav, (void *)&AGENTS);
     }
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
     row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
@@ -1457,6 +1535,8 @@ void muse_settings_ui_tick(bool visible)
         tick_battery();
     } else if (s_current == s_usage) {
         tick_usage();
+    } else if (s_current == s_agents) {
+        tick_agents();
     }
 }
 

@@ -95,6 +95,14 @@ int muse_settings_agent(void);
 bool muse_settings_agent_hermes(void);
 /* The Hermes profile name ("" = the relay's default). Only meaningful off the MUSE slot. */
 void muse_settings_agent_profile(char out[MUSE_AGENT_PROFILE_MAX + 1]);
+/* The STORED ALT profile name, whether or not the ALT slot is active. The double-tap /
+ * Settings cycle gate uses this to decide if ALT may join the cycle; routing, status and
+ * task stamping keep using muse_settings_agent_profile() (which is active-only, so a turn
+ * never carries a profile it isn't targeting). */
+void muse_settings_agent_alt(char out[MUSE_AGENT_PROFILE_MAX + 1]);
+/* The display name of slot `idx`, whether or not it is the ACTIVE one: "Muse", the ALT
+ * profile name ("Alt" while unset), else "Hermes". For the Agents list and status labels. */
+void muse_settings_agent_name(int idx, char out[MUSE_AGENT_PROFILE_MAX + 1]);
 
 void muse_settings_set_agent(int idx);
 /* Kept for the boolean toggle: true = HERMES, false = MUSE (never jumps to ALT). */

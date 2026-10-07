@@ -61,7 +61,15 @@ static TickType_t xTaskGetTickCount(void) { return g_now; }
 static int g_agent = MUSE_AGENT_MUSE;
 static char g_alt[64] = "";
 static int muse_settings_agent(void) { return g_agent; }
-static void muse_settings_agent_profile(char *out) { strcpy(out, g_alt); }
+/* Production semantics, modeled faithfully so a wrong getter FAILS here: agent_profile is
+ * ACTIVE-ONLY (routing/status/task-stamping use it, and must never name a profile the turn
+ * isn't targeting); agent_alt is the STORED name (the cycle gate uses it). A stub that returned
+ * the stored name from agent_profile masked the live bug where the cycle read "" on Muse/Hermes
+ * and silently skipped ALT. */
+__attribute__((unused)) static void muse_settings_agent_profile(char *out) {
+    strcpy(out, g_agent == MUSE_AGENT_HERMES_ALT ? g_alt : "");
+}
+__attribute__((unused)) static void muse_settings_agent_alt(char *out) { strcpy(out, g_alt); }
 static void muse_settings_set_agent(int idx) { g_agent = idx; }
 
 ''' + function(src, 'count_tap') + r'''

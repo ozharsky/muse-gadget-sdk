@@ -272,7 +272,7 @@ static void count_tap(bool pressed)
         /* Cycle Muse -> Hermes -> Hermes ALT -> Muse. The ALT slot only joins the cycle
          * once a profile name exists (the relay cannot route an unnamed profile). */
         char alt[MUSE_AGENT_PROFILE_MAX + 1];
-        muse_settings_agent_profile(alt);
+        muse_settings_agent_alt(alt);   /* stored name: the active-only getter reads "" here */
         int next = (muse_settings_agent() + 1) % MUSE_AGENT_COUNT;
         if (next == MUSE_AGENT_HERMES_ALT && !alt[0]) {
             next = MUSE_AGENT_MUSE;
@@ -802,8 +802,23 @@ static bool bench_ui_command(const char *line)
     if (!strncmp(line, "agent.profile=", 14)) {
         muse_settings_set_agent_profile(line + 14);
         char alt[MUSE_AGENT_PROFILE_MAX + 1];
-        muse_settings_agent_profile(alt);
+        muse_settings_agent_alt(alt);   /* stored name, so this echo tells the truth */
         printf("@agent.profile '%s'%s\n", alt, alt[0] ? "" : " (cleared; the cycle skips ALT)");
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "tap") || !strncmp(line, "tap=", 4)) {
+        /* Bench: drive the REAL tap counter (count_tap -- the double-tap agent switch) without a
+         * finger. ">tap" = one tap; ">tap=2" = a double-tap (one cycle step). The bench 'd'/'u'
+         * keys only reach the voice queue, never count_tap, so this is the way in. */
+        int n = line[3] == '=' ? atoi(line + 4) : 1;
+        for (int i = 0; i < n && i < 8; i++) {
+            count_tap(true);
+            vTaskDelay(pdMS_TO_TICKS(50));    /* a press well under the 300 ms tap limit */
+            count_tap(false);
+            vTaskDelay(pdMS_TO_TICKS(200));   /* gap inside the 1200 ms accumulate window */
+        }
+        printf("@tap %d agent=%d\n", n, muse_settings_agent());
         fflush(stdout);
         return true;
     }

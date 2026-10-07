@@ -190,6 +190,21 @@ void muse_settings_agent_profile(char out[MUSE_AGENT_PROFILE_MAX + 1]) {
     strlcpy(out, s.agent == MUSE_AGENT_HERMES_ALT ? s.agent_alt_profile : "", MUSE_AGENT_PROFILE_MAX + 1);
 }
 
+void muse_settings_agent_alt(char out[MUSE_AGENT_PROFILE_MAX + 1]) {
+    strlcpy(out, s.agent_alt_profile, MUSE_AGENT_PROFILE_MAX + 1);
+}
+
+void muse_settings_agent_name(int idx, char out[MUSE_AGENT_PROFILE_MAX + 1])
+{
+    if (idx == MUSE_AGENT_MUSE) {
+        strlcpy(out, "Muse", MUSE_AGENT_PROFILE_MAX + 1);
+    } else if (idx == MUSE_AGENT_HERMES_ALT) {
+        strlcpy(out, s.agent_alt_profile[0] ? s.agent_alt_profile : "Alt", MUSE_AGENT_PROFILE_MAX + 1);
+    } else {
+        strlcpy(out, "Hermes", MUSE_AGENT_PROFILE_MAX + 1);
+    }
+}
+
 /* Home Link owns the saved networks (this is the first); the local copy is only a fallback. */
 void muse_settings_wifi(char ssid[MUSE_SSID_MAX + 1], char pass[MUSE_PASS_MAX + 1])
 {
