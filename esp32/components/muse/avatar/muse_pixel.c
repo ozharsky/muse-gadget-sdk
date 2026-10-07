@@ -5,7 +5,12 @@
  * kinked lines of light. The picture itself is fixed pixel art (sprite_data.h); what
  * moves is light: it recolours with the state (green idle, cyan listening, violet
  * thinking, lime speaking, red on error), pulses along the circuit lines, shimmers in
- * the roots, and the eyes watch, blink and flicker. It glitches when it talks.
+ * the roots, and the eyes watch and blink. It glitches when it talks.
+ *
+ * The face itself (eyes, brows, mouth) is a pose library baked from Qwen-generated art
+ * (shodan_poses.h): each pose is a sparse set of index deltas over the sprite, blended
+ * with the same 4x4 Bayer dither so transitions stay pixel-art. Rebuild the header with
+ * ~/muse/art-pipeline/shodan_poses/make_shodan_poses.py; never hand-edit it.
  */
 #include <math.h>
 #include <stdbool.h>
@@ -15,6 +20,7 @@
 
 #include "muse_pixel.h"
 #include "sprite_data.h"
+#include "shodan_poses.h"   /* the baked face-pose library (art-pipeline/shodan_poses/) */
 
 #if defined(__has_include) && __has_include("esp_attr.h")
 #include "esp_attr.h"   /* PSRAM placement for the frame buffers */
@@ -222,7 +228,6 @@ typedef struct {
 
 static eye_t s_eye[2];
 static bool s_eyes_init;
-static float s_eye_scale[2] = { 1.0f, 1.0f };   /* per eye: 0 shuts it (a wink) */
 
 static void init_eyes(void)
 {
@@ -285,62 +290,59 @@ static float look_update(const muse_pose_t *p, float dt, float *flick)
     return b >= 0 && b < 1 ? sinf(b * 3.1416f) : 0.0f;
 }
 
-/* Edits only the eye's own pixels, so the shading around them stays as drawn. */
-static void draw_eyes(float open, float close, float flick, bool xeye, float bright, float widen)
+/* One baked pose blended into the framebuffer: a sparse index delta with ordered
+ * dithering, so a partial weight reads as a pixel-art mix of the sprite and the pose. */
+static void pose_apply(int pi, float w)
 {
-    for (int s = 0; s < 2; s++) {
-        const eye_t *e = &s_eye[s];
-        for (int i = 0; i < e->n; i++) {
-            px(e->x[i], e->y[i], IDX_SOCKET);          /* wipe the lens back to the socket */
+    if (w <= 0.001f) {
+        return;
+    }
+    const shodan_pose_t *p = &SHODAN_POSES[pi];
+    const uint16_t *idx = &SHODAN_POSE_IDX[p->off];
+    const uint8_t *col = &SHODAN_POSE_COL[p->off];
+    int thr = (int)(w * 16.0f + 0.5f);
+    if (thr >= 16) {
+        for (int k = 0; k < p->n; k++) {
+            s_fb[idx[k]] = col[k];
         }
-        int cx = (e->xmin + e->xmax) / 2, cy = 33;
-        if (xeye) {
-            for (int d = -2; d <= 2; d++) {
-                px(cx + d, cy + d, D_G1);
-                px(cx + d, cy - d, D_G1);
-            }
-            continue;
-        }
-        float o = open * (1.0f - close) * (1.0f - 0.55f * flick) * s_eye_scale[s];
-        if (o < 0.3f) {
-            for (int x = e->xmin; x <= e->xmax; x++) {
-                px(x, cy, IDX_LID);                      /* a closed eye is a dark seam */
-            }
-            continue;
-        }
-        int sx = iround(s_look.gx * 1.2f), sy = iround(s_look.gy * 0.7f);
-        int top = 99, bot = -1;
-        for (int i = 0; i < e->n; i++) {
-            if (e->y[i] < top) top = e->y[i];
-            if (e->y[i] > bot) bot = e->y[i];
-        }
-        for (int i = 0; i < e->n; i++) {
-            if (o < 0.62f && e->y[i] == top) {
-                continue;                                  /* half-lidded: the top row is gone */
-            }
-            uint8_t c = e->c[i];
-            if (c == IDX_EYE_U && bright > 0.8f) {
-                c = D_G0;
-            } else if (c == IDX_EYE_R && bright > 0.5f && ((e->x[i] + e->y[i]) & 1) == 0) {
-                c = D_G1;
-            }
-            px(e->x[i] + sx, e->y[i] + sy, c);
-        }
-        if (widen > 0.5f) {                               /* wide open: a row more above and below */
-            for (int i = 0; i < e->n; i++) {
-                if (e->y[i] == top) px(e->x[i] + sx, e->y[i] - 1 + sy, IDX_EYE_R);
-                if (e->y[i] == bot) px(e->x[i] + sx, e->y[i] + 1 + sy, IDX_EYE_R);
-            }
+        return;
+    }
+    for (int k = 0; k < p->n; k++) {
+        int i = idx[k];
+        if (BAYER4[(i / W) & 3][(i % W) & 3] < thr) {
+            s_fb[i] = col[k];
         }
     }
 }
 
-static void draw_mouth(float open)
+/* Error mode's face: the lenses become Xs. */
+static void draw_xeyes(void)
 {
-    int rows = open > 0.55f ? 2 : open > 0.2f ? 1 : 0;
-    for (int r = 0; r < rows; r++) {
-        for (int x = 30 - r; x <= 35 + r; x++) {
-            px(x, 48 + r, r == 0 ? IDX_DARK : IDX_BLACK);
+    for (int s = 0; s < 2; s++) {
+        const eye_t *e = &s_eye[s];
+        for (int i = 0; i < e->n; i++) {
+            px(e->x[i], e->y[i], IDX_SOCKET);
+        }
+        int cx = (e->xmin + e->xmax) / 2;
+        for (int d = -2; d <= 2; d++) {
+            px(cx + d, 33 + d, D_G1);
+            px(cx + d, 33 - d, D_G1);
+        }
+    }
+}
+
+/* The state's glow on the lens pixels a pose left untouched (same rule as the old
+ * draw_eyes path, but now the poses own most of the lens colour). */
+static void pose_eye_glow(float bright)
+{
+    for (int y = 22; y < 42; y++) {
+        for (int x = 17; x < 47; x++) {
+            uint8_t *v = &s_fb[y * W + x];
+            if (*v == IDX_EYE_U && bright > 0.8f) {
+                *v = D_G0;
+            } else if (*v == IDX_EYE_R && bright > 0.5f && ((x + y) & 1) == 0) {
+                *v = D_G1;
+            }
         }
     }
 }
@@ -448,14 +450,7 @@ static void glyph(int x, int y, int g, uint8_t c)
     }
 }
 
-/* Brows: dark bars over the forehead. Left runs outer (x 19) to inner (x 28), right is its mirror. */
-static void brows(int lo, int li, int ro, int ri, int thick)
-{
-    for (int t = 0; t < thick; t++) {
-        ln(19, lo + t, 28, li + t, IDX_DARK);
-        ln(44, ro + t, 35, ri + t, IDX_DARK);
-    }
-}
+/* Brows are part of the pose library now (shodan_poses.h); the old dark-bar helper is gone. */
 
 /* A stipple of the state's glow on the skin around the eyes. */
 static void eye_bloom(float k, uint8_t c)
@@ -714,15 +709,15 @@ void muse_pixel_render(const muse_pose_t *p)
     update_palette(tgt, dt);
     float flick;
     float close = look_update(p, dt, &flick);
+    (void)flick;   /* the pose face carries the blinks; the old lens flicker is gone (pack parity) */
 
     /* Per-mode parameters. */
-    float open = 0.8f, bright = 0.6f, pulse = 0.35f, widen = 0, mouth = 0;
+    float open = 0.8f, bright = 0.6f, pulse = 0.35f, mouth = 0;
     bool xeye = false;
     int shake = 0;
     switch (mode) {
     case MUSE_MODE_LISTENING:
         open = 1.0f;
-        widen = 1.0f;
         bright = 0.9f;
         pulse = 0.55f + level * 0.8f;
         break;
@@ -747,65 +742,57 @@ void muse_pixel_render(const muse_pose_t *p)
     default:
         break;
     }
-    s_eye_scale[0] = s_eye_scale[1] = 1.0f;
     float bloom = 0;
     switch (rid) {
     case R_SMIRK:
-        open = 0.62f; bright = 1.0f; bloom = 0.6f; s_look.tx = 0.9f;
+        bright = 1.0f; bloom = 0.6f;
         break;
     case R_SQUINT:
-        open = 0.35f; bright = 0.5f; s_look.tx = -0.8f;
+        bright = 0.5f;
         break;
     case R_SURPRISED:
-        open = 1.2f; widen = 1.0f; bright = 1.0f; mouth = 1.0f; bloom = 0.8f;
+        bright = 1.0f; bloom = 0.8f;
         break;
     case R_PLEASED:
         happy = fmaxf(happy, rk); bloom = 0.6f;
         break;
     case R_ANGRY:
-        open = 0.9f; bright = 1.0f; bloom = 1.0f;
+        bright = 1.0f; bloom = 1.0f;
         break;
     case R_EVIL:
-        open = 0.75f; bright = 1.0f; bloom = 1.0f;
+        bright = 1.0f; bloom = 1.0f;
         break;
     case R_SCAN:
-        bright = 0.9f; bloom = 0.5f; s_look.ty = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
+        bright = 0.9f; bloom = 0.5f;
         break;
     case R_GLITCH:
-        open = (((int)(t * 20.0f)) % 3) ? open : 0.1f;
         break;
     case R_LAUGH:
-        open = 0.4f; mouth = 0.55f + 0.45f * sinf(t * 26.0f);
         break;
     case R_WINK:
-        open = 0.9f; bright = 1.0f; bloom = 0.7f;
-        if (rt > 0.25f && rt < 0.95f) {
-            s_eye_scale[0] = 0.0f;
-        }
+        bright = 1.0f; bloom = 0.7f;
         break;
     case R_SLEEPY:
-        open = fmaxf(0.15f, 0.7f - rt * 0.22f); bright = 0.3f;
+        bright = 0.3f;
         break;
     case R_CONFUSED:
-        open = 0.85f; s_look.tx = ((int)(t * 2.6f) & 1) ? 1.0f : -1.0f; s_look.ty = -0.2f;
         break;
     case R_BORED:
-        open = 0.45f; bright = 0.4f; s_look.tx = cosf(rt * 2.2f); s_look.ty = 0.7f * sinf(rt * 2.2f);
+        bright = 0.4f;
         break;
     case R_DISGUST:
-        open = 0.4f; bright = 0.7f;
+        bright = 0.7f;
         break;
     case R_NERVOUS:
-        open = 1.0f; widen = 1.0f; s_look.tx = ((int)(t * 7.0f) & 1) ? 1.0f : -1.0f; s_look.ty = 0;
         break;
     case R_PROUD:
-        open = 0.8f; bright = 1.0f; bloom = 0.5f;
+        bright = 1.0f; bloom = 0.5f;
         break;
     case R_POWERUP:
-        bright = 1.0f; bloom = clampf(rt * 1.2f, 0, 1); open = 1.0f; widen = 1.0f;
+        bright = 1.0f; bloom = clampf(rt * 1.2f, 0, 1);
         break;
     case R_TARGET:
-        open = 0.7f; bright = 1.0f; s_look.tx = 0; s_look.ty = 0;
+        bright = 1.0f;
         break;
     default:
         break;
@@ -818,8 +805,6 @@ void muse_pixel_render(const muse_pose_t *p)
     }
     if (happy > 0) {
         bright = 1.0f;
-        open = fmaxf(open, 0.95f);
-        widen = 0.8f;
         pulse += happy;
     }
     float boot = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 1.5f, 0, 1) : 1.0f;
@@ -832,14 +817,100 @@ void muse_pixel_render(const muse_pose_t *p)
         open = clampf(1.0f - p->mode_t / 0.45f, 0, 1);
     }
 
+    /* The reaction's face poses, in application order (later poses win overlaps). */
+    int face[3];
+    float facew[3];
+    int nf = 0;
+    switch (rid) {
+    case R_SMIRK:     face[nf] = P_SMIRK;     facew[nf++] = rk; break;
+    case R_SQUINT:    face[nf] = P_SQUINT;    facew[nf++] = rk; break;
+    case R_SURPRISED: face[nf] = P_SURPRISED; facew[nf++] = rk; break;
+    case R_PLEASED:   face[nf] = P_PLEASED;   facew[nf++] = rk; break;
+    case R_ANGRY:     face[nf] = P_ANGRY;     facew[nf++] = rk; break;
+    case R_EVIL:      face[nf] = P_EVIL;      facew[nf++] = rk; break;
+    case R_SCAN: {
+        float gy = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
+        face[nf] = P_UP;   facew[nf++] = clampf(-gy, 0, 1) * 0.9f;
+        face[nf] = P_DOWN; facew[nf++] = clampf(gy, 0, 1) * 0.9f;
+        break;
+    }
+    case R_GLITCH:
+        if (((int)(t * 20.0f)) % 3 == 0) {
+            face[nf] = P_CLOSED; facew[nf++] = 1.0f;
+        }
+        break;
+    case R_LAUGH:
+        face[nf] = sinf(t * 26.0f) > -0.2f ? P_LAUGH : P_PLEASED;
+        facew[nf++] = rk;
+        break;
+    case R_WINK: {
+        float ww = clampf(fminf((rt - 0.25f) / 0.08f, (0.95f - rt) / 0.08f), 0, 1);
+        face[nf] = P_WINK; facew[nf++] = ww;
+        break;
+    }
+    case R_SLEEPY: {
+        face[nf] = P_SLEEPY; facew[nf++] = clampf(rt / 1.2f, 0, 1);
+        float wp = clampf((rt - 1.8f) / 1.2f, 0, 0.85f);
+        face[nf] = P_CLOSED; facew[nf++] = wp * ((rk >= 1.0f || rt < 1.0f) ? 1.0f : rk);
+        break;
+    }
+    case R_CONFUSED:
+        face[nf] = ((int)(t * 2.6f) & 1) ? P_CONFUSED_L : P_CONFUSED_R;
+        facew[nf++] = rk;
+        break;
+    case R_BORED:     face[nf] = P_BORED;     facew[nf++] = rk; break;
+    case R_DISGUST:   face[nf] = P_DISGUST;   facew[nf++] = rk; break;
+    case R_NERVOUS:
+        face[nf] = ((int)(t * 7.0f) & 1) ? P_NERVOUS_L : P_NERVOUS_R;
+        facew[nf++] = rk;
+        break;
+    case R_PROUD:     face[nf] = P_PROUD;     facew[nf++] = rk; break;
+    case R_POWERUP:   face[nf] = P_TARGET;    facew[nf++] = clampf(rt * 2.0f, 0, 1); break;
+    case R_TARGET:    face[nf] = P_TARGET;    facew[nf++] = rk; break;
+    case R_ALERT:     face[nf] = P_ALERT;     facew[nf++] = rk; break;
+    default: break;
+    }
+
     memcpy(s_fb, SPR, sizeof(s_fb));
     animate_light(t, 0.45f + pulse * 0.9f, level);
     if (bloom > 0) {
         eye_bloom(bloom, D_G3);
     }
-    draw_eyes(open, close, flick, xeye, bright, widen);
-    if (mouth > 0) {
-        draw_mouth(mouth);
+    if (xeye) {
+        draw_xeyes();
+    } else if (nf == 0 && rid == R_NONE) {
+        /* Idle-style face: the poses carry the gaze and the blinks. */
+        if (mode == MUSE_MODE_LISTENING) {
+            pose_apply(P_WIDE, 1.0f);
+        }
+        if (mode == MUSE_MODE_THINKING) {
+            pose_apply(P_HALF, 0.55f);
+            pose_apply(P_UP, clampf(-s_look.gy, 0, 1));
+            pose_apply(s_look.gx > 0 ? P_RIGHT : P_LEFT, clampf(fabsf(s_look.gx) * 0.8f, 0, 1));
+        } else if (mode != MUSE_MODE_LISTENING) {
+            pose_apply(P_RIGHT, clampf(s_look.gx, 0, 1) * 0.9f);
+            pose_apply(P_LEFT, clampf(-s_look.gx, 0, 1) * 0.9f);
+            pose_apply(P_DOWN, clampf(s_look.gy, 0, 1) * 0.9f);
+            pose_apply(P_UP, clampf(-s_look.gy, 0, 1) * 0.9f);
+        }
+        float shut = close;
+        if (mode == MUSE_MODE_BOOT || mode == MUSE_MODE_OFF) {
+            shut = fmaxf(close, 1.0f - open);   /* boot/off: open is eyes_open */
+        }
+        pose_apply(P_CLOSED, shut);
+        if (happy > 0) {
+            pose_apply(P_PLEASED, happy);
+        }
+    } else {
+        for (int i = 0; i < nf; i++) {
+            pose_apply(face[i], facew[i]);
+        }
+    }
+    if (mode == MUSE_MODE_SPEAKING) {
+        pose_apply(mouth > 0.9f ? P_MOUTH_2 : P_MOUTH_1, mouth > 0.22f ? 1.0f : 0.0f);
+    }
+    if (!xeye) {
+        pose_eye_glow(bright);
     }
     if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
         draw_wave(t, level);
@@ -848,11 +919,6 @@ void muse_pixel_render(const muse_pose_t *p)
         int tick = (int)(t * 12.0f);
         switch (rid) {
         case R_SMIRK:
-            brows(27, 28, 29, 29, 1);                          /* one brow up, one level */
-            if (rk > 0.4f) {                                   /* the mouth curls up at one corner */
-                ln(36, 47, 38, 45, IDX_DARK);
-                px(36, 46, IDX_LID);
-            }
             halo(t, 0.25f * rk, D_G3);
             break;
         case R_SCAN: {                                         /* a sweep down the face, mapping it as it goes */
@@ -879,7 +945,6 @@ void muse_pixel_render(const muse_pose_t *p)
             break;
         }
         case R_ALERT:
-            brows(27, 30, 27, 30, 2);
             halo(t, 0.9f, D_G1);
             if ((((int)(rt * 6.0f)) & 1) == 0) {
                 glyph(48, 8, G_BANG, D_WHITE);
@@ -891,39 +956,26 @@ void muse_pixel_render(const muse_pose_t *p)
             }
             break;
         case R_SQUINT:
-            brows(29, 29, 26, 25, 1);
             if (((int)(rt * 3.0f)) & 1) {
                 glyph(49, 14, G_Q, D_G1);
             }
             break;
         case R_ANGRY:
-            brows(26, 30, 26, 30, 2);
             halo(t, 0.9f, D_G1);
             if (tick & 1) {
                 lightning(t, D_WHITE, D_G0);
             }
             break;
         case R_EVIL:
-            brows(25, 31, 25, 31, 2);
-            for (int x = 28; x <= 36; x++) {                   /* a wide, jagged grin */
-                px(x, 47 + ((x & 1) ? 0 : 1), IDX_DARK);
-                px(x, 46, D_WHITE);
-            }
-            ln(27, 46, 25, 44, IDX_DARK);
-            ln(37, 46, 39, 44, IDX_DARK);
             halo(t, 1.0f, D_G1);
             if (tick & 1) {
                 lightning(t, D_G0, D_WHITE);
             }
             break;
         case R_SURPRISED:
-            brows(24, 24, 24, 24, 1);
-            ln(21, 25, 24, 23, IDX_DARK); ln(24, 23, 27, 25, IDX_DARK);
-            ln(36, 25, 39, 23, IDX_DARK); ln(39, 23, 42, 25, IDX_DARK);
             glyph(49, 9, G_BANG, D_WHITE);
             break;
         case R_PLEASED:
-            brows(27, 26, 27, 26, 1);
             halo(t, 0.5f * rk, D_G1);
             if (tick & 1) {                                    /* twinkles by the eyes */
                 px(21, 30, D_WHITE); px(20, 31, D_G0); px(22, 31, D_G0); px(21, 32, D_G0);
@@ -931,12 +983,9 @@ void muse_pixel_render(const muse_pose_t *p)
             }
             break;
         case R_LAUGH:
-            brows(27, 26, 27, 26, 1);
             halo(t, (tick & 1) ? 0.5f : 0.1f, D_G2);
             break;
         case R_WINK:
-            brows(27, 28, 25, 26, 1);
-            ln(36, 47, 38, 45, IDX_DARK);
             if (rt > 0.3f && rt < 0.9f) {                      /* a spark by the open eye */
                 px(44, 30, D_WHITE); px(43, 30, D_G0); px(45, 30, D_G0); px(44, 29, D_G0); px(44, 31, D_G0);
             }
@@ -950,7 +999,6 @@ void muse_pixel_render(const muse_pose_t *p)
             }
             break;
         case R_CONFUSED:
-            brows(26, 25, 28, 29, 1);
             if (((int)(rt * 4.0f)) & 1) {
                 glyph(30, 6, G_Q, D_G0);
             }
@@ -979,7 +1027,6 @@ void muse_pixel_render(const muse_pose_t *p)
             halo(t, clampf(rt * 0.8f, 0, 1), D_G1);
             break;
         case R_BORED:
-            brows(28, 28, 28, 28, 1);
             for (int k = 0; k < 3; k++) {
                 if (rt > 0.5f + (float)k * 0.6f) {
                     px(47 + k * 3, 14, D_G1);
@@ -987,10 +1034,6 @@ void muse_pixel_render(const muse_pose_t *p)
             }
             break;
         case R_DISGUST:
-            brows(28, 30, 28, 30, 1);
-            for (int x = 29; x <= 36; x++) {                   /* a wavy grimace */
-                px(x, 48 + ((x >> 1) & 1), IDX_DARK);
-            }
             break;
         case R_TARGET: {                                       /* brackets close in, then lock */
             float k = clampf(rt / 1.2f, 0, 1);
@@ -1013,11 +1056,9 @@ void muse_pixel_render(const muse_pose_t *p)
         case R_NERVOUS: {                                      /* a bead of sweat */
             int y = 22 + (int)fmodf(rt * 9.0f, 20.0f);
             px(45, y, D_G0); px(44, y + 1, D_G0); px(45, y + 1, D_WHITE); px(46, y + 1, D_G0); px(45, y + 2, D_G0);
-            brows(26, 28, 26, 28, 1);
             break;
         }
         case R_PROUD:
-            brows(27, 26, 27, 26, 1);
             halo(t * 0.5f, 0.35f + 0.3f * sinf(t * 3.0f), D_G1);
             break;
         default:
