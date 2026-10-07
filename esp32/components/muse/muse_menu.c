@@ -352,13 +352,21 @@ static void show(view_t view)
         select_hint("Back");
         break;
     case VIEW_POWER: {
-        char text[96];
-        snprintf(text, sizeof(text), "Turn Muse off?\n\nPress the %s button to turn it back on.",
-                 muse_board->keyboard ? "GO" : muse_board->aux_button);
+        char text[144];
+        if (muse_board->aux_button) {
+            snprintf(text, sizeof(text), "Turn Muse off?\n\nPress the %s button to turn it back on.",
+                     muse_board->keyboard ? "GO" : muse_board->aux_button);
+        } else {
+            /* No aux key on this board and its power switch is hardware-only: say what
+             * actually works instead of "(null)". */
+            snprintf(text, sizeof(text),
+                     "This board's power switch is hardware.\n\n"
+                     "HOLD the PWR button ~6 s to switch off;\nshort-press it to switch on.");
+        }
         set_text(s_title, "POWER OFF");
         set_text(s_page, text);
         set_text(s_hint_down, muse_board->keyboard ? "Esc Cancel" : "Cancel");
-        select_hint("Power off");
+        select_hint(muse_board->aux_button ? "Power off" : "Got it");
         break;
     }
     case VIEW_RESET:

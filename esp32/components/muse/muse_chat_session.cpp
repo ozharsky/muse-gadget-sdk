@@ -2613,10 +2613,17 @@ static void hermes_step(void)
         if (s_hstream.h) {
             if (!hermes_stream_pump()) {   /* the exchange is over (fine or failed) */
                 if (!s_hstream.got_reply && s_turn.gen == s_gen.load()) {
-                    /* The relay did not answer a Hermes turn: record the fault so the UI
-                     * can show Hermes's own link state (it is not Muse's problem). */
-                    muse_hatch_hermes_link_note(false);
-                    turn_fail(s_hstream.got_heard ? "HERMES ERROR" : "CAN'T REACH HERMES");
+                    if (s_hstream.got_heard) {
+                        /* The relay answered (it told us what it heard) but sent no reply:
+                         * a silent/no-speech press, not a dead link. Do not flag Hermes. */
+                        muse_hatch_hermes_link_note(true);
+                        turn_fail("DIDN'T CATCH THAT");
+                    } else {
+                        /* The relay did not answer at all: record the fault so the UI
+                         * can show Hermes's own link state (it is not Muse's problem). */
+                        muse_hatch_hermes_link_note(false);
+                        turn_fail("CAN'T REACH HERMES");
+                    }
                 }
             }
         }
@@ -2897,6 +2904,7 @@ static void handle(const cmd_t &cmd)
 
 static bool s_task_auto = true;          /* runtime guard: no reflash to turn it off */
 static int64_t s_task_poll_us;           /* when the queue may next be polled */
+static int s_task_fail_streak;           /* consecutive unreachable polls, for the backoff */
 
 /* The relay's base URL, the remote address when home is unreachable (TLS bundle). */
 static const char *task_relay_url(bool *remote)
@@ -2909,10 +2917,15 @@ static const char *task_relay_url(bool *remote)
     return CONFIG_MUSE_HERMES_URL;
 }
 
-/* GET /tasks?to=<agent>&status=ready -> the first ready task, or false. */
-static bool poll_task(const char *agent, rel_task_t *out)
+/* GET /tasks?to=<agent>&status=ready -> the first ready task, or false. *reachable
+ * says the relay answered at all (HTTP 200), so the caller can back off only when it
+ * really is unreachable -- an empty queue is a healthy poll, not a failure. */
+static bool poll_task(const char *agent, rel_task_t *out, bool *reachable)
 {
     out->valid = false;
+    if (reachable) {
+        *reachable = false;
+    }
     char url[192];
     snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready", CONFIG_MUSE_HERMES_URL, agent);
     bool remote = false;
@@ -2932,7 +2945,7 @@ static bool poll_task(const char *agent, rel_task_t *out)
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
     }
     cfg.method = HTTP_METHOD_GET;
-    cfg.timeout_ms = 8000;
+    cfg.timeout_ms = 2500;   /* a stalled poll holds the session task; fail fast */
     cfg.event_handler = tts_http_evt;
     cfg.user_data = &buf;
     esp_http_client_handle_t h = esp_http_client_init(&cfg);
@@ -2948,6 +2961,9 @@ static bool poll_task(const char *agent, rel_task_t *out)
     if (err != ESP_OK || status != 200) {
         ESP_LOGW(TAG, "task: GET /tasks failed (err %s, HTTP %d)", esp_err_to_name(err), status);
     } else {
+        if (reachable) {
+            *reachable = true;
+        }
         resp[buf.len] = '\0';
         cJSON *root = cJSON_Parse(resp);
         cJSON *tasks = root ? cJSON_GetObjectItem(root, "tasks") : nullptr;
@@ -3240,9 +3256,20 @@ static void task_tick(void)
     }
     s_task_poll_us = now + TASK_POLL_US;
     rel_task_t task;
-    if (!poll_task(task_agent(), &task)) {
+    bool reachable = false;
+    if (!poll_task(task_agent(), &task, &reachable)) {
+        if (!reachable) {
+            /* The relay did not answer: widen the gap (30s -> 60 -> 120 -> 240 cap) so an
+             * unreachable Mac cannot stall the session task every 15 s. */
+            s_task_fail_streak = s_task_fail_streak < 4 ? s_task_fail_streak + 1 : 4;
+            s_task_poll_us = now + TASK_POLL_US * (1LL << s_task_fail_streak);
+            ESP_LOGW(TAG, "task: poll unreachable %d time(s); next try in %llds",
+                     s_task_fail_streak,
+                     (long long)(TASK_POLL_US * (1LL << s_task_fail_streak) / 1000000));
+        }
         return;
     }
+    s_task_fail_streak = 0;
     /* Inject FIRST, take only on success. Taking moves the card ready->running, and the
      * poll only lists `ready`, so a card taken and then failed to inject is stranded in
      * `running` with no path back. */
