@@ -3350,7 +3350,9 @@ static size_t notif_decode(const char *text, int16_t **pcm_out)
     if (!out) {
         return 0;
     }
-    static mp3dec_t dec;
+    /* 6.6 KB of decoder state, used only while a notification is synthesized: PSRAM, not
+     * internal DRAM (a plain static claimed internal RAM and cost ~6.6 KB of the scarce pool). */
+    static EXT_RAM_BSS_ATTR mp3dec_t dec;
     mp3dec_init(&dec);
     resampler_t rs;
     bool rs_init = false;
