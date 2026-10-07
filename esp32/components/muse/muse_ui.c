@@ -2131,6 +2131,21 @@ void muse_ui_show_face(void)
     lv_tileview_set_tile(s_tv, s_face, LV_ANIM_ON);
 }
 
+/* Slide to the Settings home tile (bench: ">settings"). No animation: a capture wants the
+ * settled page, and the swipe-in path is exercised by touch anyway. Called from the SERIAL task,
+ * so it must hold the display lock — every other LVGL mutation from outside the UI task does
+ * (touching a widget unlocked panics the device). The frame timer ticks the page afterwards. */
+void muse_ui_show_settings(void)
+{
+    if (!s_tv || !s_ready) {
+        return;
+    }
+    muse_board->display_lock(-1);
+    lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
+    lv_tileview_set_tile(s_tv, s_settings, LV_ANIM_OFF);
+    muse_board->display_unlock();
+}
+
 void muse_ui_set_swipe_enabled(bool enabled)
 {
     if (!s_tv) {

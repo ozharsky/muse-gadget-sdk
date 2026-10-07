@@ -67,6 +67,9 @@ static bool bench_ui_command(const char *line);
  * that raised a waiting notification. Used by the face tap and the bench ">notif.tap". */
 bool muse_notif_open_pending(void);
 
+/* muse_ui.c: slide to the settings tile (bench ">settings"). */
+void muse_ui_show_settings(void);
+
 static void draw_done(const draw_result_t *r, void *user)
 {
     (void)user;
@@ -808,6 +811,12 @@ static bool bench_ui_command(const char *line)
         char alt[MUSE_AGENT_PROFILE_MAX + 1];
         muse_settings_agent_alt(alt);   /* stored name, so this echo tells the truth */
         printf("@agent.profile '%s'%s\n", alt, alt[0] ? "" : " (cleared; the cycle skips ALT)");
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "settings")) {
+        muse_ui_show_settings();
+        printf("@settings\n");
         fflush(stdout);
         return true;
     }

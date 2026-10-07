@@ -3273,6 +3273,8 @@ static bool task_inject_turn(const rel_task_t *t)
     return true;
 }
 
+static bool notif_is_pending(void);   /* defined with the notification block below */
+
 /* One poll tick: only idle, awake, un-resting, and past the cadence. */
 static void task_tick(void)
 {
@@ -3281,6 +3283,7 @@ static void task_tick(void)
     }
     int64_t now = now_us();
     if (now < s_task_poll_us || s_turn.phase != P_IDLE || s_resting.load() || muse_state_asleep() ||
+        notif_is_pending() ||   /* a nudge is on screen: don't clobber it with a task's reply */
         !muse_wifi_connected() || !muse_hatch_configured()) {
         return;
     }
@@ -3325,6 +3328,8 @@ static void task_tick(void)
  * is_default: True -> the Hermes slot, False -> the ALT slot loaded with `agent`. */
 #define NOTIF_POLL_US (15 * 1000000LL)     /* idle nudge poll (matches the task cadence) */
 #define NOTIF_MIN_GAP_US (45 * 1000000LL)  /* at most one presented nudge every 45 s */
+#define NOTIF_PENDING_TTL_US (120 * 1000000LL)  /* un-tapped: stop blocking + stop being stale */
+#define NOTIF_TEXT_MAX 90                       /* a nudge is a SHORT line (caption is ~2 lines) */
 
 struct rel_notif_t {
     char id[40];
@@ -3341,6 +3346,7 @@ static int s_notif_fail_streak;
 /* A presented nudge waiting for a tap. While one is pending we neither present another (no
  * stacking) nor re-present this one (it is acked on arrival). */
 static bool s_notif_pending;
+static int64_t s_notif_until;   /* when an un-tapped nudge stops being pending */
 static bool s_notif_default;
 static char s_notif_agent[MUSE_AGENT_PROFILE_MAX + 1];
 static char s_notif_label[40];
@@ -3455,6 +3461,7 @@ static void notif_ack(const char *id)
 static void notif_present(const rel_notif_t *n)
 {
     s_notif_pending = true;
+    s_notif_until = now_us() + NOTIF_PENDING_TTL_US;
     s_notif_default = n->is_default;
     strlcpy(s_notif_agent, n->agent, sizeof(s_notif_agent));
     strlcpy(s_notif_label, n->label[0] ? n->label : n->agent, sizeof(s_notif_label));
@@ -3462,13 +3469,24 @@ static void notif_present(const rel_notif_t *n)
         (void)muse_ui_react(n->mood);   /* an unknown mood just returns false, no harm */
     }
     muse_voice_request_chirp();
-    char cap[280];
-    snprintf(cap, sizeof(cap), "%s  |  TAP TO OPEN", n->text);
+    char cap[300];
+    /* The caption is ~2 lines of ~16 chars; a short nudge gets the hint, a long one is shown
+     * alone (the caption ellipsizes it) so the hint never pushes the words off the line. */
+    if (strlen(n->text) <= 34) {
+        snprintf(cap, sizeof(cap), "%s | TAP TO OPEN", n->text);
+    } else {
+        snprintf(cap, sizeof(cap), "%.*s", NOTIF_TEXT_MAX, n->text);
+    }
     muse_state_set_caption("%s", cap);
     muse_state_poke();
     notif_ack(n->id);   /* one presentation per nudge */
     s_notif_gap_us = now_us() + NOTIF_MIN_GAP_US;
     ESP_LOGI(TAG, "notif from %s (%s): %s", n->agent, n->is_default ? "hermes" : "alt", n->text);
+}
+
+static bool notif_is_pending(void)
+{
+    return s_notif_pending;
 }
 
 /* Idle poll: only when a poll can act on the result (idle, awake, un-resting, hermes mode). */
@@ -3477,10 +3495,14 @@ static void notif_tick(void)
     if (!s_task_auto || !CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
         return;
     }
+    int64_t now = now_us();
+    if (s_notif_pending && now > s_notif_until) {
+        s_notif_pending = false;   /* never tapped: stop blocking; a face tap is a pet again */
+        ESP_LOGI(TAG, "notif: %s went stale (untapped)", s_notif_label);
+    }
     if (s_notif_pending) {
         return;   /* one at a time: a nudge on screen waits for the tap */
     }
-    int64_t now = now_us();
     if (now < s_notif_poll_us || now < s_notif_gap_us || s_turn.phase != P_IDLE || s_resting.load() ||
         muse_state_asleep() || !muse_wifi_connected() || !muse_hatch_configured()) {
         return;

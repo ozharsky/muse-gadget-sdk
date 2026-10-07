@@ -42,7 +42,7 @@
 
 /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
 #define LIST_W 330
-#define LIST_TOP 84
+#define LIST_TOP 92     /* 84 shaved the top row's corners on the round 466 (safe width ~324 there) */
 #define ROW_H 58
 #define MAX_APS 12
 
