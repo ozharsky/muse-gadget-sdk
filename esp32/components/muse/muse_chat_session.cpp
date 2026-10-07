@@ -3470,10 +3470,11 @@ static void notif_present(const rel_notif_t *n)
     }
     muse_voice_request_chirp();
     char cap[300];
-    /* The caption is ~2 lines of ~16 chars; a short nudge gets the hint, a long one is shown
-     * alone (the caption ellipsizes it) so the hint never pushes the words off the line. */
-    if (strlen(n->text) <= 34) {
-        snprintf(cap, sizeof(cap), "%s | TAP TO OPEN", n->text);
+    /* The caption box is TWO lines of ~16 chars. A short nudge keeps the hint on its OWN line
+     * (a wide "text | TAP TO OPEN" wrapped mid-word and read like a truncated sentence); a
+     * longer one shows the words alone and relies on reading mode. */
+    if (strlen(n->text) <= 16) {
+        snprintf(cap, sizeof(cap), "%s\nTAP TO OPEN", n->text);
     } else {
         snprintf(cap, sizeof(cap), "%.*s", NOTIF_TEXT_MAX, n->text);
     }
