@@ -109,6 +109,12 @@ void muse_settings_set_agent(int idx);
 void muse_settings_set_agent_hermes(bool hermes);
 /* The profile the ALT slot points at; empty disables ALT (the cycle skips it). */
 esp_err_t muse_settings_set_agent_profile(const char *name);
+
+/* The relay's LAN address as last ANNOUNCED by it (in /tasks' relay_lan). The gadget prefers
+ * it over a possibly-stale CONFIG_MUSE_HERMES_URL when they differ, so moving the gadget
+ * between networks does not strand every turn on the Tailscale funnel. Empty: none known. */
+void muse_settings_relay_lan(char out[64]);
+void muse_settings_set_relay_lan(const char *lan);
 /* A network name is remembered first among the saved ones and joined now;
  * an empty ssid forgets every saved network. */
 void muse_settings_set_wifi(const char *ssid, const char *pass);

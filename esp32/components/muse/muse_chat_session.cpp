@@ -63,6 +63,7 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
+#include "esp_netif.h"
 
 extern "C" {
 #include "cJSON.h"
@@ -2159,14 +2160,71 @@ static void check_turn(void)
     turn_done(true);
 }
 
-/* True if the home relay's port answers within 1.5 s (a plain TCP connect to "http://a.b.c.d:port"). */
+/* The device's IPv4 and netmask (host byte order), or 0 when it has none yet. */
+static uint32_t hermes_local_ip(uint32_t *mask_out)
+{
+    esp_netif_t *n = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!n) {
+        return 0;
+    }
+    esp_netif_ip_info_t ip = {};
+    if (esp_netif_get_ip_info(n, &ip) != ESP_OK) {
+        return 0;
+    }
+    if (mask_out) {
+        *mask_out = ntohl(ip.netmask.addr);
+    }
+    return ntohl(ip.ip.addr);
+}
+
+static int hermes_relay_port(void)
+{
+    return 8788;
+}
+
+/* The home relay's base URL, honouring a LAN address it ANNOUNCED (in /tasks' relay_lan).
+ * When the gadget moves networks the compiled-in CONFIG_MUSE_HERMES_URL goes stale; the relay
+ * telling us its current address lets every turn open straight onto the LAN instead of paying
+ * the Tailscale funnel. Falls back to the config when nothing has been announced. */
+static const char *hermes_home_url(void)
+{
+    static char url[80];
+    char lan[64];
+    muse_settings_relay_lan(lan);
+    if (lan[0]) {
+        if (url[0] == 0 || strstr(url, lan) == nullptr) {
+            snprintf(url, sizeof(url), "http://%s:%d", lan, hermes_relay_port());
+        }
+        return url;
+    }
+    return CONFIG_MUSE_HERMES_URL;
+}
+
+/* True if the home relay's port answers within 1.5 s (a plain TCP connect to "http://a.b.c.d:port").
+ *
+ * CACHED for a second and a half, because the turn path asks up to five times (voice, text,
+ * task post, task poll, task url) and each uncached miss costs the full 1.5 s timeout --
+ * measured as ~7 s of dead air on a voice turn when the relay is on another subnet.
+ *
+ * Also short-circuits the common miss: when the device and the relay are on different /24s a
+ * TCP connect is not going to land, so the answer is known without paying the timeout. Only the
+ * NEGATIVE case is short-cut; a probe that would succeed still runs. */
 static bool hermes_home_reachable(void)
 {
+    static int64_t checked_us;
+    static bool last;
+    static char checked_url[96];
+    int64_t now = esp_timer_get_time();
+    const char *home = hermes_home_url();
+    if (checked_us && now - checked_us < 1500000LL && !strcmp(checked_url, home)) {
+        return last;   /* one verdict per turn's worth of work */
+    }
+
     char host[64];
     int port = 80;
-    const char *p = strstr(CONFIG_MUSE_HERMES_URL, "://");
-    p = p ? p + 3 : CONFIG_MUSE_HERMES_URL;
-    size_t n = strcspn(p, ":/");
+    const char *p = strstr(home, "://");
+    p = p ? p + 3 : home;
+    size_t n = strcspn(p, ":");
     if (n >= sizeof(host)) {
         return false;
     }
@@ -2180,6 +2238,17 @@ static bool hermes_home_reachable(void)
     sa.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
         return true;   /* a name, not an address: just try it */
+    }
+    /* Different subnet (per the ACTUAL netmask, not an assumed /24): the connect is not
+     * going to land, so skip it and its 1.5 s timeout. Only the negative case is short-cut. */
+    uint32_t mask = 0;
+    uint32_t me = hermes_local_ip(&mask);
+    uint32_t them = ntohl(sa.sin_addr.s_addr);
+    if (me && mask && ((me ^ them) & mask) != 0) {
+        checked_us = now;
+        strlcpy(checked_url, home, sizeof(checked_url));
+        last = false;
+        return false;
     }
     int fd = lwip_socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -2198,7 +2267,11 @@ static bool hermes_home_reachable(void)
         lwip_getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
     }
     lwip_close(fd);
-    return ok && err == 0;
+    bool up = ok && err == 0;
+    checked_us = now;
+    strlcpy(checked_url, home, sizeof(checked_url));
+    last = up;
+    return up;
 }
 
 /* A Hermes TEXT turn (an injected task): same streamed exchange as the voice path,
@@ -2208,7 +2281,7 @@ static bool hermes_request_stream_text(const char *text, size_t tlen)
 {
     char url[TASK_TEXT_MAX * 3 + 128];
     bool remote = false;
-    const char *base = CONFIG_MUSE_HERMES_URL;
+    const char *base = hermes_home_url();
     if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
         base = CONFIG_MUSE_HERMES_URL_REMOTE;
         remote = true;
@@ -2290,7 +2363,7 @@ static bool hermes_request_stream_text(const char *text, size_t tlen)
 [[maybe_unused]] static bool hermes_request(void)
 {
     char url[256];
-    snprintf(url, sizeof(url), "%s/turn%s", CONFIG_MUSE_HERMES_URL, agent_profile_query());
+    snprintf(url, sizeof(url), "%s/turn%s", hermes_home_url(), agent_profile_query());
     bool remote = false;
     if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
         snprintf(url, sizeof(url), "%s/turn%s", CONFIG_MUSE_HERMES_URL_REMOTE, agent_profile_query());
@@ -2492,7 +2565,7 @@ static void hermes_dispatch_line(char *line, size_t len)
 static bool hermes_request_stream(void)
 {
     char url[256];
-    snprintf(url, sizeof(url), "%s/turn?stream=1%s", CONFIG_MUSE_HERMES_URL, agent_profile_query());
+    snprintf(url, sizeof(url), "%s/turn?stream=1%s", hermes_home_url(), agent_profile_query());
     bool remote = false;
     if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
         snprintf(url, sizeof(url), "%s/turn?stream=1%s", CONFIG_MUSE_HERMES_URL_REMOTE, agent_profile_query());
@@ -2939,7 +3012,7 @@ static const char *task_relay_url(bool *remote)
         *remote = true;
         return CONFIG_MUSE_HERMES_URL_REMOTE;
     }
-    return CONFIG_MUSE_HERMES_URL;
+    return hermes_home_url();
 }
 
 /* GET /tasks?to=<agent>&status=ready -> the first ready task, or false. *reachable
@@ -2952,7 +3025,7 @@ static bool poll_task(const char *agent, rel_task_t *out, bool *reachable)
         *reachable = false;
     }
     char url[192];
-    snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready%s", CONFIG_MUSE_HERMES_URL, agent,
+    snprintf(url, sizeof(url), "%s/tasks?to=%s&status=ready%s", hermes_home_url(), agent,
              agent_profile_query());
     bool remote = false;
     if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
@@ -2993,6 +3066,18 @@ static bool poll_task(const char *agent, rel_task_t *out, bool *reachable)
         }
         resp[buf.len] = '\0';
         cJSON *root = cJSON_Parse(resp);
+        /* The relay announces the LAN address it is reachable on (relay_lan). A gadget that
+         * moved networks keeps a stale CONFIG_MUSE_HERMES_URL and falls back to Tailscale for
+         * EVERY turn; remembering the announced address lets the next turn go straight LAN. */
+        const char *lan = root ? cJSON_GetStringValue(cJSON_GetObjectItem(root, "relay_lan")) : nullptr;
+        if (lan && lan[0]) {
+            char have[64];
+            muse_settings_relay_lan(have);
+            if (strcmp(have, lan) != 0) {
+                muse_settings_set_relay_lan(lan);
+                ESP_LOGI(TAG, "hermes: relay announced LAN address %s", lan);
+            }
+        }
         cJSON *tasks = root ? cJSON_GetObjectItem(root, "tasks") : nullptr;
         cJSON *first = cJSON_IsArray(tasks) ? cJSON_GetArrayItem(tasks, 0) : nullptr;
         if (cJSON_IsObject(first)) {

@@ -41,6 +41,7 @@ static struct {
     bool ble_on;
     uint8_t agent;                       /* 0 Muse, 1 Hermes, 2 Hermes ALT */
     char agent_alt_profile[MUSE_AGENT_PROFILE_MAX + 1];   /* the ALT slot's relay profile name */
+    char relay_lan[64];                        /* the relay's last announced LAN address */
     char ssid[MUSE_SSID_MAX + 1];
     char pass[MUSE_PASS_MAX + 1];
     char host[MUSE_HOST_MAX + 1];
@@ -157,6 +158,7 @@ esp_err_t muse_settings_init(void)
         s.agent = b < MUSE_AGENT_COUNT ? b : MUSE_AGENT_HERMES;
     }
     load_str("agent_alt", s.agent_alt_profile, sizeof(s.agent_alt_profile));
+    load_str("relay_lan", s.relay_lan, sizeof(s.relay_lan));
     load_str("ssid", s.ssid, sizeof(s.ssid));
     load_str("pass", s.pass, sizeof(s.pass));
     load_str("host", s.host, sizeof(s.host));
@@ -188,6 +190,20 @@ int muse_settings_agent(void) { return s.agent; }
 bool muse_settings_agent_hermes(void) { return s.agent != MUSE_AGENT_MUSE; }
 void muse_settings_agent_profile(char out[MUSE_AGENT_PROFILE_MAX + 1]) {
     strlcpy(out, s.agent == MUSE_AGENT_HERMES_ALT ? s.agent_alt_profile : "", MUSE_AGENT_PROFILE_MAX + 1);
+}
+
+/* The relay's announced LAN address, persisted (an NVS string; empty = unknown). */
+void muse_settings_relay_lan(char out[64])
+{
+    LOCKED(strlcpy(out, s.relay_lan, 64));
+}
+
+void muse_settings_set_relay_lan(const char *lan)
+{
+    LOCKED(strlcpy(s.relay_lan, lan ? lan : "", sizeof(s.relay_lan)));
+    nvs_set_str(s_nvs, "relay_lan", s.relay_lan);
+    nvs_commit(s_nvs);
+    ESP_LOGI(TAG, "relay lan: '%s'", s.relay_lan);
 }
 
 void muse_settings_agent_alt(char out[MUSE_AGENT_PROFILE_MAX + 1]) {

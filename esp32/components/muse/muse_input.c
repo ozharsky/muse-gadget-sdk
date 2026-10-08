@@ -836,6 +836,16 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+    if (!strncmp(line, "relay.lan=", 10)) {
+        /* Bench: set/see the relay's announced LAN address (normally learned from /tasks).
+         * ">relay.lan=" with nothing after it clears it. */
+        muse_settings_set_relay_lan(line + 10);
+        char lan[64];
+        muse_settings_relay_lan(lan);
+        printf("@relay.lan '%s'\n", lan);
+        fflush(stdout);
+        return true;
+    }
     if (!strncmp(line, "wifi.switch=", 12)) {
         /* Bench: switch to a saved network by name (the same path the Wi-Fi page uses). */
         bool ok = muse_wifi_switch(line + 12);
