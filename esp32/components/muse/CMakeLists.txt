@@ -62,10 +62,8 @@ if(CONFIG_MUSE_ENABLED)
     file(GLOB custom_avatar CONFIGURE_DEPENDS "${COMPONENT_DIR}/avatar/muse_pixel.c")
     if(custom_avatar)
         message(STATUS "Custom avatar: components/muse/avatar/muse_pixel.c")
-        # Both avatars are built: SHODAN for Muse, the Construct for Hermes. muse_pixel_switch.c picks.
-        # Face history: Bloop (Meta's) -> the Construct (muse_pixel_hermes.c) -> brief Keller trial (muse_pixel_keller.c);
-        # all kept in the folder; swap the filename in these two lines to change.
-        # GOLEM is the Hermes face: revert = swap muse_pixel_golem.c back to muse_pixel_hermes.c
+        # Three avatars are built: SHODAN for Muse, stone and golem for Hermes. muse_pixel_switch.c picks.
+        # Retired faces (Bloop, Construct, Keller) are in git history on hermes-local, c14a224.
         list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_stone.c" "avatar/muse_pixel_golem.c" "avatar/muse_pixel_switch.c")
         # Three faces: shodan (Muse), stock (Hermes default = stone), stock2 (Hermes ALT = golem,
         # built for BEEPBOP). The golem's mood frames (golem_moods.h) ride along via its own include.

@@ -164,6 +164,42 @@ static bool IRAM_ATTR on_chunk_sent(esp_lcd_panel_io_handle_t io, esp_lcd_panel_
  * counter guard uses. The send task is serialized behind this wait, so declaring
  * it done cannot race a live transfer.
  */
+/*
+ * Count this recovery against the spree window and restart when they pile up: one
+ * lost signal is noise, three in a minute is a display that has stopped keeping
+ * up, and a clean reboot beats a screen that keeps stalling. The black box gets
+ * the reason, so the next boot names the path that tripped it.
+ */
+static void spree_trip(const char *reason, const muse_diag_lcd_t *st)
+{
+    uint32_t now = now_ms();
+    if (s_recover_count == 0 || (uint32_t)(now - s_recover_first_ms) > RECOVER_WINDOW_MS) {
+        s_recover_count = 1;
+        s_recover_first_ms = now;
+        return;
+    }
+    if (++s_recover_count >= RECOVER_MAX) {
+        ESP_LOGE(TAG, "%u display recoveries in a minute: restarting rather than limping (%s)",
+                 (unsigned)s_recover_count, reason);
+        muse_diag_note_fault_restart(reason, st, reason);
+        esp_restart();
+    }
+}
+
+/*
+ * LVGL's own flush handshake, replaced with a bounded wait. wait_for_flushing()
+ * spins on `while(disp->flushing)` with NO timeout when no flush_wait_cb is set
+ * -- if a band's done signal is lost after its counter already read zero, that
+ * spin never ends, the UI task stalls, and stall_check aborts for a core dump
+ * (the 2026-10-08 freeze: lvgl in wait_for_flushing at lv_refr.c:1458, lcd_send
+ * idle, counter 0 -- the guard was blind because nothing looked outstanding).
+ *
+ * LVGL calls this only when it still believes a flush is in progress, and clears
+ * its own flag right after we return -- so this waits, bounded, for the band's
+ * final notify to land, and gives up after the same grace the counter guard uses.
+ * The send task is serialized behind this wait, so declaring it done cannot race
+ * a live transfer.
+ */
 static void lcd_flush_wait(lv_display_t *disp)
 {
     (void)disp;
@@ -198,15 +234,7 @@ static void lcd_flush_wait(lv_display_t *disp)
         .driver_ms = s_driver_ms ? (int)(now_ms() - s_driver_ms) : 0,
     };
     muse_diag_note_lcd_fault("lcd_flush_lost", &st);
-    if (s_recover_count == 0 || (uint32_t)(now_ms() - s_recover_first_ms) > RECOVER_WINDOW_MS) {
-        s_recover_count = 1;
-        s_recover_first_ms = now_ms();
-    } else if (++s_recover_count >= RECOVER_MAX) {
-        ESP_LOGE(TAG, "%u flush waits lost in a minute: restarting rather than limping",
-                 (unsigned)s_recover_count);
-        muse_diag_note_fault_restart("lcd_flush_lost", &st, "lcd_flush_lost");
-        esp_restart();
-    }
+    spree_trip("lcd_flush_lost", &st);
 }
 
 static void lcd_recover(void);
@@ -275,20 +303,12 @@ static void lcd_recover(void)
     ESP_LOGW(TAG, "panel completion lost (%d piece(s) outstanding): releasing the waiting flush", missed);
     lv_display_flush_ready(s_disp);
 
-    if (s_recover_count == 0 || (uint32_t)(now - s_recover_first_ms) > RECOVER_WINDOW_MS) {
-        s_recover_count = 1;
-        s_recover_first_ms = now;
-    } else if (++s_recover_count >= RECOVER_MAX) {
-        ESP_LOGE(TAG, "%u panel completions lost in a minute: restarting rather than limping",
-                 (unsigned)s_recover_count);
-        muse_diag_lcd_t st = {
-            .chunks_out = missed,
-            .recover_count = (int)s_recover_count,
-            .driver_ms = 0,
-        };
-        muse_diag_note_fault_restart("lcd_loss_spree", &st, "lcd_loss_spree");
-        esp_restart();
-    }
+    muse_diag_lcd_t st = {
+        .chunks_out = missed,
+        .recover_count = (int)s_recover_count,
+        .driver_ms = 0,
+    };
+    spree_trip("lcd_loss_spree", &st);
 }
 
 static esp_err_t queue_band(lv_display_t *disp, esp_lcd_panel_handle_t panel, int x1, int y1, int x2, int y2,

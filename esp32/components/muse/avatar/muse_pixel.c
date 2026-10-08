@@ -164,7 +164,7 @@ uint32_t muse_pixel_accent(muse_mode_t mode)
 static void update_palette(const scheme_t *t, float dt)
 {
     float k = s_pal_init ? 1.0f - expf(-dt * 7.0f) : 1.0f;
-    float agent_hue = 0.0f;   /* Hermes has its own avatar (muse_pixel_bloop.c) */
+    float agent_hue = 0.0f;   /* Hermes has its own avatar (muse_pixel_stone.c) */
     s_hue += (t->hue + agent_hue - s_hue) * k;
     s_sat += (t->sat - s_sat) * k;
     s_val += (t->val - s_val) * k;
