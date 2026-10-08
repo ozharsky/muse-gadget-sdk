@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_intr_alloc.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
@@ -45,12 +46,18 @@ static const char *TAG = "lcd_bands";
  * the screen then stops mid-update -- LVGL waits forever for the "flush done"
  * that never comes, and the UI task stalls until the watchdog aborts for a
  * core dump (the L2 freeze). The DMA itself does not drop a transfer, so a
- * missing completions is treated as a lost SIGNAL, not lost pixels: the guard
- * below notices that no piece has moved for DONE_GRACE_MS, hands the copy
- * buffers back, and releases the flush so the next frame draws over the
- * incomplete one. Losses are counted; a screen losing completions over and
- * over is restarted cleanly instead of limping. The send task's own waits are
- * bounded too, so a lost signal starves it for two seconds, not forever.
+ * missing completion is treated as a lost SIGNAL, not lost pixels.
+ *
+ * The guard has two levels. A lost signal with the send task still
+ * running gets the graceful recovery below (release the waiting flush). A panel
+ * driver call that does not RETURN at all means the IDF SPI bus lock is waiting
+ * for a completion handoff that will never come (spi_bus_lock_acquire_start
+ * takes no timeout by design), which no app-level code can undo: the guard
+ * dumps the interrupt state and restarts the board in ~4 s, instead of the
+ * 20 s freeze + stall abort seen in the 2026-10-08 coredump (lvgl in
+ * wait_for_flushing, lcd_send in dev_wait).
+ * The send task's own waits are bounded too, so a lost signal starves it for
+ * two seconds, not forever.
  *
  * Fault injection without hardware that actually loses one: ">lcd.swallow" on
  * the bench drops the next completion on purpose (muse_input.c).
@@ -61,6 +68,7 @@ static const char *TAG = "lcd_bands";
 #define RUN_WAIT_MS 2000         /* muse_lcd_bands_run: bound its waits too */
 #define RECOVER_MAX 3            /* recoveries inside the window before a restart */
 #define RECOVER_WINDOW_MS 60000
+#define DRIVER_STALL_MS 4000     /* a driver call stuck this long: the IDF bus-lock handoff was lost */
 
 static lv_display_t *s_disp;
 static esp_lcd_panel_handle_t s_panel;
@@ -76,6 +84,8 @@ static volatile uint32_t s_progress_ms;  /* last piece queued or done (ISR write
 static volatile uint32_t s_swallow;      /* bench: completions to drop on purpose */
 static uint32_t s_recover_count;
 static uint32_t s_recover_first_ms;
+static volatile uint32_t s_driver_ms;    /* nonzero while a panel driver call is in progress */
+static volatile uint32_t s_wedge_ms;     /* bench: make the next driver call stall this long */
 
 static inline uint32_t now_ms(void)
 {
@@ -123,6 +133,19 @@ static void lcd_recover(void);
 static void lcd_guard(void *arg)
 {
     (void)arg;
+    uint32_t drv = s_driver_ms;
+    if (drv != 0 && (uint32_t)(now_ms() - drv) > DRIVER_STALL_MS) {
+        /* A panel driver call has not returned in DRIVER_STALL_MS. That can only be
+         * the IDF SPI bus lock waiting for a completion handoff that is not coming
+         * (the acquire takes no timeout, so the task is unrecoverable from here).
+         * Dump the interrupt state for the record -- this reboot pre-empts the
+         * 20 s stall abort, and with it the core dump -- then reboot in ~4 s. */
+        ESP_LOGE(TAG, "panel driver call stuck for %d ms (%d piece(s) outstanding): restarting",
+                 DRIVER_STALL_MS, s_chunks_out);
+        esp_intr_dump(stdout);
+        fflush(stdout);
+        esp_restart();
+    }
     lcd_recover();
 }
 
@@ -195,9 +218,12 @@ static void send_bands(void *arg)
         if (!b.data) {
             /* The call travels in the band, not in a global: a caller that gave up
              * waiting (bounded RUN_WAIT_MS) must not have its call replaced by the
-             * next one, nor crash the sender with a NULL. */
+             * next one, nor crash the sender with a NULL. It talks to the panel
+             * directly, so the driver-stall guard must cover it too. */
             if (b.call) {
+                s_driver_ms = now_ms();
                 b.call(b.call_arg);
+                s_driver_ms = 0;
             }
             xSemaphoreGive(s_call_done);
             continue;
@@ -222,7 +248,15 @@ static void send_bands(void *arg)
                 }
             }
             memcpy(s_chunk[k], b.data + (size_t)(y - b.y1) * row, h * row);
+            s_driver_ms = now_ms();
+            if (s_wedge_ms) {
+                /* Bench: simulate the IDF bus-lock handoff being lost -- the driver call
+                 * never returns. The guard must reboot in ~4 s, not freeze for 20 s. */
+                vTaskDelay(pdMS_TO_TICKS(s_wedge_ms));
+                s_wedge_ms = 0;
+            }
             esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, b.x1, y, b.x2, y + h, s_chunk[k]);
+            s_driver_ms = 0;
             s_progress_ms = now_ms();
             if (err != ESP_OK) {
                 xSemaphoreGive(s_chunk_free);
@@ -313,4 +347,9 @@ void muse_lcd_bands_swallow(int completions)
     portENTER_CRITICAL_SAFE(&s_lock);
     s_swallow = completions > 0 ? (uint32_t)completions : 0;
     portEXIT_CRITICAL_SAFE(&s_lock);
+}
+
+void muse_lcd_bands_wedge(int ms)
+{
+    s_wedge_ms = ms > 0 ? (uint32_t)ms : 0;
 }

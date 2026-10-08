@@ -894,6 +894,19 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+    if (!strncmp(line, "lcd.wedge", 9)) {
+        /* Fault injection: the next panel driver call does not return for N ms (default
+         * 8000), as when the IDF SPI bus lock waits on a lost completion handoff. The
+         * guard must RESTART the board within ~4 s of the call's start, so expect a
+         * reboot (boot banner follows) rather than a 20 s freeze + coredump. Check
+         * "boot":"restart" in >power afterwards ("watchdog"/"panic" means the detector
+         * did NOT fire in time). */
+        int ms = line[9] == '=' ? atoi(line + 10) : 8000;
+        muse_lcd_bands_wedge(ms);
+        printf("@lcd.wedge %d\n", ms);
+        fflush(stdout);
+        return true;
+    }
 #endif
     if (!strncmp(line, "notif=", 6)) {
         /* Bench: present a notification line as if the relay sent it (text only; use /notifications

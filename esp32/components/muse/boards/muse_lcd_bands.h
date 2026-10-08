@@ -64,3 +64,11 @@ void muse_lcd_bands_run(void (*fn)(void *arg), void *arg);
  * way to exercise the recovery without hardware that actually loses one.
  */
 void muse_lcd_bands_swallow(int completions);
+
+/*
+ * Fault injection for the driver-stall detector: the next panel driver call
+ * does not return for `ms` milliseconds, as when the IDF SPI bus lock waits for
+ * a completion handoff that never comes. Bench: ">lcd.wedge[=MS]" (muse_input.c).
+ * The guard must restart the board within ~4 s of the call's start.
+ */
+void muse_lcd_bands_wedge(int ms);
