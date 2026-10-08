@@ -546,6 +546,7 @@ static void input_task(void *arg)
             s_restart_requested = false;
             ESP_LOGI(TAG, "restarting");
             muse_state_set_caption("RESTARTING...");
+            muse_diag_note_restart("menu_or_hold");
             vTaskDelay(pdMS_TO_TICKS(400));   /* let the caption land, then cut */
             esp_restart();
         }
