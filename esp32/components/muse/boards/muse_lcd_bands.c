@@ -31,6 +31,7 @@
 #include "freertos/task.h"
 
 #include "muse_mem.h"
+#include "muse_diag.h"     /* the black box: restart reasons survive a reboot */
 
 typedef struct {
     const uint8_t *data;   /* NULL: run call/call_arg instead */
@@ -138,10 +139,17 @@ static void lcd_guard(void *arg)
         /* A panel driver call has not returned in DRIVER_STALL_MS. That can only be
          * the IDF SPI bus lock waiting for a completion handoff that is not coming
          * (the acquire takes no timeout, so the task is unrecoverable from here).
-         * Dump the interrupt state for the record -- this reboot pre-empts the
-         * 20 s stall abort, and with it the core dump -- then reboot in ~4 s. */
+         * Dump the interrupt state, record what the display looked like in the black
+         * box (this reboot pre-empts the 20 s stall abort and its coredump), then
+         * reboot in ~4 s. */
         ESP_LOGE(TAG, "panel driver call stuck for %d ms (%d piece(s) outstanding): restarting",
                  DRIVER_STALL_MS, s_chunks_out);
+        muse_diag_lcd_t st = {
+            .chunks_out = s_chunks_out,
+            .recover_count = (int)s_recover_count,
+            .driver_ms = DRIVER_STALL_MS,
+        };
+        muse_diag_note_fault_restart("lcd_driver_stuck", &st, "lcd_driver_stuck");
         esp_intr_dump(stdout);
         fflush(stdout);
         esp_restart();
@@ -189,6 +197,12 @@ static void lcd_recover(void)
     } else if (++s_recover_count >= RECOVER_MAX) {
         ESP_LOGE(TAG, "%u panel completions lost in a minute: restarting rather than limping",
                  (unsigned)s_recover_count);
+        muse_diag_lcd_t st = {
+            .chunks_out = missed,
+            .recover_count = (int)s_recover_count,
+            .driver_ms = 0,
+        };
+        muse_diag_note_fault_restart("lcd_loss_spree", &st, "lcd_loss_spree");
         esp_restart();
     }
 }

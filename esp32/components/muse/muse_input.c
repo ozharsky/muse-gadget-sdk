@@ -48,6 +48,7 @@
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
 #endif
+#include "muse_diag.h"   /* >diag: the black box (why the last boot ended) */
 #if CONFIG_MUSE_BOARD_WAVESHARE_S3_175C || CONFIG_MUSE_BOARD_WAVESHARE_S3_175 || \
     CONFIG_MUSE_BOARD_WAVESHARE_S3_143C || CONFIG_MUSE_BOARD_SENSECAP_WATCHER || \
     CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
@@ -731,8 +732,25 @@ static bool console_command(char *line, bool whole)
     if (!strcmp(line, "reboot") || !strcmp(line, "restart")) {
         printf("@reboot ok\n");
         fflush(stdout);
+        muse_diag_note_restart("console");
         vTaskDelay(pdMS_TO_TICKS(150));   /* let the ack reach the host */
         esp_restart();
+        return true;
+    }
+    if (!strcmp(line, "diag")) {
+        /* Bench: the gadget's black box -- why the previous boot ended and what the
+         * display looked like. Readable at ANY later time, cable or not. */
+        char why[32] = "";
+        char detail[48] = "";
+        uint32_t up = 0;
+        int c[5] = { 0 };
+        bool have_why = muse_diag_read_restart(why, sizeof(why));
+        bool have_fault = muse_diag_read_lcd_fault(detail, sizeof(detail), &up, c);
+        printf("@diag restart_by=%s fault=%s fault_at=%us chunks=%d rec=%d drv=%dms int=%dK min=%dK\n",
+               have_why ? why : "(none)",
+               have_fault ? detail : "(none)", (unsigned)up,
+               c[0], c[1], c[2], c[3], c[4]);
+        fflush(stdout);
         return true;
     }
     if (!strncmp(line, "face=", 5)) {

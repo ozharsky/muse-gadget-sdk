@@ -37,6 +37,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_voice.c"
         "muse_adpcm.c"
         "muse_settings.c"
+        "muse_diag.c"
         "muse_settings_ui.c"
         "muse_text.c"
         "muse_keypad.c"
