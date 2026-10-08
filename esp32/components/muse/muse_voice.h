@@ -42,6 +42,10 @@ void muse_voice_request_chirp(void);
 void muse_voice_request_notif(void);
 void muse_voice_request_notif_speak(void);
 
+/* Plays the low-battery cue (battery.pcm): a soft descending two-note warning. Safe to
+ * call while asleep -- it does not wake the screen. */
+void muse_voice_request_battery(void);
+
 /* Plays the agent-switch sound at the current volume (when idle). */
 void muse_voice_request_transition(void);
 

@@ -110,6 +110,7 @@ static int s_pct_start, s_pct_now, s_mv_start, s_mv_now;
 static int64_t s_off_us, s_rest_us, s_last_us;   /* screen off, resting, and when last added to */
 static bool s_screen_off, s_resting;
 static muse_power_t s_power = { .battery_pct = -1 };
+static float s_pct_avg = -1.0f;   /* the EMA behind s_power.battery_pct (see note_power) */
 
 #if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
 static portMUX_TYPE s_sleep_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -379,7 +380,6 @@ void muse_battery_note_power(const muse_power_t *p, bool on_battery)
      * sags under radio/speaker load, so the raw % swings down and back within seconds and
      * the meter "drains fast" while the cell is fine. Exponential average on the % only
      * (k = 1/8 per read; the mV stays raw: it IS the measurement). */
-    static float s_pct_avg = -1.0f;
     if (s_power.battery_pct >= 0 && p->battery_pct >= 0) {
         if (p->charging || s_pct_avg < 0.0f) {
             s_pct_avg = (float)p->battery_pct;      /* charging: chase the real value */
@@ -437,6 +437,14 @@ void muse_battery_read(muse_battery_t *out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     summarize(s_started ? measure_end() : NULL, out);
     xSemaphoreGive(s_lock);
+}
+
+int muse_battery_pct_smoothed(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    int pct = s_pct_avg < 0.0f ? -1 : (int)(s_pct_avg + 0.5f);
+    xSemaphoreGive(s_lock);
+    return pct;
 }
 
 bool muse_battery_drain(const muse_battery_t *b, int *rate10, int *full_h)

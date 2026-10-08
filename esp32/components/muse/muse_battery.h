@@ -59,6 +59,11 @@ void muse_battery_reset(void);
 
 void muse_battery_read(muse_battery_t *out);
 
+/* The EMA-smoothed charge percent, 0-100, or -1 before the first reading. The raw
+ * per-mille value sags seconds-long under radio/speaker load -- use THIS for any
+ * threshold that acts on the state of the charge (a low-battery warning, a save). */
+int muse_battery_pct_smoothed(void);
+
 /* Once the gauge has moved, after at least 10 minutes: the drain in tenths of a
  * percent an hour, and how many hours a full charge lasts at that rate. */
 bool muse_battery_drain(const muse_battery_t *b, int *rate10, int *full_h);

@@ -118,6 +118,7 @@ static TaskHandle_t s_input;
 static bool s_talk_down;
 static bool s_cpu_low;      /* display stopped and the CPU allowed to sleep */
 static volatile bool s_power_off_requested;
+static volatile int low_bench_pct = -1;   /* bench: fake the smoothed % for the low-battery guard */
 static volatile bool s_restart_requested;   /* menu / console / hold: reboot the board */
 static volatile bool s_nap_now;   /* ">nap": asleep, as if on battery, nap without waiting WIFI_NAP_MS */
 
@@ -431,6 +432,61 @@ static void set_cpu_low(bool low)
  * at the crystal clock a long line of serial output can stall the USB console
  * until the host reopens the port.
  */
+/*
+ * The low-battery guard, fed every battery read. Two thresholds, once per discharge:
+ *
+ *   15%  a soft descending cue (battery.pcm) + a caption -- the "plug me in" moment, and
+ *        it fires whether the screen is on or asleep (the cue never wakes the screen).
+ *    5%  a gentle auto power-off: the caption lands, then the panel sleeps and the chip
+ *        goes to deep sleep (wake on BOOT). Running a Li-ion to cutoff repeatedly ages it,
+ *        and a dead-with-no-warning gadget is the thing this fixes.
+ *
+ * Both reset when charging (or USB): the next discharge gets its own single warning. The
+ * smoothed % is used, not the raw one: under radio/speaker load the raw value can sag 10
+ * points for a few seconds and would otherwise false-trip the thresholds.
+ */
+static void low_battery_check(const muse_power_t *p)
+{
+    static int warned_at = 101;   /* % at which the cue last fired; >100 = not this discharge */
+    bool sim = low_bench_pct >= 0;
+    if (!sim && (p->charging || p->usb)) {
+        warned_at = 101;          /* re-arm on charge */
+        return;
+    }
+    if (!sim && !muse_state_on_battery()) {
+        return;
+    }
+    int pct = sim ? low_bench_pct : muse_battery_pct_smoothed();
+    if (pct < 0) {
+        return;
+    }
+    if (pct <= 5) {
+        if (sim && warned_at <= 5) {
+            return;   /* bench: this sim already logged; the real path deep-sleeps instead */
+        }
+        ESP_LOGW(TAG, "battery %d%%: auto power-off to protect the cell", pct);
+        muse_state_set_caption("BATTERY CRITICAL - SLEEPING");
+        vTaskDelay(pdMS_TO_TICKS(700));   /* let the caption land */
+        if (sim) {
+            /* Bench: stop short of the real deep sleep (which needs a BOOT press to
+             * wake and would end the test session). The real path is power_off(), the
+             * same function the menu's Power off uses. Mark this discharge as warned so
+             * the sim does not re-log every poll. */
+            ESP_LOGW(TAG, "battery sim: would deep-sleep now (not doing it on the bench)");
+            warned_at = pct;
+            return;
+        }
+        power_off();                       /* deep sleep; BOOT wakes it */
+        return;
+    }
+    if (pct <= 15 && warned_at > 15) {
+        warned_at = pct;
+        ESP_LOGW(TAG, "battery %d%%: low-battery warning", pct);
+        muse_voice_request_battery();
+        muse_state_set_caption("BATTERY %d%% - PLUG IN", pct);
+    }
+}
+
 static bool update_power(void)
 {
     static bool paused;
@@ -563,6 +619,7 @@ static void input_task(void *arg)
             if (muse_board->read_power && muse_board->read_power(&p) == ESP_OK) {
                 muse_state_set_power(&p);
                 muse_battery_note_power(&p, muse_state_on_battery());
+                low_battery_check(&p);
             }
         }
 
@@ -751,6 +808,23 @@ static bool console_command(char *line, bool whole)
                have_why ? why : "(none)",
                have_fault ? detail : "(none)", (unsigned)up,
                c[0], c[1], c[2], c[3], c[4]);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "batt.sim=", 9)) {
+        /* Bench: fake the smoothed % the low-battery guard reads. ">batt.sim=14" trips the
+         * 15% warning (cue + caption); ">batt.sim=4" trips the 5% auto-sleep; ">batt.sim=-1"
+         * restores the real gauge. Only the guard is faked -- the meter still shows real. */
+        low_bench_pct = atoi(line + 9);
+        printf("@batt.sim %d%s\n", low_bench_pct,
+               low_bench_pct < 0 ? " (real gauge)" : "");
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "batt.cue")) {
+        /* Bench: play the low-battery cue directly, no threshold needed. */
+        muse_voice_request_battery();
+        printf("@batt.cue\n");
         fflush(stdout);
         return true;
     }

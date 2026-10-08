@@ -76,6 +76,7 @@ static volatile bool s_loopback;
 static volatile bool s_mp3test;
 static volatile bool s_notif_chime;   /* play the notification sound */
 static volatile bool s_notif_speak;   /* speak a queued notification line */
+static volatile bool s_batt_low;      /* play the low-battery sound */
 
 /*
  * Pre-roll: while idle the mic keeps running into this ring, so a recording
@@ -835,7 +836,7 @@ static void voice_task(void *arg)
             muse_input_event_t ev;
             bool asleep = muse_state_asleep();
             bool battery = muse_state_on_battery();
-            bool rest = asleep && battery && !s_chirp && !s_transition && !s_mp3test && !s_notif_chime && !s_notif_speak && !s_loopback;
+            bool rest = asleep && battery && !s_chirp && !s_transition && !s_mp3test && !s_notif_chime && !s_notif_speak && !s_loopback && !s_batt_low;
 #if HOLD_NOTES
             /* A press goes first: send_held() leaves it queued and returns
              * without backing off, so retrying before it's read would spin. */
@@ -903,6 +904,24 @@ static void voice_task(void *arg)
                         nbuf[j] = (int16_t)(b[2 * j] | (b[2 * j + 1] << 8));
                     }
                     muse_audio_write_plain(nbuf, m);
+                }
+                pre_reset();
+            }
+            if (s_batt_low) {
+                s_batt_low = false;
+                /* The low-battery cue: descending two-note PCM, played plain. Warns even
+                 * asleep (this flag is in the rest condition), without waking the screen. */
+                extern const uint8_t battery_pcm_start[] asm("_binary_battery_pcm_start");
+                extern const uint8_t battery_pcm_end[] asm("_binary_battery_pcm_end");
+                static int16_t bbuf[MUSE_AUDIO_CHUNK];
+                size_t bf = (size_t)(battery_pcm_end - battery_pcm_start) / 2;
+                for (size_t i = 0; i < bf; i += MUSE_AUDIO_CHUNK) {
+                    size_t m = bf - i < MUSE_AUDIO_CHUNK ? bf - i : MUSE_AUDIO_CHUNK;
+                    const uint8_t *b = battery_pcm_start + i * 2;
+                    for (size_t j = 0; j < m; j++) {
+                        bbuf[j] = (int16_t)(b[2 * j] | (b[2 * j + 1] << 8));
+                    }
+                    muse_audio_write_plain(bbuf, m);
                 }
                 pre_reset();
             }
@@ -1036,6 +1055,12 @@ void muse_voice_request_notif(void)
 void muse_voice_request_notif_speak(void)
 {
     s_notif_speak = true;
+}
+
+void muse_voice_request_battery(void)
+{
+    s_batt_low = true;
+    muse_state_nudge();   /* wake the voice task if it is resting */
 }
 
 void muse_voice_request_mp3test(void)
