@@ -72,3 +72,12 @@ void muse_lcd_bands_swallow(int completions);
  * The guard must restart the board within ~4 s of the call's start.
  */
 void muse_lcd_bands_wedge(int ms);
+
+/*
+ * Fault injection for the flush-wait backstop: the next `notifies` band-final
+ * done signals are dropped AFTER their accounting -- the flush never reaches
+ * LVGL. This is the 2026-10-08 freeze shape. Bench: ">lcd.dropnotify[=N]".
+ * The screen must recover within ~a second (a "flush done never arrived" log),
+ * not stall for 20 s.
+ */
+void muse_lcd_bands_notify_drop(int notifies);

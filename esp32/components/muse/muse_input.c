@@ -926,6 +926,17 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+    if (!strncmp(line, "lcd.dropnotify", 14)) {
+        /* Fault injection: the next N band-final done signals are lost AFTER their
+         * accounting -- the flush never reaches LVGL. This is the 2026-10-08 freeze
+         * shape. The flush-wait backstop must release LVGL within ~1 s ("flush done
+         * never arrived"), not stall for 20 s and abort. */
+        int n = line[14] == '=' ? atoi(line + 15) : 1;
+        muse_lcd_bands_notify_drop(n);
+        printf("@lcd.dropnotify %d\n", n);
+        fflush(stdout);
+        return true;
+    }
 #endif
     if (!strncmp(line, "notif=", 6)) {
         /* Bench: present a notification line as if the relay sent it (text only; use /notifications

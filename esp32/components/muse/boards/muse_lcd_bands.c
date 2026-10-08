@@ -64,6 +64,7 @@ static const char *TAG = "lcd_bands";
  * the bench drops the next completion on purpose (muse_input.c).
  */
 #define DONE_GRACE_MS 500        /* no piece queued or finished this long: signal lost */
+#define FLUSH_WAIT_MS 1000       /* LVGL's wait for a band's notify: past this, write it off */
 #define GUARD_PERIOD_MS 250      /* how often the guard looks */
 #define CHUNK_WAIT_MS 2000       /* buffer wait; past recovery, the chain is broken */
 #define RUN_WAIT_MS 2000         /* muse_lcd_bands_run: bound its waits too */
@@ -82,7 +83,9 @@ static size_t s_chunk_bytes;
 static int s_chunks_out;                 /* of the band being sent */
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t s_progress_ms;  /* last piece queued or done (ISR writes) */
+static volatile bool s_notify_pending;   /* a band-final notify is owed to LVGL */
 static volatile uint32_t s_swallow;      /* bench: completions to drop on purpose */
+static volatile uint32_t s_notify_drop;  /* bench: flush notifies to drop on purpose */
 static uint32_t s_recover_count;
 static uint32_t s_recover_first_ms;
 static volatile uint32_t s_driver_ms;    /* nonzero while a panel driver call is in progress */
@@ -121,8 +124,89 @@ static bool IRAM_ATTR on_chunk_sent(esp_lcd_panel_io_handle_t io, esp_lcd_panel_
     s_progress_ms = now_ms();
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(s_chunk_free, &woken);
-    bool yield = chunk_done() && esp_lv_adapter_display_notify_color_trans_done_from_isr(s_disp);
-    return yield || woken == pdTRUE;
+    bool last = chunk_done();
+    if (last) {
+        bool drop;
+        portENTER_CRITICAL_SAFE(&s_lock);
+        s_notify_pending = true;   /* owed to LVGL until delivered below */
+        drop = s_notify_drop > 0;
+        if (drop) {
+            s_notify_drop--;
+        }
+        portEXIT_CRITICAL_SAFE(&s_lock);
+        if (drop) {
+            /* Bench: the accounting completed but the flush signal is lost -- the
+             * exact shape of the 2026-10-08 freeze (lvgl spinning in
+             * wait_for_flushing while the counter reads 0). The notify stays
+             * pending; the flush-wait backstop must catch it. */
+            return woken == pdTRUE;
+        }
+        bool yield = esp_lv_adapter_display_notify_color_trans_done_from_isr(s_disp);
+        portENTER_CRITICAL_SAFE(&s_lock);
+        s_notify_pending = false;
+        portEXIT_CRITICAL_SAFE(&s_lock);
+        return yield || woken == pdTRUE;
+    }
+    return woken == pdTRUE;
+}
+
+/*
+ * LVGL's own flush handshake, replaced with a bounded wait. wait_for_flushing()
+ * spins on `while(disp->flushing)` with NO timeout when no flush_wait_cb is set
+ * -- if a band's done signal is lost after its counter already read zero, that
+ * spin never ends, the UI task stalls, and stall_check aborts for a core dump
+ * (the 2026-10-08 freeze: lvgl in wait_for_flushing at lv_refr.c:1458, lcd_send
+ * idle, counter 0 -- the guard was blind because nothing looked outstanding).
+ *
+ * LVGL calls this only when it still believes a flush is in progress, and clears
+ * its own flag right after we return -- so this waits, bounded, for the band's
+ * final notify to land (s_notify_seq), and gives up after the same grace the
+ * counter guard uses. The send task is serialized behind this wait, so declaring
+ * it done cannot race a live transfer.
+ */
+static void lcd_flush_wait(lv_display_t *disp)
+{
+    (void)disp;
+    int64_t deadline = esp_timer_get_time() + (int64_t)FLUSH_WAIT_MS * 1000;
+    for (;;) {
+        bool outstanding;
+        portENTER_CRITICAL_SAFE(&s_lock);
+        /* "flush outstanding" covers both halves of the wait: a band still
+         * sending (pieces left) and a band whose last piece is done but whose
+         * notify has not been delivered yet. Waiting on the second half alone
+         * was the first bug: mid-band it reads false, and the callback would
+         * release LVGL while pieces were still on the wire. */
+        outstanding = s_chunks_out > 0 || s_notify_pending;
+        portEXIT_CRITICAL_SAFE(&s_lock);
+        if (!outstanding) {
+            return;   /* notify arrived (or nothing was owed): LVGL clears its flag */
+        }
+        if (esp_timer_get_time() >= deadline) {
+            break;
+        }
+        vTaskDelay(1);
+    }
+
+    ESP_LOGW(TAG, "flush wait timed out (%d piece(s) outstanding, notify %s): releasing LVGL's wait",
+             s_chunks_out, s_notify_pending ? "owed" : "delivered");
+    portENTER_CRITICAL_SAFE(&s_lock);
+    s_notify_pending = false;   /* written off; a late notify cannot double-deliver */
+    portEXIT_CRITICAL_SAFE(&s_lock);
+    muse_diag_lcd_t st = {
+        .chunks_out = s_chunks_out,
+        .recover_count = (int)s_recover_count,
+        .driver_ms = s_driver_ms ? (int)(now_ms() - s_driver_ms) : 0,
+    };
+    muse_diag_note_lcd_fault("lcd_flush_lost", &st);
+    if (s_recover_count == 0 || (uint32_t)(now_ms() - s_recover_first_ms) > RECOVER_WINDOW_MS) {
+        s_recover_count = 1;
+        s_recover_first_ms = now_ms();
+    } else if (++s_recover_count >= RECOVER_MAX) {
+        ESP_LOGE(TAG, "%u flush waits lost in a minute: restarting rather than limping",
+                 (unsigned)s_recover_count);
+        muse_diag_note_fault_restart("lcd_flush_lost", &st, "lcd_flush_lost");
+        esp_restart();
+    }
 }
 
 static void lcd_recover(void);
@@ -314,6 +398,10 @@ lv_display_t *muse_lcd_bands_register(esp_lv_adapter_display_config_t cfg, int l
     lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
     const esp_lv_adapter_draw_bitmap_callbacks_t draw_cbs = { .custom_draw_bitmap = queue_band };
     esp_lv_adapter_set_draw_bitmap_callbacks(s_disp, &draw_cbs, NULL);
+    /* Replace LVGL's untimed `while(disp->flushing)` spin with a bounded wait: a
+     * done signal lost after the counter reads zero would otherwise stall the UI
+     * task until the watchdog aborts (see lcd_flush_wait). */
+    lv_display_set_flush_wait_cb(s_disp, lcd_flush_wait);
 
     s_progress_ms = now_ms();
     static esp_timer_handle_t s_guard_timer;
@@ -366,4 +454,11 @@ void muse_lcd_bands_swallow(int completions)
 void muse_lcd_bands_wedge(int ms)
 {
     s_wedge_ms = ms > 0 ? (uint32_t)ms : 0;
+}
+
+void muse_lcd_bands_notify_drop(int notifies)
+{
+    portENTER_CRITICAL_SAFE(&s_lock);
+    s_notify_drop = notifies > 0 ? (uint32_t)notifies : 0;
+    portEXIT_CRITICAL_SAFE(&s_lock);
 }

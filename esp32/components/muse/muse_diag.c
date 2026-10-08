@@ -37,6 +37,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -71,19 +72,50 @@ esp_err_t muse_diag_init(void)
     ESP_LOGI(TAG, "black box ready (restart reason persists across reboots)");
     return ESP_OK;
 }
+/* Move restart_by -> restart_last, so the reason outlives the boot that reads it. */
 void muse_diag_boot_report(void)
 {
+    /* The hardware's own verdict on how the last session ended: this catches the
+     * panics no guard wrote a reason for (a crash at t=1s in the Wi-Fi bring-up
+     * window cannot record anything before it dies -- but the NEXT boot sees
+     * reset=panic here, with restart_by empty). */
+    const char *reset = "other";
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   reset = "poweron"; break;
+    case ESP_RST_SW:        reset = "sw"; break;
+    case ESP_RST_PANIC:     reset = "panic"; break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:       reset = "watchdog"; break;
+    case ESP_RST_DEEPSLEEP: reset = "deepsleep"; break;
+    case ESP_RST_BROWNOUT:  reset = "brownout"; break;
+    case ESP_RST_USB:       reset = "usb"; break;
+    case ESP_RST_JTAG:      reset = "jtag"; break;
+    default: break;
+    }
+
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
-    char why[24];
+    char why[24] = "";
     size_t n = sizeof(why);
     if (nvs_get_str(h, KEY_RESTART, why, &n) == ESP_OK && why[0]) {
         nvs_set_str(h, KEY_RESTART_LAST, why);
         nvs_erase_key(h, KEY_RESTART);
         nvs_commit(h);
-        ESP_LOGW(TAG, "previous boot ended by: %s", why);
+        ESP_LOGW(TAG, "previous boot ended by: %s (reset: %s)", why, reset);
+    } else if (esp_reset_reason() == ESP_RST_PANIC || esp_reset_reason() == ESP_RST_INT_WDT ||
+               esp_reset_reason() == ESP_RST_TASK_WDT || esp_reset_reason() == ESP_RST_WDT) {
+        /* No guard wrote a reason and the hardware says it crashed: this is the
+         * un-instrumented class (boot-window Wi-Fi race, LVGL assert, ...). */
+        char line[32];
+        snprintf(line, sizeof(line), "unexplained_%s", reset);
+        nvs_set_str(h, KEY_RESTART_LAST, line);
+        nvs_commit(h);
+        ESP_LOGE(TAG, "previous boot CRASHED (reset: %s) with no guard reason -- unexplained", reset);
+    } else {
+        ESP_LOGI(TAG, "boot: reset=%s, no guard restart recorded", reset);
     }
     nvs_close(h);
 
