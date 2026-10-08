@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_attr.h"   /* EXT_RAM_BSS_ATTR: playback scratch belongs in PSRAM, not internal RAM */
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/idf_additions.h"
@@ -895,7 +896,9 @@ static void voice_task(void *arg)
                  * voice FX). Same 1-byte-aligned embed caveat as transition.pcm. */
                 extern const uint8_t notif_pcm_start[] asm("_binary_notif_pcm_start");
                 extern const uint8_t notif_pcm_end[] asm("_binary_notif_pcm_end");
-                static int16_t nbuf[MUSE_AUDIO_CHUNK];
+                /* PSRAM: internal RAM is the scarce pool (moved 2026-10-08; the buffer is
+                 * transient playback scratch, no DMA or ISR touches it). */
+                static EXT_RAM_BSS_ATTR int16_t nbuf[MUSE_AUDIO_CHUNK];
                 size_t nf = (size_t)(notif_pcm_end - notif_pcm_start) / 2;
                 for (size_t i = 0; i < nf; i += MUSE_AUDIO_CHUNK) {
                     size_t m = nf - i < MUSE_AUDIO_CHUNK ? nf - i : MUSE_AUDIO_CHUNK;
@@ -913,7 +916,7 @@ static void voice_task(void *arg)
                  * asleep (this flag is in the rest condition), without waking the screen. */
                 extern const uint8_t battery_pcm_start[] asm("_binary_battery_pcm_start");
                 extern const uint8_t battery_pcm_end[] asm("_binary_battery_pcm_end");
-                static int16_t bbuf[MUSE_AUDIO_CHUNK];
+                static EXT_RAM_BSS_ATTR int16_t bbuf[MUSE_AUDIO_CHUNK];   /* PSRAM, ditto */
                 size_t bf = (size_t)(battery_pcm_end - battery_pcm_start) / 2;
                 for (size_t i = 0; i < bf; i += MUSE_AUDIO_CHUNK) {
                     size_t m = bf - i < MUSE_AUDIO_CHUNK ? bf - i : MUSE_AUDIO_CHUNK;

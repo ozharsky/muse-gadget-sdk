@@ -203,8 +203,17 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
             uint16_t x = ((uint16_t)(pos[0] & 0x0f) << 8) | pos[1];
             uint16_t y = ((uint16_t)(pos[2] & 0x0f) << 8) | pos[3];
             /* Mirror for 180-degree rotation. */
-            data->point.x = LCD_H_RES - 1 - x;
-            data->point.y = LCD_V_RES - 1 - y;
+            int mx = LCD_H_RES - 1 - (int)x;
+            int my = LCD_V_RES - 1 - (int)y;
+            /* A corrupt/uninitialised sample (12-bit fields can read above the panel) mirrors
+             * to a negative coordinate, which LVGL clamps with a warning ("Y is -3119 which is
+             * smaller than zero", ~80/day of log noise). Drop it here instead: an out-of-range
+             * point is never a real touch. */
+            if (mx < 0 || my < 0 || mx >= LCD_H_RES || my >= LCD_V_RES) {
+                return;
+            }
+            data->point.x = mx;
+            data->point.y = my;
             data->state = LV_INDEV_STATE_PRESSED;
         }
     }
