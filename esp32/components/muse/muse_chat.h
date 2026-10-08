@@ -20,6 +20,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* muse_settings.h owns this number (a Hermes profile name, agents.json key). Guarded here so
+ * this header stays self-contained: host test harnesses compile it without the IDF headers
+ * muse_settings.h pulls in (esp_err.h), and an identical redefinition is legal C. */
+#ifndef MUSE_AGENT_PROFILE_MAX
+#define MUSE_AGENT_PROFILE_MAX 32
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -147,6 +154,43 @@ void muse_hatch_task_auto(bool on);
 
 /* Voice task: decode a queued notification line to PCM (the voice task owns the speaker). */
 size_t muse_hatch_notif_pcm(int16_t **pcm_out);
+
+/* ---- Notification inbox (the settings page; session task does the HTTP) ---- */
+
+/* One row of the relay's notification history, copied out by muse_hatch_notif_hist(). */
+typedef struct {
+    char id[40];
+    char agent[MUSE_AGENT_PROFILE_MAX + 1];
+    char label[40];
+    char text[140];
+    long due;           /* 0, or the unix ts a reminder fires */
+    long ts;
+    bool is_default;    /* true: the Hermes slot; false: the ALT slot loaded with `agent` */
+    bool read;          /* true: already presented unprompted */
+} muse_notif_row_t;
+
+/* The inbox snapshot's state.  IDLE: never fetched; WAIT: a fetch is pending/underway;
+ * OK: rows valid; FAIL: the relay could not be reached. */
+typedef enum {
+    MUSE_NOTIF_HIST_IDLE,
+    MUSE_NOTIF_HIST_WAIT,
+    MUSE_NOTIF_HIST_OK,
+    MUSE_NOTIF_HIST_FAIL,
+} muse_notif_hist_t;
+
+muse_notif_hist_t muse_hatch_notif_hist_state(void);
+uint32_t muse_hatch_notif_hist_gen(void);   /* bumped each time the snapshot changes */
+
+/* Ask for a history refresh: the session task does the fetch when the link is idle. */
+void muse_hatch_notif_refresh(void);
+
+/* Rows in the snapshot, newest first; false when the index is out of range. */
+int muse_hatch_notif_hist_count(void);
+bool muse_hatch_notif_hist(int i, muse_notif_row_t *out);
+
+/* Remove one notification on the relay -- cancelling an un-fired reminder, or clearing a
+ * line. Non-blocking; the session task performs it when the link is idle. */
+void muse_hatch_notif_cancel(const char *id);
 
 /*
  * Prints one "@chat" line per call (more if `text` is long): the type, then the

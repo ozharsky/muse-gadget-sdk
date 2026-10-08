@@ -45,10 +45,28 @@ static const char *TAG = "muse_voice";
 #define TAIL_FRAMES (MUSE_AUDIO_RATE * 12 / 100)   /* capture lag + poll interval, stops before the release click */
 #define MAX_FRAMES (MUSE_AUDIO_RATE * MAX_SECS)
 #define MIN_HELD_FRAMES (MUSE_AUDIO_RATE * 3 / 10)   /* shorter presses are taps, not speech */
+/*
+ * The talk gate: a press starts a turn only once it has been held this long. A shorter
+ * press is a TAP -- it woke Muse, or it is half of the double-tap agent switch -- and the
+ * voice path stays out of it entirely: no turn, no caption, no stream opened to the agent
+ * (that collision is where the spurious "turn failed: SWITCHED AGENT" lines come from).
+ * The pre-roll ring runs during the wait, so what was said while holding is kept.
+ * Boards with a tiny pre-roll (no PSRAM; the Cardputer's stalled uploads) keep the old
+ * short rule: a 2 s wait there would lose the speech that led up to it.
+ */
+#if MUSE_LOW_MEM || CONFIG_MUSE_BOARD_M5STACK_CARDPUTER_ADV
+#define TALK_GATE_FRAMES MIN_HELD_FRAMES              /* 300 ms, as long as the old tap rule */
+#else
+#define TALK_GATE_FRAMES (MUSE_AUDIO_RATE * 2)        /* 2 s */
+#endif
+#define GATE_CHUNKS (TALK_GATE_FRAMES / MUSE_AUDIO_CHUNK)
+#define HINT_FRAMES (MUSE_AUDIO_RATE * 6 / 10)        /* say what to do this far in (a quick tap stays dark) */
 #if CONFIG_MUSE_BOARD_M5STACK_CARDPUTER_ADV
 #define PRE_CHUNKS 6                                   /* 120 ms; a 320 ms upload burst stalls on the ADV */
+#elif MUSE_LOW_MEM
+#define PRE_CHUNKS 16                                  /* 320 ms: matches the short gate */
 #else
-#define PRE_CHUNKS 16                                  /* 320 ms of audio kept from before the press */
+#define PRE_CHUNKS 120                                 /* 2.4 s: spans the whole talk gate plus a little head */
 #endif
 #define SETTLE_CHUNKS 10   /* after Muse makes a sound, 200 ms of capture is its own tail */
 #define REST_BACKSTOP_MS 60000
@@ -247,14 +265,13 @@ static void take(rec_stats_t *st, const int16_t *pcm)
 }
 
 /*
- * Records speech until release or MAX_SECS, starting with the pre-roll; *held
- * gets the part after the press. It streams to Hatch as it goes if it can.
- * If not, the note is kept in s_rec to send later, and streams from partway
- * if Hatch comes within reach. Returns false if Hatch failed the turn with no
- * kept note to fall back on (why says what failed). There is no start chirp:
+ * Records speech until release or MAX_SECS, starting with the pre-roll. It streams to
+ * Hatch as it goes if it can. If not, the note is kept in s_rec to send later, and
+ * streams from partway when Hatch comes within reach. Returns false if Hatch failed the
+ * turn with no kept note to fall back on (why says what failed). There is no start chirp:
  * anything played now would land on top of the first words.
  */
-static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+static bool record(char *why, size_t cap)
 {
     muse_state_set_mode(MUSE_MODE_LISTENING);
     muse_state_set_progress(0);
@@ -270,19 +287,17 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     rec_stats_t st = { 0 };
 
     size_t n = 0;
-    if (barge_in) {
-        /* Pressed during playback: the queued tail of the reply is still sounding. */
-        for (int i = 0; i < SETTLE_CHUNKS; i++) {
-            muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK);
-        }
-    } else {
-        for (size_t i = 0; i < s_pre_fill; i++) {
-            pre_get(i, s_chunk);
-            take(&st, s_chunk);
-            n += MUSE_AUDIO_CHUNK;
-        }
+    /* The pre-roll: the talk gate's audio (the whole held stretch before recording started)
+     * plus the small head before the press. Older ambient stays out of the note. */
+    size_t head = s_pre_fill;
+    if (head > (size_t)GATE_CHUNKS + 16) {
+        head = (size_t)GATE_CHUNKS + 16;
     }
-    size_t pre = n;
+    for (size_t i = s_pre_fill - head; i < s_pre_fill; i++) {
+        pre_get(i, s_chunk);
+        take(&st, s_chunk);
+        n += MUSE_AUDIO_CHUNK;
+    }
     bool released = false;
     size_t stop_at = MAX_FRAMES;
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
@@ -330,7 +345,6 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
         }
     }
     muse_state_set_level(0);
-    *held = n - pre;
 
     char tail[160];
     int tl = 0;
@@ -496,20 +510,39 @@ static void set_resting(bool rest)
 }
 
 /*
- * A press that woke the screen: listen from now, into the pre-roll, and
- * record only if it's still held after a tap's length. False if it was let
- * go sooner: it only woke Muse.
+ * A press: listen from now, into the pre-roll, and record only if the button is still
+ * held after the talk gate. False if it was let go sooner -- a TAP: it only woke Muse,
+ * or it is half of the double-tap agent switch; either way nothing else happens.
  */
-static bool held_on_waking(void)
+static bool talk_gate(bool wake, bool barge)
 {
-    s_settle = 0;   /* nothing played: no tail of Muse's own to skip */
-    for (size_t n = 0; n < MIN_HELD_FRAMES; n += MUSE_AUDIO_CHUNK) {
-        if (got_event(MUSE_PTT_UP)) {
-            return false;
-        }
-        idle_capture();
+    if (wake) {
+        s_settle = 0;   /* nothing of Muse's was playing; any older settle is stale */
     }
-    return !got_event(MUSE_PTT_UP);
+    if (barge) {
+        /* Pressed during playback: the reply's tail is still in the I2S buffers. Discard it,
+         * or the head of the new note is the old reply (the old code's SETTLE_CHUNKS drain). */
+        s_settle = SETTLE_CHUNKS;
+    }
+    bool hinted = false, held = true;
+    for (size_t n = 0; n < TALK_GATE_FRAMES && held; n += MUSE_AUDIO_CHUNK) {
+        if (got_event(MUSE_PTT_UP)) {
+            held = false;
+            break;
+        }
+        if (!hinted && n >= HINT_FRAMES) {
+            hinted = true;
+            muse_state_set_caption("HOLD TO TALK");   /* held past a tap's length: say what it takes */
+        }
+        idle_capture();   /* the press's audio goes into the pre-roll for the note */
+    }
+    if (held) {
+        held = !got_event(MUSE_PTT_UP);
+    }
+    if (!held && hinted) {
+        go_idle("");   /* let go before the gate: take the hint back down */
+    }
+    return held;
 }
 
 static void drop_rec(void)
@@ -971,25 +1004,29 @@ static void voice_task(void *arg)
             }
             wake = ev.wake;
         }
-        if (wake && !held_on_waking()) {
-            continue;   /* a tap: it only woke Muse */
+        /* A press counts as a turn only once held past the talk gate. A shorter press is a
+         * TAP -- waking Muse, or half of the double-tap agent switch -- and the voice path
+         * stays out of it entirely: no turn opens, so an agent switch can no longer fail a
+         * turn that should never have started (the "SWITCHED AGENT" noise). The gate's
+         * audio lands in the pre-roll, so the note still starts at the press. */
+        bool barge = pending_down;   /* set by finish_note()'s interruption: pressed mid-reply */
+        if (!talk_gate(wake, barge)) {
+            /* A tap: no turn. If it interrupted a reply (barge) the face would otherwise be
+             * left in SPEAKING with nothing playing -- put it back to rest. */
+            pending_down = false;
+            if (muse_state_mode(NULL) != MUSE_MODE_IDLE) {
+                go_idle("");
+            }
+            continue;
         }
         muse_wifi_power(MUSE_WIFI_FULL);
         if (!can_record()) {
             pending_down = false;
             continue;
         }
-        size_t held;
         char why[96];
-        bool ok = record(pending_down, &held, why, sizeof(why));
+        bool ok = record(why, sizeof(why));
         pending_down = false;
-        if (held < MIN_HELD_FRAMES && !wake) {
-            muse_hatch_turn_cancel();
-            drop_rec();
-            pre_reset();
-            go_idle("HOLD LONGER TO TALK");
-            continue;
-        }
         if (!ok) {
             pre_reset();
             go_idle(why);   /* Hatch failed it while recording */

@@ -76,6 +76,7 @@ bool muse_notif_open_pending(void);
 
 /* muse_ui.c: bench hooks (">settings", ">face.tap", ">face.long"). */
 void muse_ui_show_settings(void);
+void muse_ui_show_notifications(void);
 void muse_ui_face_tap(void);
 void muse_ui_face_long(void);
 
@@ -970,9 +971,48 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+    if (!strcmp(line, "notifs") || !strcmp(line, "inbox")) {
+        /* Bench: open the Notifications page (settings tile) and report the snapshot. */
+        muse_ui_show_notifications();
+        int n = muse_hatch_notif_hist_count();
+        printf("@notifs page=open state=%d n=%d\n", (int)muse_hatch_notif_hist_state(), n);
+        for (int i = 0; i < n && i < 12; i++) {
+            muse_notif_row_t r;
+            if (muse_hatch_notif_hist(i, &r)) {
+                printf("@notifs.row %d id=%s agent=%s default=%d due=%ld read=%d \"%s\"\n", i, r.id,
+                       r.agent, (int)r.is_default, r.due, (int)r.read, r.text);
+            }
+        }
+        fflush(stdout);
+        return true;
+    }
     if (!strcmp(line, "notif.tap")) {
         /* Bench: act as a face tap on a waiting notification -- opens its agent. */
         printf("@notif.tap %s\n", muse_notif_open_pending() ? "opened" : "none");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "notif.cancel=", 13)) {
+        /* Bench: remove one history row on the relay by id (the hold gesture without a
+         * finger). The id comes from a `>notifs` dump; `>notifs` a beat later shows it gone. */
+        const char *id = line + 13;
+        muse_notif_row_t r;
+        bool found = false;
+        for (int i = 0; i < 12; i++) {
+            if (!muse_hatch_notif_hist(i, &r)) {
+                break;
+            }
+            if (!strcmp(r.id, id)) {
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            muse_hatch_notif_cancel(r.id);
+            printf("@notif.cancel %s queued\n", r.id);
+        } else {
+            printf("@notif.cancel %s not in the snapshot\n", id);
+        }
         fflush(stdout);
         return true;
     }

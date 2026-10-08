@@ -3520,6 +3520,24 @@ static char s_notif_agent[MUSE_AGENT_PROFILE_MAX + 1];
 static char s_notif_label[40];
 static int64_t s_notif_gap_us;   /* earliest time the next nudge may be presented */
 
+/* ---- Notification inbox: the settings page's history snapshot ----
+ *
+ * The LVGL task renders rows; only this (session) task fetches or mutates. A refresh fills the
+ * buffer the readers do NOT hold (1 - s_hist_active), then publishes by flipping s_hist_active
+ * and bumping s_hist_gen; the page rebuilds when the gen changes. A reader may in the worst
+ * case see one row mid-install, for one frame -- acceptable for a list (same spirit as
+ * s_last_reply's flip). All in PSRAM: 2 x 12 rows. */
+#define NOTIF_HIST_MAX 12
+static EXT_RAM_BSS_ATTR muse_notif_row_t s_hist[2][NOTIF_HIST_MAX];
+static volatile int s_hist_n[2];
+static volatile int s_hist_active;
+static volatile uint32_t s_hist_gen;
+static volatile int s_hist_state;      /* muse_notif_hist_t, kept as int for the lock-free read */
+static volatile bool s_hist_want;      /* a fetch is queued (UI asks, session serves) */
+static char s_hist_cancel[40];         /* id to delete on the relay (session task only) */
+static volatile bool s_hist_cancel_want;
+static int64_t s_hist_next_us;         /* spacing between inbox network operations */
+
 extern "C" void muse_ui_agent_switch(bool hermes);   /* muse_ui.h has no C++ guards */
 extern "C" void muse_input_poke(void);              /* muse_input.h has no C++ guards either */
 
@@ -3624,6 +3642,213 @@ static void notif_ack(const char *id)
         esp_http_client_cleanup(h);
     }
     free(json);
+}
+
+/* ---- Notification inbox: fetch / cancel / publish ---- */
+
+/* GET /notifications/history -> fill the inactive buffer, then publish it. Session task only. */
+static void notif_hist_fetch(void)
+{
+    char url[176];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/notifications/history?limit=%d", task_relay_url(&remote), NOTIF_HIST_MAX);
+    const size_t CAP = 20 * 1024;
+    char *resp = static_cast<char *>(psram_alloc(CAP));
+    if (!resp) {
+        s_hist_state = MUSE_NOTIF_HIST_FAIL;
+        return;
+    }
+    tts_buf_t buf = { resp, 0, CAP - 1, false };
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_GET;
+    cfg.timeout_ms = 4000;
+    cfg.event_handler = tts_http_evt;
+    cfg.user_data = &buf;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    bool ok = false;
+    if (h) {
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_err_t err = esp_http_client_perform(h);
+        int status = esp_http_client_get_status_code(h);
+        esp_http_client_cleanup(h);
+        if (err == ESP_OK && status == 200) {
+            resp[buf.len] = '\0';
+            cJSON *root = cJSON_Parse(resp);
+            cJSON *arr = root ? cJSON_GetObjectItem(root, "notifications") : nullptr;
+            if (cJSON_IsArray(arr)) {
+                int slot = 1 - s_hist_active;
+                int n = 0;
+                cJSON *it = nullptr;
+                cJSON_ArrayForEach(it, arr) {
+                    if (n >= NOTIF_HIST_MAX || !cJSON_IsObject(it)) {
+                        break;
+                    }
+                    const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(it, "id"));
+                    if (!id || !id[0]) {
+                        continue;
+                    }
+                    muse_notif_row_t *r = &s_hist[slot][n];
+                    memset(r, 0, sizeof(*r));
+                    strlcpy(r->id, id, sizeof(r->id));
+                    const char *agent = cJSON_GetStringValue(cJSON_GetObjectItem(it, "agent"));
+                    const char *label = cJSON_GetStringValue(cJSON_GetObjectItem(it, "label"));
+                    const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(it, "text"));
+                    strlcpy(r->agent, agent ? agent : "", sizeof(r->agent));
+                    strlcpy(r->label, label ? label : "", sizeof(r->label));
+                    strlcpy(r->text, text ? text : "", sizeof(r->text));
+                    cJSON *due = cJSON_GetObjectItem(it, "due");
+                    cJSON *ts = cJSON_GetObjectItem(it, "ts");
+                    cJSON *isd = cJSON_GetObjectItem(it, "is_default");
+                    r->due = cJSON_IsNumber(due) ? (long)cJSON_GetNumberValue(due) : 0;
+                    r->ts = cJSON_IsNumber(ts) ? (long)cJSON_GetNumberValue(ts) : 0;
+                    r->is_default = cJSON_IsTrue(isd);
+                    r->read = cJSON_IsTrue(cJSON_GetObjectItem(it, "read"));
+                    n++;
+                }
+                cJSON_Delete(root);
+                /* Publish ONLY when the content actually changed. A rebuild is a full
+                 * delete+recreate of the page's rows, and one landing between a finger's
+                 * down and up eats the tap: an unchanged 2 s poll must not touch the list. */
+                int a = s_hist_active;
+                bool same = (n == s_hist_n[a]);
+                for (int i = 0; same && i < n; i++) {
+                    const muse_notif_row_t *x = &s_hist[slot][i];
+                    const muse_notif_row_t *y = &s_hist[a][i];
+                    same = !strcmp(x->id, y->id) && x->read == y->read && x->due == y->due &&
+                           !strcmp(x->text, y->text) && !strcmp(x->label, y->label);
+                }
+                if (!same) {
+                    s_hist_n[slot] = n;
+                    s_hist_active = slot;   /* publish */
+                    s_hist_gen = s_hist_gen + 1;
+                }
+                s_hist_state = MUSE_NOTIF_HIST_OK;
+                ok = true;
+            } else {
+                cJSON_Delete(root);
+            }
+        }
+    }
+    heap_caps_free(resp);
+    if (!ok) {
+        s_hist_state = MUSE_NOTIF_HIST_FAIL;
+    }
+}
+
+/* POST /notifications/cancel {id}: delete it on the relay (a cancelled reminder must not
+ * fire later). Best-effort: a failure leaves the row; the next refresh tells the truth. */
+static void notif_hist_cancel(const char *id)
+{
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return;
+    }
+    cJSON_AddStringToObject(body, "id", id);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        return;
+    }
+    char url[176];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/notifications/cancel", task_relay_url(&remote));
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 4000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    bool ok = false;
+    if (h) {
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_post_field(h, json, strlen(json));
+        ok = esp_http_client_perform(h) == ESP_OK && esp_http_client_get_status_code(h) == 200;
+        esp_http_client_cleanup(h);
+    }
+    free(json);
+    ESP_LOGI(TAG, "notif: cancel %s %s", id, ok ? "ok" : "failed");
+    if (ok) {
+        s_hist_want = true;   /* re-fetch so the page drops the row */
+    }
+}
+
+/* The inbox's idle work: one fetch or cancel at a time, never during a turn. Session task. */
+static void notif_hist_tick(void)
+{
+    if (!CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
+        return;
+    }
+    if (s_turn.phase != P_IDLE || s_resting.load() || now_us() < s_hist_next_us) {
+        return;
+    }
+    if (s_hist_cancel_want) {
+        s_hist_cancel_want = false;
+        notif_hist_cancel(s_hist_cancel);
+        s_hist_next_us = now_us() + 2 * 1000000LL;
+        return;
+    }
+    if (s_hist_want && muse_wifi_connected() && muse_hatch_configured()) {
+        s_hist_want = false;
+        notif_hist_fetch();
+        s_hist_next_us = now_us() + 2 * 1000000LL;
+    }
+    /* While the page is open the LVGL task asks again about once a second (muse_hatch_notif_
+     * refresh), so a new nudge appears without any tap; the 2 s spacing above bounds the rate. */
+}
+
+/* ---- Public: the settings inbox page (any task; only the flags cross) ---- */
+
+extern "C" void muse_hatch_notif_refresh(void)
+{
+    if (CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes() &&
+        !s_hist_want && !s_hist_cancel_want) {
+        s_hist_want = true;
+        if (s_hist_state != MUSE_NOTIF_HIST_OK) {
+            s_hist_state = MUSE_NOTIF_HIST_WAIT;
+        }
+    }
+}
+
+extern "C" muse_notif_hist_t muse_hatch_notif_hist_state(void)
+{
+    return (muse_notif_hist_t)s_hist_state;
+}
+
+extern "C" uint32_t muse_hatch_notif_hist_gen(void)
+{
+    return s_hist_gen;
+}
+
+extern "C" int muse_hatch_notif_hist_count(void)
+{
+    int a = s_hist_active;
+    return s_hist_n[a];
+}
+
+extern "C" bool muse_hatch_notif_hist(int i, muse_notif_row_t *out)
+{
+    int a = s_hist_active;
+    if (i < 0 || i >= s_hist_n[a]) {
+        return false;
+    }
+    *out = s_hist[a][i];
+    return true;
+}
+
+extern "C" void muse_hatch_notif_cancel(const char *id)
+{
+    if (!id || !id[0] || s_hist_cancel_want) {
+        return;
+    }
+    strlcpy(s_hist_cancel, id, sizeof(s_hist_cancel));
+    s_hist_cancel_want = true;
 }
 
 /* Show one nudge on the glass: look up, its mood, a chirp, and the line with a tap hint. */
@@ -3747,6 +3972,7 @@ static void hatch_task(void *arg)
          * Self-gated to idle/awake/15 s; a no-op unless a relay URL is set. */
         task_tick();
         notif_tick();
+        notif_hist_tick();   /* the inbox's fetch/cancel, when the settings page asked */
         task_finish_if_done();
         task_flush_reply();
         if (hermes_mode()) {

@@ -2154,6 +2154,19 @@ void muse_ui_show_face(void)
  * settled page, and the swipe-in path is exercised by touch anyway. Called from the SERIAL task,
  * so it must hold the display lock — every other LVGL mutation from outside the UI task does
  * (touching a widget unlocked panics the device). The frame timer ticks the page afterwards. */
+/* Notifications: bench hook (serial ">notifs") and the settings page's entry point. */
+void muse_ui_show_notifications(void)
+{
+    if (!s_tv || !s_ready) {
+        return;
+    }
+    muse_board->display_lock(-1);
+    lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
+    lv_tileview_set_tile(s_tv, s_settings, LV_ANIM_OFF);
+    muse_settings_ui_show_notifications();
+    muse_board->display_unlock();
+}
+
 void muse_ui_show_settings(void)
 {
     if (!s_tv || !s_ready) {
@@ -2162,6 +2175,7 @@ void muse_ui_show_settings(void)
     muse_board->display_lock(-1);
     lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
     lv_tileview_set_tile(s_tv, s_settings, LV_ANIM_OFF);
+    muse_settings_ui_show_home();   /* arriving here shows the menu, not a stale sub-page */
     muse_board->display_unlock();
 }
 

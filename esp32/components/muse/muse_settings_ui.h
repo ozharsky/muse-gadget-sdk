@@ -33,3 +33,12 @@ void muse_settings_ui_tick(bool visible);
 
 /* True when a sub-page is open (the tileview must not steal horizontal swipes). */
 bool muse_settings_ui_in_subpage(void);
+
+/* Opens the Notifications page (the bench hook and the settings home row). Call with the
+ * display lock held, from the LVGL task. */
+void muse_settings_ui_show_notifications(void);
+
+/* Back to the settings home menu from any sub-page. Arriving at Settings must show the menu,
+ * not whatever sub-page was last open (a stale sub-page reads as "all the settings are
+ * gone"). Call with the display lock held, from the LVGL task. */
+void muse_settings_ui_show_home(void);

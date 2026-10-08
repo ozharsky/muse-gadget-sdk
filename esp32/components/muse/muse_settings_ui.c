@@ -21,8 +21,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_app_desc.h"
+#include "esp_attr.h"   /* EXT_RAM_BSS_ATTR: the inbox rows belong in PSRAM */
 #include "esp_mac.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -41,6 +43,8 @@
 #include "muse_ui.h"
 #include "muse_voice.h"
 #include "muse_wifi.h"
+
+#include "sdkconfig.h"   /* CONFIG_MUSE_HATCH / CONFIG_MUSE_HERMES_URL: which pages exist */
 
 /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
 #define LIST_W 330
@@ -63,6 +67,7 @@ typedef void (*text_done_cb_t)(const char *text);
 static int s_text_scale = 466;
 static lv_obj_t *s_tile;
 static lv_obj_t *s_current;
+static bool s_hold_page;   /* bench: the next visibility tick keeps the open sub-page */
 static lv_obj_t *s_home, *s_wifi, *s_hatch, *s_ble, *s_sound, *s_sleep, *s_battery, *s_usage, *s_power, *s_text;
 
 /*
@@ -76,6 +81,7 @@ typedef struct {
 } page_t;
 
 /* Home values. */
+static lv_obj_t *s_home_list;   /* the menu's scroll column (scrolls home on arrival) */
 static lv_obj_t *s_home_agent, *s_home_wifi, *s_home_hatch, *s_home_hermes, *s_home_ble, *s_home_sound, *s_home_sleep, *s_home_battery, *s_about;
 
 /* Wi-Fi page. */
@@ -113,6 +119,16 @@ static int64_t s_batt_shown_us;
 static const int AGENT_CHOICES[] = { MUSE_AGENT_MUSE, MUSE_AGENT_HERMES, MUSE_AGENT_HERMES_ALT };
 #define AGENT_COUNT (int)(sizeof(AGENT_CHOICES) / sizeof(AGENT_CHOICES[0]))
 static lv_obj_t *s_agents, *s_agent_labels[AGENT_COUNT], *s_agent_checks[AGENT_COUNT];
+
+/* Notifications page. s_notif_rows is the page's own copy of the session task's snapshot, so a
+ * tap or a hold acts on the row that was on screen even if a refresh lands mid-decision.
+ * PSRAM: ~3 KB of rows that would otherwise hold internal RAM for good. */
+#define NOTIF_ROWS_MAX 12
+static lv_obj_t *s_home_notif;
+static lv_obj_t *s_notif, *s_notif_list, *s_notif_status;
+static uint32_t s_notif_shown_gen = UINT32_MAX;
+static EXT_RAM_BSS_ATTR muse_notif_row_t s_notif_rows[NOTIF_ROWS_MAX];
+static int s_notif_n;
 
 /* Text entry page. */
 static lv_obj_t *s_text_title, *s_text_ta;
@@ -164,7 +180,12 @@ static void on_gesture(lv_event_t *e)
     if (pressed && lv_obj_check_type(pressed, &lv_slider_class)) {
         return;
     }
-    if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+    /* Either direction gets you out of a sub-page: RIGHT is "back", and LEFT is what people
+     * try first when a page has no visible exit -- there is no page to the left of a sub-page,
+     * so nothing is stolen. On the menu itself LEFT must stay free: it is the tileview swipe
+     * to the face. */
+    lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
+    if (d == LV_DIR_RIGHT || (d == LV_DIR_LEFT && s_current != s_home)) {
         lv_indev_wait_release(lv_indev_active());
         go_back();
     }
@@ -253,7 +274,11 @@ static lv_obj_t *card(lv_obj_t *list, bool clickable)
     return c;
 }
 
-/* Tappable row: icon, text, right-aligned value. */
+/* Tappable row: icon, text, right-aligned value. The TAP is SHORT_CLICKED, not CLICKED:
+ * CLICKED also fires on a long press's release, so a row that carries a long-press action
+ * (a saved Wi-Fi network: hold = forget) would run its tap handler right after the hold
+ * -- and after a forget the list has been rebuilt, so the stale index could act on a
+ * different row. SHORT_CLICKED is skipped once a long press has fired (lv_indev.c). */
 static lv_obj_t *row(lv_obj_t *list, const char *icon, const char *text, lv_obj_t **value_out,
                      lv_event_cb_t cb, void *user)
 {
@@ -270,7 +295,7 @@ static lv_obj_t *row(lv_obj_t *list, const char *icon, const char *text, lv_obj_
         lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
         *value_out = v;
     }
-    lv_obj_add_event_cb(c, cb, LV_EVENT_CLICKED, user);
+    lv_obj_add_event_cb(c, cb, LV_EVENT_SHORT_CLICKED, user);
     return c;
 }
 
@@ -365,7 +390,7 @@ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
 
 static void drop(lv_obj_t *p)
 {
-    lv_obj_t **const pages[] = { &s_agents, &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_usage, &s_power, &s_text };
+    lv_obj_t **const pages[] = { &s_agents, &s_wifi, &s_hatch, &s_ble, &s_sound, &s_sleep, &s_battery, &s_usage, &s_power, &s_text, &s_notif };
     for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
         if (*pages[i] == p) {
             *pages[i] = NULL;
@@ -1433,6 +1458,167 @@ static void tick_agents(void)
     }
 }
 
+/* ---------- Notifications ---------- */
+
+/* The value column: "in 2h" for an un-fired reminder, "3m ago" for the rest. */
+static void notif_when(long ts, char *out, size_t cap)
+{
+    long now = (long)time(NULL);
+    if (now < 1700000000 || ts <= 0) {
+        out[0] = 0;   /* no clock yet: a wall-clock column would lie */
+        return;
+    }
+    long d = ts > now ? ts - now : now - ts;
+    char n[16];
+    if (d < 60) {
+        snprintf(n, sizeof(n), "%lds", d);
+    } else if (d < 5400) {
+        snprintf(n, sizeof(n), "%ldm", d / 60);
+    } else if (d < 86400 + 43200) {
+        snprintf(n, sizeof(n), "%ldh", d / 3600);
+    } else {
+        snprintf(n, sizeof(n), "%ldd", d / 86400);
+    }
+    snprintf(out, cap, ts > now ? "in %s" : "%s ago", n);
+}
+
+/* A notification line: bell, "<LABEL>  <message>", right-aligned when. row() does not hand
+ * back its text label, and an unread line is tinted, so this is its own small builder. The
+ * card GROWS with the wrapped message (a fixed ROW_H clipped a 3-line nudge against its own
+ * bottom edge) but never shrinks below the shared row height. Note the TAP is registered on
+ * SHORT_CLICKED, not CLICKED: CLICKED fires on a long press's release too, so "hold to remove"
+ * would also have opened the row (muse_ui.c documents the same trap for the face). */
+static lv_obj_t *notif_row(lv_obj_t *list, lv_obj_t **text_out, lv_obj_t **value_out)
+{
+    lv_obj_t *c = card(list, true);
+    lv_obj_set_height(c, LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(c, ROW_H, 0);
+    lv_obj_set_style_pad_ver(c, 10, 0);
+    label(c, &lv_font_montserrat_16, COLOR_ACCENT, LV_SYMBOL_BELL);
+    lv_obj_t *t = label(c, &lv_font_montserrat_16, COLOR_TEXT, "");
+    lv_obj_set_flex_grow(t, 1);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_DIM, "");
+    lv_obj_set_style_max_width(v, 110, 0);
+    lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+    *text_out = t;
+    *value_out = v;
+    return c;
+}
+
+/* Tap: switch to the agent that raised it (same meaning as tapping a live nudge). It is NOT
+ * acked: read means "has been shown unprompted", so an un-fired reminder must still fire. If
+ * the agent is not routable, fall back to its slot: `agent` for ALT is only applied when set. */
+static void on_notif_open(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i < 0 || i >= s_notif_n) {
+        return;
+    }
+    const muse_notif_row_t *r = &s_notif_rows[i];
+    if (r->is_default) {
+        muse_settings_set_agent(MUSE_AGENT_HERMES);
+    } else {
+        /* The profile may have been removed since the nudge was raised: set_agent would then
+         * fall to Muse (a different agent entirely). Land on the Hermes slot instead. */
+        muse_settings_set_agent_profile(r->agent);
+        char alt[MUSE_AGENT_PROFILE_MAX + 1];
+        muse_settings_agent_alt(alt);
+        muse_settings_set_agent(alt[0] ? MUSE_AGENT_HERMES_ALT : MUSE_AGENT_HERMES);
+    }
+    muse_state_set_caption("OPENED %s", r->label[0] ? r->label : r->agent);
+    muse_state_poke();
+}
+
+/* Hold: remove it on the relay -- cancelling an un-fired reminder, or clearing a line. The
+ * row disappears when the confirming refresh lands (a second or two). */
+static void on_notif_hold(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i < 0 || i >= s_notif_n) {
+        return;
+    }
+    const muse_notif_row_t *r = &s_notif_rows[i];
+    muse_hatch_notif_cancel(r->id);
+    muse_state_set_caption("REMOVING %s...", r->label[0] ? r->label : r->agent);
+    muse_state_poke();
+}
+
+static void build_notif_page(lv_obj_t *tile)
+{
+    lv_obj_t *list;
+    s_notif = page(tile, "NOTIFICATIONS", true, &list);
+    s_notif_status = note(list, "");
+    s_notif_list = column(list);
+    s_notif_shown_gen = UINT32_MAX;   /* first tick fills it */
+    note(list, "Tap a line to talk to that agent. Hold it to remove it. Reminders stay here "
+               "until they fire or you remove them.");
+}
+
+static void tick_notif(void)
+{
+    /* The refresh rate is bounded in the session task; asking on this tick keeps the page
+     * live, and asking is free when a fetch is already queued. */
+#ifndef CONFIG_MUSE_HATCH
+    set_text(s_notif_status, "Not available on this board");   /* no session, no inbox */
+    return;
+#else
+    muse_notif_hist_t st = muse_hatch_notif_hist_state();
+    if (!CONFIG_MUSE_HERMES_URL[0]) {
+        set_text(s_notif_status, "Hermes link not set up");
+    } else if (!muse_settings_agent_hermes()) {
+        set_text(s_notif_status, "Switch to a Hermes agent to see these");
+    } else if (st == MUSE_NOTIF_HIST_IDLE || st == MUSE_NOTIF_HIST_WAIT) {
+        set_text(s_notif_status, muse_hatch_notif_hist_count() ? "" : "Checking...");
+    } else if (st == MUSE_NOTIF_HIST_FAIL) {
+        set_text(s_notif_status, "Can't reach the relay");
+    } else if (muse_hatch_notif_hist_count() == 0) {
+        set_text(s_notif_status, "Nothing yet");
+    } else {
+        set_text(s_notif_status, "");
+    }
+    /* An empty note is a dead line of padding under the title: hide it, don't blank it. */
+    if (s_notif_status) {
+        lv_obj_set_flag(s_notif_status, LV_OBJ_FLAG_HIDDEN, lv_label_get_text(s_notif_status)[0] == 0);
+    }
+    if (CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes() && st != MUSE_NOTIF_HIST_WAIT) {
+        static int64_t s_ask_us;
+        int64_t gap = st == MUSE_NOTIF_HIST_FAIL ? 6000000 : 1200000;   /* slow down when down */
+        if (esp_timer_get_time() - s_ask_us > gap) {
+            s_ask_us = esp_timer_get_time();
+            muse_hatch_notif_refresh();
+        }
+    }
+    uint32_t gen = muse_hatch_notif_hist_gen();
+    if (gen == s_notif_shown_gen) {
+        return;
+    }
+    s_notif_shown_gen = gen;
+    s_notif_n = 0;
+    lv_obj_clean(s_notif_list);
+    for (int i = 0; i < NOTIF_ROWS_MAX; i++) {
+        muse_notif_row_t r;
+        if (!muse_hatch_notif_hist(i, &r)) {
+            break;
+        }
+        s_notif_rows[s_notif_n++] = r;
+        lv_obj_t *t, *v;
+        lv_obj_t *c = notif_row(s_notif_list, &t, &v);
+        char text[200];
+        snprintf(text, sizeof(text), "%s  %s", r.label[0] ? r.label : r.agent, r.text);
+        set_text(t, text);
+        lv_obj_set_style_text_color(t, lv_color_hex(r.read ? COLOR_TEXT : COLOR_ACCENT), 0);
+        char when[24];
+        long now = (long)time(NULL);
+        notif_when(r.due > 0 && r.due > now ? r.due : r.ts, when, sizeof(when));
+        set_text(v, when);
+        lv_obj_set_style_text_color(v, lv_color_hex(r.due > 0 && r.due > now ? COLOR_WARN : COLOR_DIM), 0);
+        lv_obj_add_event_cb(c, on_notif_open, LV_EVENT_SHORT_CLICKED, (void *)(intptr_t)(s_notif_n - 1));
+        lv_obj_add_event_cb(c, on_notif_hold, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)(s_notif_n - 1));
+    }
+#endif   /* CONFIG_MUSE_HATCH */
+}
+
 static const page_t WIFI = { &s_wifi, build_wifi_page };
 static const page_t HATCH = { &s_hatch, build_hatch_page };
 static const page_t BLE = { &s_ble, build_ble_page };
@@ -1442,13 +1628,50 @@ static const page_t BATTERY = { &s_battery, build_battery_page };
 static const page_t USAGE = { &s_usage, build_usage_page };
 static const page_t POWER = { &s_power, build_power_page };
 static const page_t AGENTS = { &s_agents, build_agents_page };
+static const page_t NOTIF = { &s_notif, build_notif_page };
+
+/* Bench (serial task): open the notifications page directly -- the lock is the caller's
+ * (muse_ui_show_notifications in muse_ui.c). s_hold_page tells the next visibility tick not
+ * to reset to the menu: the bench deliberately jumps straight to a sub-page. */
+void muse_settings_ui_show_notifications(void)
+{
+    if (!s_tile) {
+        return;
+    }
+    if (!s_notif) {
+        build_notif_page(s_tile);
+    }
+    s_hold_page = true;
+    show(s_notif);
+    muse_settings_ui_tick(true);
+}
+
+/* Back to the menu from any sub-page (see the header). Scrolls the list HOME too: a menu
+ * that keeps an old scroll position (you left it showing "Power off") also reads as
+ * "the settings are gone" when you come back. */
+void muse_settings_ui_show_home(void)
+{
+    if (!s_tile) {
+        return;
+    }
+    if (s_current == s_text) {
+        close_text();   /* leave the text page to the page that opened it, as go_back does */
+    }
+    show(s_home);
+    if (s_home_list) {
+        lv_obj_scroll_to_y(s_home_list, 0, LV_ANIM_OFF);
+    }
+    muse_settings_ui_tick(true);
+}
 
 static void build_home(lv_obj_t *tile)
 {
     lv_obj_t *list;
     s_home = page(tile, "SETTINGS", false, &list);
+    s_home_list = list;
     if (CONFIG_MUSE_HERMES_URL[0]) {
         row(list, LV_SYMBOL_SHUFFLE, "Agents", &s_home_agent, on_nav, (void *)&AGENTS);
+        row(list, LV_SYMBOL_BELL, "Notifications", &s_home_notif, on_nav, (void *)&NOTIF);
     }
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
     row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
@@ -1473,6 +1696,35 @@ static void tick_home(void)
     muse_wifi_status(&w);
     static const char *const WIFI_VALUES[] = { "Off", "Not set", "Joining", "", "Failed", "Not nearby" };
     set_text(s_home_wifi, w.state == MUSE_WIFI_CONNECTED ? w.ssid : WIFI_VALUES[w.state]);
+
+    if (s_home_notif) {
+        /* Still-coming count: unread (never presented) or an un-fired reminder. Recounted only
+         * when the snapshot changes: the rows are a few hundred bytes each and the tick is hot. */
+        static uint32_t shown_gen;
+        static int att;
+        if (muse_hatch_notif_hist_gen() != shown_gen) {
+            shown_gen = muse_hatch_notif_hist_gen();
+            long now = (long)time(NULL);
+            att = 0;
+            for (int i = 0; i < NOTIF_ROWS_MAX; i++) {
+                muse_notif_row_t r;
+                if (!muse_hatch_notif_hist(i, &r)) {
+                    break;
+                }
+                if (!r.read || (r.due > 0 && r.due > now)) {
+                    att++;
+                }
+            }
+        }
+        set_val(s_home_notif, att ? "%d" : "", att);
+        /* Keep the count fresh while the menu is open (the session task spaces the actual
+         * fetches to one per couple of seconds). */
+        static int64_t s_ask_us;
+        if (esp_timer_get_time() - s_ask_us > 4000000) {
+            s_ask_us = esp_timer_get_time();
+            muse_hatch_notif_refresh();
+        }
+    }
 
     if (s_home_agent) {
         char alt[MUSE_AGENT_PROFILE_MAX + 1];
@@ -1545,12 +1797,23 @@ void muse_settings_ui_tick(bool visible)
     static bool was_visible;
     if (visible != was_visible) {
         was_visible = visible;
+        if (visible && !s_hold_page && s_current != s_home) {
+            /* ARRIVING at Settings shows the menu. A sub-page that was left open stayed
+             * CURRENT (show() only hid it), so swiping back to Settings re-showed it and the
+             * menu rows read as "all the settings are gone". Reset the scroll too: a menu
+             * left showing its last rows reads the same way. */
+            show(s_home);
+        }
+        if (visible && s_current == s_home && s_home_list) {
+            lv_obj_scroll_to_y(s_home_list, 0, LV_ANIM_OFF);
+        }
         /* Only listen to the mic while the Sound page is actually on screen. */
         muse_voice_set_monitor(visible && s_current == s_sound);
     }
     if (!visible) {
         return;
     }
+    s_hold_page = false;   /* one-shot: >notifs may show a sub-page through the NEXT tick only */
     if (s_current == s_home) {
         tick_home();
     } else if (s_current == s_wifi) {
@@ -1569,6 +1832,8 @@ void muse_settings_ui_tick(bool visible)
         tick_usage();
     } else if (s_current == s_agents) {
         tick_agents();
+    } else if (s_current == s_notif) {
+        tick_notif();
     }
 }
 

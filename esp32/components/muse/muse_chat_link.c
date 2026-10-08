@@ -930,3 +930,37 @@ size_t muse_hatch_mp3_selftest(int16_t **pcm)
     *pcm = NULL;
     return 0;
 }
+
+/* ---- Notification inbox: not offered without PSRAM (this build has no session to fetch
+ * through and no room for the rows). The settings page shows the "not set up" note. ---- */
+
+muse_notif_hist_t muse_hatch_notif_hist_state(void)
+{
+    return MUSE_NOTIF_HIST_FAIL;
+}
+
+uint32_t muse_hatch_notif_hist_gen(void)
+{
+    return 0;
+}
+
+int muse_hatch_notif_hist_count(void)
+{
+    return 0;
+}
+
+bool muse_hatch_notif_hist(int i, muse_notif_row_t *out)
+{
+    (void)i;
+    (void)out;
+    return false;
+}
+
+void muse_hatch_notif_refresh(void)
+{
+}
+
+void muse_hatch_notif_cancel(const char *id)
+{
+    (void)id;
+}
