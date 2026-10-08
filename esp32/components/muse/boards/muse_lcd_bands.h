@@ -56,3 +56,11 @@ lv_display_t *muse_lcd_bands_register(esp_lv_adapter_display_config_t cfg, int l
  * this, whichever core it's called from.
  */
 void muse_lcd_bands_run(void (*fn)(void *arg), void *arg);
+
+/*
+ * Fault injection for the lost-done recovery (see muse_lcd_bands.c): the next
+ * `completions` panel done signals are dropped on purpose. Bench: ">lcd.swallow"
+ * (muse_input.c). Never compiled out -- it is five instructions and the only
+ * way to exercise the recovery without hardware that actually loses one.
+ */
+void muse_lcd_bands_swallow(int completions);

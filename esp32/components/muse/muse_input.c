@@ -48,6 +48,12 @@
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
 #endif
+#if CONFIG_MUSE_BOARD_WAVESHARE_S3_175C || CONFIG_MUSE_BOARD_WAVESHARE_S3_175 || \
+    CONFIG_MUSE_BOARD_WAVESHARE_S3_143C || CONFIG_MUSE_BOARD_SENSECAP_WATCHER || \
+    CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+#define MUSE_HAS_LCD_BANDS 1
+#include "boards/muse_lcd_bands.h"   /* >lcd.swallow fault injection */
+#endif
 
 /* Bench hook: "draw=URL" draws an image the way Muse's display.draw_url command does
  * (main/image_fetch.c; the layout below mirrors image_fetch_result_t). */
@@ -877,6 +883,18 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+#ifdef MUSE_HAS_LCD_BANDS
+    if (!strncmp(line, "lcd.swallow", 11)) {
+        /* Fault injection: drop the next N panel completions on purpose, so the
+         * lost-completion recovery (muse_lcd_bands.c) can be proved on the bench:
+         * the screen must carry on and log "panel completion lost", never freeze. */
+        int n = line[11] == '=' ? atoi(line + 12) : 1;
+        muse_lcd_bands_swallow(n);
+        printf("@lcd.swallow %d\n", n);
+        fflush(stdout);
+        return true;
+    }
+#endif
     if (!strncmp(line, "notif=", 6)) {
         /* Bench: present a notification line as if the relay sent it (text only; use /notifications
          * for the real path with an agent). Opens nothing -- there is no relay id behind it. */
