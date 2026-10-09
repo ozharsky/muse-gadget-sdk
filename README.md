@@ -14,6 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
+> **🔒 Private fork — branch `hermes-local`.** This is a personal fork of
+> `facebookincubator/muse-gadget-sdk` and the default branch is **`hermes-local`**,
+> where all custom work lives (86 commits ahead of the fork point; 70 beyond
+> current upstream `main`). Read
+> **[HERMES-FORK.md](HERMES-FORK.md)** for the full rundown: three-agent
+> companion (Muse / Hermes / named ALT profile), reverse notification channel
+> with an on-device inbox and voice timers, display-freeze guards with NVS black
+> box diagnostics, Wi-Fi switching, power/restart paths for a board with no reset
+> key, and the host-test + bench-command infrastructure. Upstream `main` is kept
+> untouched as a rebase base.
+
 # Muse Gadgets
 
 <p align="center">
