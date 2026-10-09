@@ -186,8 +186,39 @@ static void round_area(lv_event_t *e)
  * transactions: 2 bytes from 0x02 (gesture + count), then 4 bytes from 0x03
  * (x/y) only when a touch is down. Mirrors both axes for the 180-degree
  * panel rotation. */
+/* Bench: injected touch. While `s_bench_touch_on`, the indev reports these coordinates
+ * instead of reading the panel, so `>touch=x,y` can drive a tap. Armed by a press; turned
+ * back off a few reads after the release is delivered, so real touches resume. */
+static volatile int s_bench_touch_x = -1, s_bench_touch_y = -1;
+static volatile bool s_bench_touch_pressed, s_bench_touch_on;
+static int s_bench_release_reads;
+
+static void bench_touch(int x, int y, bool pressed)
+{
+    if (pressed) {
+        s_bench_touch_x = x;
+        s_bench_touch_y = y;
+        s_bench_release_reads = 0;
+    }
+    s_bench_touch_pressed = pressed;
+    s_bench_touch_on = true;
+}
+
 static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
+    if (s_bench_touch_on) {
+        if (s_bench_touch_pressed && s_bench_touch_x >= 0) {
+            data->point.x = s_bench_touch_x;
+            data->point.y = s_bench_touch_y;
+            data->state = LV_INDEV_STATE_PRESSED;
+        } else {
+            data->state = LV_INDEV_STATE_RELEASED;
+            if (++s_bench_release_reads > 4) {
+                s_bench_touch_on = false;   /* the release landed; back to the real panel */
+            }
+        }
+        return;
+    }
     i2c_master_dev_handle_t tp_dev = (i2c_master_dev_handle_t)lv_indev_get_user_data(indev);
     uint8_t hdr[2] = {0, 0};
     uint8_t reg = 0x02;
@@ -655,6 +686,7 @@ static const muse_board_t s_board = {
     .wait_buttons = wait_buttons,
     .read_power = read_power,
     .power_off = power_off,
+    .bench_touch = bench_touch,
 };
 
 /* Home Link's app_main starts Muse with this board (main/main.c). */

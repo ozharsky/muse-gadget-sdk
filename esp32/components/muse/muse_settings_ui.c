@@ -125,7 +125,8 @@ static lv_obj_t *s_agents, *s_agent_labels[AGENT_COUNT], *s_agent_checks[AGENT_C
  * PSRAM: ~3 KB of rows that would otherwise hold internal RAM for good. */
 #define NOTIF_ROWS_MAX 12
 static lv_obj_t *s_home_notif;
-static lv_obj_t *s_notif, *s_notif_list, *s_notif_status;
+static lv_obj_t *s_notif, *s_notif_list, *s_notif_status, *s_notif_clear_lbl;
+static int64_t s_notif_clear_armed_us;   /* a Clear tap arms a 5 s confirm window */
 static uint32_t s_notif_shown_gen = UINT32_MAX;
 static EXT_RAM_BSS_ATTR muse_notif_row_t s_notif_rows[NOTIF_ROWS_MAX];
 static int s_notif_n;
@@ -278,7 +279,12 @@ static lv_obj_t *card(lv_obj_t *list, bool clickable)
  * CLICKED also fires on a long press's release, so a row that carries a long-press action
  * (a saved Wi-Fi network: hold = forget) would run its tap handler right after the hold
  * -- and after a forget the list has been rebuilt, so the stale index could act on a
- * different row. SHORT_CLICKED is skipped once a long press has fired (lv_indev.c). */
+ * different row. SHORT_CLICKED is skipped once a long press has fired (lv_indev.c).
+ *
+ * Both text labels are CLAMPED to one line height. LVGL's DOTS mode (the "…" ellipsis)
+ * only ellipsizes when the label has a FIXED height -- with auto height it silently wraps
+ * instead, so a long value ("Free Internet 2.4") broke onto two lines mid-number and a
+ * long SSID overgrew its row. The clamp makes them ellipsize, which is what DOTS intends. */
 static lv_obj_t *row(lv_obj_t *list, const char *icon, const char *text, lv_obj_t **value_out,
                      lv_event_cb_t cb, void *user)
 {
@@ -289,10 +295,12 @@ static lv_obj_t *row(lv_obj_t *list, const char *icon, const char *text, lv_obj_
     lv_obj_t *t = label(c, &lv_font_montserrat_20, COLOR_TEXT, text);
     lv_obj_set_flex_grow(t, 1);
     lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(t, lv_font_get_line_height(&lv_font_montserrat_20));
     if (value_out) {
         lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_DIM, "");
         lv_obj_set_style_max_width(v, 130, 0);
         lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_height(v, lv_font_get_line_height(&lv_font_montserrat_16));
         *value_out = v;
     }
     lv_obj_add_event_cb(c, cb, LV_EVENT_SHORT_CLICKED, user);
@@ -383,7 +391,13 @@ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
     lv_obj_set_height(c, 44);
     lv_obj_t *t = label(c, &lv_font_montserrat_16, COLOR_TEXT, text);
     lv_obj_set_flex_grow(t, 1);
-    return label(c, &lv_font_montserrat_16, COLOR_ACCENT, "");
+    lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(t, lv_font_get_line_height(&lv_font_montserrat_16));
+    lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_ACCENT, "");
+    lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(v, lv_font_get_line_height(&lv_font_montserrat_16));
+    lv_obj_set_style_max_width(v, 180, 0);
+    return v;
 }
 
 /* ---------- navigation ---------- */
@@ -553,11 +567,14 @@ static void build_text_page(lv_obj_t *tile)
     catch_swipes(s_text);
     lv_obj_t *back = back_button(s_text);
 
-    /* Between the back arrow and its mirror image. */
+    /* Between the back arrow and its mirror image. Height-clamped so a long SSID (this
+     * title takes the network name when asking for a password) ellipsizes on one line
+     * instead of wrapping down over the text field below. */
     s_text_title = label(s_text, &lv_font_montserrat_20, COLOR_ACCENT, "");
     lv_obj_set_width(s_text_title, 150);
     lv_obj_set_style_text_align(s_text_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_text_title, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(s_text_title, lv_font_get_line_height(&lv_font_montserrat_20));
     lv_obj_align(s_text_title, LV_ALIGN_TOP_MID, 0, 40);
 
     const lv_font_t *font = &lv_font_montserrat_20;
@@ -1386,8 +1403,11 @@ static lv_obj_t *agent_row(lv_obj_t *list, const lv_image_dsc_t *icon, lv_obj_t 
     lv_obj_t *t = label(c, &lv_font_montserrat_20, COLOR_TEXT, "");
     lv_obj_set_flex_grow(t, 1);
     lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(t, lv_font_get_line_height(&lv_font_montserrat_20));   /* long profile names ellipsize, never wrap */
     lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_ACCENT, "");
     lv_obj_set_style_max_width(v, 130, 0);
+    lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(v, lv_font_get_line_height(&lv_font_montserrat_16));
     lv_obj_add_event_cb(c, cb, LV_EVENT_CLICKED, user);
     *name_out = t;
     *check_out = v;
@@ -1501,6 +1521,7 @@ static lv_obj_t *notif_row(lv_obj_t *list, lv_obj_t **text_out, lv_obj_t **value
     lv_obj_t *v = label(c, &lv_font_montserrat_16, COLOR_DIM, "");
     lv_obj_set_style_max_width(v, 110, 0);
     lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(v, lv_font_get_line_height(&lv_font_montserrat_16));
     *text_out = t;
     *value_out = v;
     return c;
@@ -1530,8 +1551,8 @@ static void on_notif_open(lv_event_t *e)
     muse_state_poke();
 }
 
-/* Hold: remove it on the relay -- cancelling an un-fired reminder, or clearing a line. The
- * row disappears when the confirming refresh lands (a second or two). */
+/* Hold: remove ONE line on the relay -- cancelling an un-fired reminder, or clearing a past
+ * line. The row disappears when the confirming refresh lands (a second or two). */
 static void on_notif_hold(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -1544,15 +1565,37 @@ static void on_notif_hold(lv_event_t *e)
     muse_state_poke();
 }
 
+/* Clear the whole history in two taps (the same arm-then-confirm as "Reset pairing"): one
+ * tap is too easy to hit by accident, and this is the only destructive bulk action here.
+ * Un-fired reminders survive a clear -- they are commitments, not history. */
+static void on_notif_clear(lv_event_t *e)
+{
+    (void)e;
+    int64_t now = esp_timer_get_time();
+    if (s_notif_clear_armed_us && now - s_notif_clear_armed_us < 5000000) {
+        s_notif_clear_armed_us = 0;
+        set_text(s_notif_clear_lbl, "Clearing...");
+        muse_hatch_notif_clear();
+        return;
+    }
+    s_notif_clear_armed_us = now;
+    set_text(s_notif_clear_lbl, "Tap again to clear");
+}
+
 static void build_notif_page(lv_obj_t *tile)
 {
     lv_obj_t *list;
     s_notif = page(tile, "NOTIFICATIONS", true, &list);
     s_notif_status = note(list, "");
+    /* Clear sits high where it is found, like every notification center: status line, then
+     * Clear, then the rows. Two-tap confirm guards it (see on_notif_clear). */
+    s_notif_clear_armed_us = 0;
+    button(list, LV_SYMBOL_TRASH "  Clear", COLOR_DANGER, on_notif_clear, &s_notif_clear_lbl);
     s_notif_list = column(list);
     s_notif_shown_gen = UINT32_MAX;   /* first tick fills it */
-    note(list, "Tap a line to talk to that agent. Hold it to remove it. Reminders stay here "
-               "until they fire or you remove them.");
+    note(list, "Tap a line to talk to that agent; hold it to remove it. Clear empties the "
+               "list but keeps reminders that have not gone off yet. Timers you set arrive "
+               "here, as do print results and finished tasks.");
 }
 
 static void tick_notif(void)
@@ -1564,15 +1607,16 @@ static void tick_notif(void)
     return;
 #else
     muse_notif_hist_t st = muse_hatch_notif_hist_state();
+    int count = muse_hatch_notif_hist_count();
     if (!CONFIG_MUSE_HERMES_URL[0]) {
         set_text(s_notif_status, "Hermes link not set up");
     } else if (!muse_settings_agent_hermes()) {
         set_text(s_notif_status, "Switch to a Hermes agent to see these");
     } else if (st == MUSE_NOTIF_HIST_IDLE || st == MUSE_NOTIF_HIST_WAIT) {
-        set_text(s_notif_status, muse_hatch_notif_hist_count() ? "" : "Checking...");
+        set_text(s_notif_status, count ? "" : "Checking...");
     } else if (st == MUSE_NOTIF_HIST_FAIL) {
         set_text(s_notif_status, "Can't reach the relay");
-    } else if (muse_hatch_notif_hist_count() == 0) {
+    } else if (count == 0) {
         set_text(s_notif_status, "Nothing yet");
     } else {
         set_text(s_notif_status, "");
@@ -1580,6 +1624,17 @@ static void tick_notif(void)
     /* An empty note is a dead line of padding under the title: hide it, don't blank it. */
     if (s_notif_status) {
         lv_obj_set_flag(s_notif_status, LV_OBJ_FLAG_HIDDEN, lv_label_get_text(s_notif_status)[0] == 0);
+    }
+    /* The arm window is one-shot: after 5 s it lapses and the button re-arms on the next
+     * tap. Without this the label would stay "Tap again to clear" forever after a tap that
+     * was never confirmed, and you could not tell the button was idle again. */
+    if (s_notif_clear_armed_us && esp_timer_get_time() - s_notif_clear_armed_us >= 5000000) {
+        s_notif_clear_armed_us = 0;
+    }
+    /* The label follows the state: armed while the confirm window is open, back to normal
+     * once the window lapses or a fetch confirms what the clear left behind. */
+    if (s_notif_clear_lbl && !s_notif_clear_armed_us && st == MUSE_NOTIF_HIST_OK) {
+        set_text(s_notif_clear_lbl, LV_SYMBOL_TRASH "  Clear");
     }
     if (CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes() && st != MUSE_NOTIF_HIST_WAIT) {
         static int64_t s_ask_us;

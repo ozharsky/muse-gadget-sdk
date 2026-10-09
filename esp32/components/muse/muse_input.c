@@ -992,6 +992,52 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
+    if (!strcmp(line, "notif.clear")) {
+        /* Bench: wipe the inbox history (un-fired reminders survive, by design). */
+        muse_hatch_notif_clear();
+        printf("@notif.clear queued\n");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "touch=", 6)) {
+        /* Bench: drive a real tap at x,y: ">touch=x,y" = press+release at that point (a tap),
+         * "hold" or "h" after a second comma holds it: ">touch=120,300,hold" presses without
+         * releasing ("u" then releases, or the next touch= press does). This goes through the
+         * board's touch path into LVGL, so it exercises the same events a finger does. */
+        int x = atoi(line + 6);
+        char *comma = strchr(line + 6, ',');
+        int y = comma ? atoi(comma + 1) : 0;
+        bool hold = comma && strstr(comma + 1, ",hold");
+        if (!comma) {
+            printf("@touch.error need x,y\n");
+            fflush(stdout);
+            return true;
+        }
+        if (!muse_board->bench_touch) {
+            printf("@touch.error board has no injector\n");
+            fflush(stdout);
+            return true;
+        }
+        muse_board->bench_touch(x, y, true);
+        if (hold) {
+            printf("@touch %d,%d press (held)\n", x, y);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(180));
+            muse_board->bench_touch(x, y, false);
+            printf("@touch %d,%d tap\n", x, y);
+        }
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "u")) {
+        /* Bench: release a held injected touch (pairs with ">touch=x,y,hold"). */
+        if (muse_board->bench_touch) {
+            muse_board->bench_touch(0, 0, false);
+        }
+        printf("@touch release\n");
+        fflush(stdout);
+        return true;
+    }
     if (!strncmp(line, "notif.cancel=", 13)) {
         /* Bench: remove one history row on the relay by id (the hold gesture without a
          * finger). The id comes from a `>notifs` dump; `>notifs` a beat later shows it gone. */

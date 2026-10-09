@@ -97,6 +97,11 @@ typedef struct {
     esp_err_t (*read_power)(muse_power_t *out);
     /* Turns the board off; returns only on failure. */
     esp_err_t (*power_off)(void);
+    /* Bench: inject a touch so UI interactions can be driven over serial
+     * (`>touch=x,y`). While pressed, the indev reports these coordinates instead
+     * of the panel's; the release is delivered, then normal reading resumes.
+     * NULL on boards without it. */
+    void (*bench_touch)(int x, int y, bool pressed);
 } muse_board_t;
 
 /* The running board, set by muse_app_run(). */

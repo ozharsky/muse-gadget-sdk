@@ -964,3 +964,7 @@ void muse_hatch_notif_cancel(const char *id)
 {
     (void)id;
 }
+
+void muse_hatch_notif_clear(void)
+{
+}

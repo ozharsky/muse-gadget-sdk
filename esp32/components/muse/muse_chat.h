@@ -192,6 +192,10 @@ bool muse_hatch_notif_hist(int i, muse_notif_row_t *out);
  * line. Non-blocking; the session task performs it when the link is idle. */
 void muse_hatch_notif_cancel(const char *id);
 
+/* Wipe the inbox history on the relay. Un-fired reminders are KEPT (clearing must not
+ * silently cancel a reminder). Non-blocking; the session task performs it. */
+void muse_hatch_notif_clear(void);
+
 /*
  * Prints one "@chat" line per call (more if `text` is long): the type, then the
  * printf-style `fields` (JSON members, or NULL), then `text` escaped (or none).

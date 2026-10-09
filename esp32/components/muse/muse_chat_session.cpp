@@ -3536,6 +3536,7 @@ static volatile int s_hist_state;      /* muse_notif_hist_t, kept as int for the
 static volatile bool s_hist_want;      /* a fetch is queued (UI asks, session serves) */
 static char s_hist_cancel[40];         /* id to delete on the relay (session task only) */
 static volatile bool s_hist_cancel_want;
+static volatile bool s_hist_clear_want;   /* wipe history (keep un-fired reminders) */
 static int64_t s_hist_next_us;         /* spacing between inbox network operations */
 
 extern "C" void muse_ui_agent_switch(bool hermes);   /* muse_ui.h has no C++ guards */
@@ -3779,6 +3780,34 @@ static void notif_hist_cancel(const char *id)
     }
 }
 
+/* POST /notifications/clear: wipe the history, but the RELAY keeps un-fired reminders (a
+ * clear must not silently cancel a commitment set minutes ago). Re-fetch after, so the
+ * page shows what survived. Session task only. */
+static void notif_hist_clear(void)
+{
+    char url[176];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/notifications/clear", task_relay_url(&remote));
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 4000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    bool ok = false;
+    if (h) {
+        esp_http_client_set_header(h, "Content-Type", "application/json");
+        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_post_field(h, "{}", 2);
+        ok = esp_http_client_perform(h) == ESP_OK && esp_http_client_get_status_code(h) == 200;
+        esp_http_client_cleanup(h);
+    }
+    ESP_LOGI(TAG, "notif: clear %s", ok ? "ok" : "failed");
+    s_hist_want = true;   /* show the result either way */
+}
+
 /* The inbox's idle work: one fetch or cancel at a time, never during a turn. Session task. */
 static void notif_hist_tick(void)
 {
@@ -3786,6 +3815,12 @@ static void notif_hist_tick(void)
         return;
     }
     if (s_turn.phase != P_IDLE || s_resting.load() || now_us() < s_hist_next_us) {
+        return;
+    }
+    if (s_hist_clear_want) {
+        s_hist_clear_want = false;
+        notif_hist_clear();
+        s_hist_next_us = now_us() + 2 * 1000000LL;
         return;
     }
     if (s_hist_cancel_want) {
@@ -3849,6 +3884,11 @@ extern "C" void muse_hatch_notif_cancel(const char *id)
     }
     strlcpy(s_hist_cancel, id, sizeof(s_hist_cancel));
     s_hist_cancel_want = true;
+}
+
+extern "C" void muse_hatch_notif_clear(void)
+{
+    s_hist_clear_want = true;
 }
 
 /* Show one nudge on the glass: look up, its mood, a chirp, and the line with a tap hint. */
