@@ -113,6 +113,10 @@ static hermes_stream_t s_hstream;
 #define MP3_POLL_ROOM (SCRATCH + 8192)     /* stop reading the socket below this much MP3 room */
 #define IN_BYTES (MIC_RATE * 2 * 8)        /* 8 s of mic backlog while connecting */
 #define OUT_BYTES (MIC_RATE * 2 * 2)       /* 2 s of decoded reply */
+/* Chunked Muse TTS: a piece this long keeps its own fetch (1.3 s fixed + ~8 ms/char)
+ * shorter than the piece before it plays, so speech never waits on a later piece. */
+#define TTS_CHUNK_MIN 40
+#define TTS_CHUNK_MAX 90
 #define EV_TEXT 72
 #define TEXT_MAX 1024                      /* a message's text, for captions timed to its speech */
 #define SPEECH_CHARS_PER_S 14              /* until the speech's length is known */
@@ -216,6 +220,7 @@ struct msg_t {
     char tail[128];          /* its last characters, for the caption */
     bool done;
     tts_t tts;
+    bool store_want;         /* done: the reading view's add runs in start_tts */
     uint32_t pcm_start;      /* where its speech starts in the reply audio */
     uint32_t pcm_frames;     /* how long it is; 0 until the MP3 has all arrived */
 };
@@ -256,6 +261,8 @@ struct turn_t {
     uint8_t *mp3;            /* MP3_BUF */
     size_t mp3_len;
     bool mp3_ended;
+    size_t tts_off;          /* Muse: characters of the speaking message already fetched */
+    bool tts_more;           /* Muse chunked fetch: another piece is still to come */
     mp3dec_t dec;
     resampler_t down;
     int kbps;
@@ -1050,6 +1057,7 @@ static void turn_finish(void)
     s_turn.tts_msg = -1;
     s_turn.silent = false;
     s_turn.mp3_len = 0;
+    s_turn.tts_more = false;
 }
 
 static void turn_fail(const char *why)
@@ -1493,6 +1501,9 @@ static void message_done(int i, const char *final_text)
     if (!m.len && final_text && final_text[0]) {
         append_text(m, final_text);
     }
+    if (m.len && s_turn.texts && !s_turn.text) {
+        m.store_want = true;   /* the reading view's add runs in start_tts, same task */
+    }
     if (m.len && m.tts == TTS_NONE) {
         m.tts = TTS_QUEUED;
     }
@@ -1569,6 +1580,11 @@ static void on_event(cJSON *line)
             mark(M_TEXT);
             append_text(m, text);
             show_reply_start(m);   /* ignored once the speech starts */
+            /* Enough text for a first piece: queue it now so the speech fetch runs
+             * while the rest of the message is still streaming in. */
+            if (m.tts == TTS_NONE && m.len >= TTS_CHUNK_MIN) {
+                m.tts = TTS_QUEUED;
+            }
         }
     } else if (done || full) {
         const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(payload, "display_text"));
@@ -1693,7 +1709,7 @@ static size_t b64_decode_inplace(char *s, size_t n)
 }
 
 /* Fetches speech for text and queues its MP3 for decode(). False leaves nothing queued. */
-static bool fetch_tts(const char *text)
+static bool fetch_tts(const char *text, bool last = true, bool first = true)
 {
     const size_t CAP = 900 * 1024;
     char *body = static_cast<char *>(psram_alloc(TEXT_MAX * 2 + 256));
@@ -1770,10 +1786,12 @@ static bool fetch_tts(const char *text)
             goto out;
         }
         size_t mp3 = b64_decode_inplace(a + 1, (size_t)(end - (a + 1)));
-        s_turn.mp3_len = 0;
+        if (first) {
+            s_turn.mp3_len = 0;   /* a fresh message: drop the previous message's tail */
+        }
         s_turn.mp3_ended = false;
         tts_data(reinterpret_cast<uint8_t *>(a + 1), mp3);
-        s_turn.mp3_ended = true;
+        s_turn.mp3_ended = last;   /* chunked replies: only the LAST piece ends the message */
         muse_settings_tts_add(billed);   /* what Google counts against the free allowance */
         ESP_LOGI(TAG, "tts: %u chars -> %u bytes MP3 in %lld ms", (unsigned)strlen(text), (unsigned)mp3, (long long)((now_us() - t0) / 1000));
         ok = true;
@@ -1812,9 +1830,97 @@ static void last_reply_add(int msg_index, const char *text)
     strlcat(store, text, LAST_REPLY_MAX);
 }
 
+/* Next slice of a message's text for one TTS fetch: prefers a sentence end, never
+ * shorter than TTS_CHUNK_MIN (a piece only pays off if it out-plays its own fetch),
+ * never longer than TTS_CHUNK_MAX, falling back to the last space in the window.
+ * Mid-stream (`done` false) only a word boundary counts -- a message's tail is
+ * fetched once it actually ends. 0 = nothing fetchable yet. */
+static size_t tts_chunk_len(const char *t, size_t from, size_t len, bool done)
+{
+    size_t last_space = 0;
+    for (size_t k = from; k < len; k++) {
+        char c = t[k];
+        if ((c == '.' || c == '!' || c == '?') && k + 1 - from >= TTS_CHUNK_MIN) {
+            return k + 1 - from;
+        }
+        if (c == ' ' || c == '\n' || c == '\t') {
+            last_space = k + 1;
+        }
+        if (k + 1 - from >= TTS_CHUNK_MAX) {
+            if (last_space - from >= TTS_CHUNK_MIN) {
+                return last_space - from;
+            }
+            return done ? TTS_CHUNK_MAX : 0;
+        }
+    }
+    if (done) {
+        return len > from ? len - from : 0;
+    }
+    return last_space - from >= TTS_CHUNK_MIN ? last_space - from : 0;
+}
+
+/* fetch_tts on one NUL-free slice of the texts buffer. */
+static bool fetch_tts_range(char *t, size_t from, size_t cl, bool last, bool first)
+{
+    char saved = t[from + cl];
+    t[from + cl] = 0;
+    bool ok = fetch_tts(t + from, last, first);
+    t[from + cl] = saved;
+    return ok;
+}
+
+/* Muse path, every pump pass: while the speaking message still has text to fetch,
+ * pull the next piece once decode() has drained the previous one. The voice task
+ * keeps playing from the 2 s reply buffer during the fetch, so speech is continuous
+ * as long as each piece out-plays its own fetch (that is the chunk sizing above). */
+static void tts_refill(void)
+{
+    if (!s_turn.tts_more || s_turn.silent || !s_turn.texts) {
+        return;
+    }
+    if (s_turn.mp3_len > MP3_HOLD) {
+        return;   /* decode still has frames for the speaker */
+    }
+    int i = s_turn.tts_msg;
+    if (i < 0 || i >= s_turn.nmsgs) {
+        s_turn.tts_more = false;
+        return;
+    }
+    msg_t &m = s_turn.msgs[i];
+    char *t = s_turn.texts + i * TEXT_MAX;
+    size_t tlen = strlen(t);
+    size_t cl = tts_chunk_len(t, s_turn.tts_off, tlen, m.done);
+    if (!cl) {
+        if (m.done) {
+            s_turn.tts_more = false;
+            s_turn.mp3_ended = true;
+        }
+        return;   /* mid-word tail while the text is still growing: wait */
+    }
+    bool last = m.done && s_turn.tts_off + cl >= tlen;
+    if (!fetch_tts_range(t, s_turn.tts_off, cl, last, false)) {
+        ESP_LOGW(TAG, "tts: next piece failed; the speech ends early");
+        s_turn.tts_more = false;
+        s_turn.mp3_ended = true;
+        return;
+    }
+    s_turn.tts_off += cl;
+    s_turn.tts_more = !last;
+}
+
 static void start_tts(void)
 {
+    for (int i = 0; i < s_turn.nmsgs; i++) {
+        msg_t &m = s_turn.msgs[i];
+        if (m.store_want && s_turn.texts) {
+            m.store_want = false;
+            if (!hermes_mode()) {   /* Hermes filled its own store as the reply arrived */
+                last_reply_add(i, s_turn.texts + i * TEXT_MAX);
+            }
+        }
+    }
     if (s_turn.tts_msg >= 0) {
+        tts_refill();
         return;
     }
     for (int i = 0; i < s_turn.nmsgs; i++) {
@@ -1852,17 +1958,27 @@ static void start_tts(void)
             t[cut] = 0;
             m.len = (uint32_t)cut;
         }
-        if (s_turn.texts) {
-            last_reply_add(i, s_turn.texts + i * TEXT_MAX);
+        /* First sentence-sized piece. An early-queued message (text still streaming)
+         * whose text has no fetchable boundary yet stays QUEUED for a later pass. */
+        size_t tlen = s_turn.texts ? strlen(s_turn.texts + i * TEXT_MAX) : 0;
+        bool will_fetch = CONFIG_MUSE_TTS_GOOGLE_KEY[0] && s_turn.texts && muse_settings_speaker_on();
+        size_t cl = will_fetch ? tts_chunk_len(s_turn.texts + i * TEXT_MAX, 0, tlen, m.done) : 0;
+        if (!cl && !m.done) {
+            continue;
         }
         m.pcm_start = s_turn.pcm_out;
         m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
         m.tts = TTS_ACTIVE;
         s_turn.tts_msg = i;
         s_turn.silent = true;
-        if (CONFIG_MUSE_TTS_GOOGLE_KEY[0] && s_turn.texts && muse_settings_speaker_on() &&
-            fetch_tts(s_turn.texts + i * TEXT_MAX)) {
-            /* Speech fetched: decode() plays it, captions following. */
+        s_turn.tts_off = 0;
+        s_turn.tts_more = false;
+        if (will_fetch && cl &&
+            fetch_tts_range(s_turn.texts + i * TEXT_MAX, 0, cl, m.done && cl >= tlen, true)) {
+            /* First piece fetched: decode() starts the speech, tts_refill() fetches
+             * the rest while it plays. */
+            s_turn.tts_off = cl;
+            s_turn.tts_more = !(m.done && cl >= tlen);
             s_turn.silent = false;
             m.pcm_frames = 0;
             s_turn.kbps = 0;
