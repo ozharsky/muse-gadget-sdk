@@ -955,7 +955,7 @@ static bool bench_ui_command(const char *line)
         return true;
     }
     if (!strncmp(line, "relay.lan=", 10)) {
-        /* Bench: set/see the relay's announced LAN address (normally learned from /tasks).
+        /* Bench: set/see the relay's announced LAN address (normally learned from /agents).
          * ">relay.lan=" with nothing after it clears it. */
         muse_settings_set_relay_lan(line + 10);
         char lan[64];
@@ -1138,14 +1138,14 @@ static bool bench_ui_command(const char *line)
         fflush(stdout);
         return true;
     }
-    if (!strncmp(line, "task.auto", 9) && (line[9] == '\0' || line[9] == ' ')) {
+    if (!strncmp(line, "notif.auto", 10) && (line[10] == '\0' || line[10] == ' ')) {
         const char *v = line + 9;
         while (*v == ' ') {
             v++;
         }
         bool on = strcmp(v, "off") != 0;   /* "off" -> false; bare or "on" -> true */
-        muse_hatch_task_auto(on);
-        printf("@task.auto %s\n", on ? "on" : "off");
+        muse_hatch_notif_auto(on);
+        printf("@notif.auto %s\n", on ? "on" : "off");
         fflush(stdout);
         return true;
     }
