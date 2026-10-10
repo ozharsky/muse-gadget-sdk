@@ -119,6 +119,10 @@ static lv_obj_t *s_ring;
 static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
 static lv_obj_t *s_state_lbl;
 static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
+#if LV_USE_SNAPSHOT
+static volatile int s_bench_page = -1;   /* bench: deferred tile switch, applied in the LVGL task */
+static volatile bool s_bench_demo;       /* bench: demo gadget name in screenshots */
+#endif
 static lv_obj_t *s_power_lbl;
 static lv_obj_t *s_caption_lbl;
 static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
@@ -1588,6 +1592,11 @@ static void update_chrome(float now)
     const lv_font_t *name_font = s_small ? &lv_font_unscii_8 : &lv_font_unscii_16;
     int name_cw = lv_font_get_glyph_width(name_font, 'M', ' ');
     const char *shown = paired ? "" : b.name;
+#if LV_USE_SNAPSHOT
+    if (!paired && s_bench_demo) {
+        shown = "MuseGadget-DEMO";   /* bench: privacy-safe name for screenshots */
+    }
+#endif
     if (name_cw > 0 && (int)strlen(shown) * name_cw > s_w) {
         const char *tail = strrchr(shown, '-');
         if (tail && tail[1]) {
@@ -2003,6 +2012,22 @@ static void stall_check(void *arg)
     }
 }
 
+#if LV_USE_SNAPSHOT
+
+/* Bench-only, from any task: select the touch tile without pretending a/s are touch-menu
+ * navigation. The switch lands on the next frame (this task). No effect outside bench builds. */
+void muse_ui_bench_page(bool settings)
+{
+    s_bench_page = settings ? 1 : 0;
+}
+
+/* Bench-only: display-only demo name; never changes BLE identity or provisioning. */
+void muse_ui_bench_demo(bool enabled)
+{
+    s_bench_demo = enabled;
+}
+#endif
+
 static void frame_tick(lv_timer_t *timer)
 {
     s_last_frame_us = esp_timer_get_time();
@@ -2012,6 +2037,19 @@ static void frame_tick(lv_timer_t *timer)
     if (s_swipe_box && !lv_obj_has_flag(s_swipe_box, LV_OBJ_FLAG_HIDDEN) && (int32_t)(lv_tick_get() - s_swipe_until) > 0) {
         lv_obj_add_flag(s_swipe_box, LV_OBJ_FLAG_HIDDEN);
     }
+#if LV_USE_SNAPSHOT
+    if (s_bench_page >= 0) {
+        bool settings = s_bench_page != 0;
+        s_bench_page = -1;
+        if (s_tv) {
+            lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
+            lv_tileview_set_tile(s_tv, settings ? s_settings : s_face, LV_ANIM_OFF);
+            if (settings) {
+                muse_settings_ui_show_home();   /* arrive on the menu, not a stale sub-page */
+            }
+        }
+    }
+#endif
     if (s_snapshot) {
         s_snapshot = false;
         send_snapshot();

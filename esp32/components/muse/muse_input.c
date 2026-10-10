@@ -76,6 +76,10 @@ bool muse_notif_open_pending(void);
 
 /* muse_ui.c: bench hooks (">settings", ">face.tap", ">face.long"). */
 void muse_ui_show_settings(void);
+#if CONFIG_LV_USE_SNAPSHOT
+void muse_ui_bench_page(bool settings);
+void muse_ui_bench_demo(bool enabled);
+#endif
 void muse_ui_show_notifications(void);
 void muse_ui_face_tap(void);
 void muse_ui_face_long(void);
@@ -833,6 +837,20 @@ static bool console_command(char *line, bool whole)
         set_face(line + 5);
         return true;
     }
+#if CONFIG_LV_USE_SNAPSHOT
+    if (!strcmp(line, "ui=settings") || !strcmp(line, "ui=face")) {
+        muse_ui_bench_page(!strcmp(line, "ui=settings"));
+        printf("@ui %s\n", line + 3);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "ui.demo=", 8)) {
+        muse_ui_bench_demo(!strcmp(line + 8, "1"));
+        printf("@ui.demo %s\n", line + 8);
+        fflush(stdout);
+        return true;
+    }
+#endif
     if (bench_ui_command(line)) {
         return true;
     }
