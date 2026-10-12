@@ -33,6 +33,9 @@ TAU = 2.0 * math.pi
 FRAME_MS = 167
 HERE = os.path.dirname(os.path.abspath(__file__))
 AVATAR = os.path.normpath(os.path.join(HERE, "..", "..", "muse-gadget-sdk", "esp32", "components", "muse", "avatar"))
+if not os.path.isdir(AVATAR):
+    # the repo copy (esp32/tools/muse/bake_moods.py) resolves against the SDK root
+    AVATAR = os.path.normpath(os.path.join(HERE, "..", "..", "components", "muse", "avatar"))
 
 # durations match REACTIONS[] in the firmware (seconds); the C side loops each clip over its duration
 DURS = {
