@@ -43,6 +43,7 @@
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_ui.h"
+#include "avatar/muse_pixel_video.h"
 #include "muse_voice.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_WATCHER_CAMERA
@@ -1146,6 +1147,12 @@ static bool bench_ui_command(const char *line)
         bool on = strcmp(v, "off") != 0;   /* "off" -> false; bare or "on" -> true */
         muse_hatch_notif_auto(on);
         printf("@notif.auto %s\n", on ? "on" : "off");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "video=", 6)) {
+        /* Bench: play a compiled-in clip on the avatar ("video=stop" ends it). */
+        printf("@video %s %s\n", line + 6, muse_pixel_video(line + 6) ? "ok" : "unknown");
         fflush(stdout);
         return true;
     }

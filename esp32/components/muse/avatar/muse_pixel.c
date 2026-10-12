@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "muse_pixel.h"
+#include "muse_lip.h"
 #include "sprite_data.h"
 #include "shodan_poses.h"   /* the baked face-pose library (art-pipeline/shodan_poses/) */
 
@@ -32,6 +33,8 @@
 #define W MUSE_PX_W
 #define H MUSE_PX_H
 #define TAU 6.2831853f
+
+static muse_lip_t s_lip;   /* speaking-mouth state (hysteresis + min-hold) */
 
 /* Colours past the sprite's own: the state's glow ramp, its accent, and white. */
 enum { D_G0 = SPR_N, D_G1, D_G2, D_G3, D_ACC, D_WHITE, N_PAL };
@@ -711,6 +714,10 @@ void muse_pixel_render(const muse_pose_t *p)
     update_palette(tgt, dt);
     float flick;
     float close = look_update(p, dt, &flick);
+    if (mode != MUSE_MODE_SPEAKING) {
+        s_lip.state = 0;
+        s_lip.hold = 0;
+    }
     (void)flick;   /* the pose face carries the blinks; the old lens flicker is gone (pack parity) */
 
     /* Per-mode parameters. */
@@ -732,7 +739,7 @@ void muse_pixel_render(const muse_pose_t *p)
         open = 0.95f;
         bright = 1.0f;
         pulse = 0.7f + level * 1.2f;
-        mouth = level * 1.1f + 0.15f * fabsf(sinf(t * 29.0f));
+        mouth = muse_lip(&s_lip, level, dt);   /* 3-state lip-sync: hysteresis + min-hold */
         break;
     case MUSE_MODE_ERROR:
         xeye = (((int)(t * 11.0f)) % 5) != 0;

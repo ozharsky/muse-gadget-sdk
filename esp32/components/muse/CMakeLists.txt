@@ -65,7 +65,7 @@ if(CONFIG_MUSE_ENABLED)
         message(STATUS "Custom avatar: components/muse/avatar/muse_pixel.c")
         # Three avatars are built: SHODAN for Muse, stone and golem for Hermes. muse_pixel_switch.c picks.
         # Retired faces (Bloop, Construct, Keller) are in git history on hermes-local, c14a224.
-        list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_stone.c" "avatar/muse_pixel_golem.c" "avatar/muse_pixel_switch.c")
+        list(APPEND srcs "avatar/muse_pixel.c" "avatar/muse_pixel_stone.c" "avatar/muse_pixel_golem.c" "avatar/muse_pixel_switch.c" "avatar/muse_pixel_video.c")
         # Three faces: shodan (Muse), stock (Hermes default = stone), stock2 (Hermes ALT = golem,
         # built for BEEPBOP). The golem's mood frames (golem_moods.h) ride along via its own include.
         foreach(f "avatar/muse_pixel.c:shodan" "avatar/muse_pixel_stone.c:stock" "avatar/muse_pixel_golem.c:stock2")

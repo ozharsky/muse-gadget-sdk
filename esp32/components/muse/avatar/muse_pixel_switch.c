@@ -3,6 +3,7 @@
 // muse_pixel_* names prefixed (shodan_/stock_/stock2_, see CMakeLists.txt).
 
 #include "muse_pixel.h"
+#include "muse_pixel_video.h"
 
 #include <math.h>
 #include "esp_timer.h"
@@ -91,10 +92,15 @@ uint32_t muse_pixel_accent(muse_mode_t mode)
 void muse_pixel_set_size(int px)
 {
     set_size_all(px);
+    muse_pixel_video_set_size(px);
 }
 
 void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1)
 {
+    if (muse_pixel_video_active()) {
+        muse_pixel_video_scale(dst, stride_px, x0, x1, y0, y1);
+        return;
+    }
     switch (s_show) {
     case 2: stock2_pixel_scale(dst, stride_px, x0, x1, y0, y1); break;
     case 1: stock_pixel_scale(dst, stride_px, x0, x1, y0, y1); break;
@@ -104,6 +110,10 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
 
 void muse_pixel_render(const muse_pose_t *p)
 {
+    if (muse_pixel_video_active()) {
+        muse_pixel_video_render();
+        return;
+    }
     int target = face_for_agent();
     if (!s_show_init) {
         s_show = target;
@@ -144,8 +154,23 @@ void muse_pixel_render(const muse_pose_t *p)
 bool muse_pixel_react(const char *name)
 {
     switch (face_for_agent()) {
-    case 2: return stock2_pixel_react(name);
-    case 1: return stock_pixel_react(name);
-    default: return shodan_pixel_react(name);
+    case 2:
+        if (stock2_pixel_react(name)) {
+            return true;
+        }
+        break;
+    case 1:
+        if (stock_pixel_react(name)) {
+            return true;
+        }
+        break;
+    default:
+        if (shodan_pixel_react(name)) {
+            return true;
+        }
+        break;
     }
+    /* No face draws this mood: the clip table gets the last word (themed reaction clips,
+     * e.g. the Halloween set, play full-face for one loop). */
+    return muse_pixel_video_play(name, 1);
 }
