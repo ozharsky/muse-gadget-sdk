@@ -5,9 +5,6 @@
 #include <stdint.h>
 
 #include "clips/construct.h"
-#include "clips/skeleton.h"
-#include "clips/witch.h"
-#include "clips/zombie.h"
 
 static const struct bench_video_t {
     const char *name;
@@ -19,8 +16,5 @@ static const struct bench_video_t {
     const uint8_t *frames;
 } BENCH_VIDEOS[] = {
     CONSTRUCT_ENTRY,
-    SKELETON_ENTRY,
-    WITCH_ENTRY,
-    ZOMBIE_ENTRY,
 };
 #define BENCH_VIDEO_COUNT ((int)(sizeof(BENCH_VIDEOS) / sizeof(BENCH_VIDEOS[0])))

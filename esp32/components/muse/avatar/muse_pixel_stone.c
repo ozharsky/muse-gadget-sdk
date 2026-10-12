@@ -12,6 +12,7 @@
 
 #include "muse_pixel.h"
 #include "muse_lip.h"
+#include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "stone_moods.h"
 #include "sprite_stone.h"
 
@@ -247,6 +248,12 @@ static void init_eyes(void)
 static struct {
     float last_t, next_gaze, gx, gy, tx, ty, next_blink, blink_t, next_flick, flick_t;
 } s_look = { .next_gaze = 1.0f, .next_blink = 2.5f, .blink_t = -10.0f, .next_flick = 4.0f, .flick_t = -10.0f };
+
+/* The T3.1 rig: eased expression channels. The targets are computed per frame in
+ * muse_pixel_render; these hold what is actually drawn, so a mood or mode change
+ * reads as motion, not a cut. First frame: settled (no fade-in from zero). */
+static muse_rig_t s_rig;
+static bool s_rig_init;
 
 /* Returns how closed the eyes are for a blink (0 open .. 1 shut) and updates the gaze. */
 static float look_update(const muse_pose_t *p, float dt)
@@ -904,6 +911,19 @@ void muse_pixel_render(const muse_pose_t *p)
         eyes_open = clampf(1.0f - p->mode_t / 0.45f, 0, 1);
     }
 
+    /* T3.1 rig: the glow and the mouth presence ease (the reaction poses already ramp
+     * with rk). eyes_open stays raw (boot/off quantize the lid already). */
+    muse_rig_t rt_tgt = { .open = eyes_open, .widen = widen,
+                          .bright = bright, .bloom = bloom,
+                          .mouth = mouth > 0.22f ? 1.0f : 0.0f };
+    if (!s_rig_init) {
+        s_rig = rt_tgt;
+        s_rig_init = true;
+    }
+    muse_rig_step(&s_rig, &rt_tgt, dt);
+    bright = s_rig.bright;
+    bloom = s_rig.bloom;
+
     memcpy(s_fb, SPR, sizeof(s_fb));
     for (int i = 0; i < W * H; i++) {
         if (SPR_KIND[i] == 2) {
@@ -911,8 +931,8 @@ void muse_pixel_render(const muse_pose_t *p)
         }
     }
     animate_light(t, 0.45f + pulse * 0.9f, level);
-    if (bloom > 0) {
-        eye_bloom(bloom, D_G3);
+    if (bloom > 0.02f) {
+        eye_bloom(bloom, D_G3);   /* the rig leaves a residue; below this nothing paints */
     }
     if (xeye) {
         xeyes();
@@ -949,8 +969,8 @@ void muse_pixel_render(const muse_pose_t *p)
             pose(POSE_PLEASED, happy, true);
         }
     }
-    if (mode == MUSE_MODE_SPEAKING && mouth > 0.22f) {
-        pose(mouth > 0.9f ? POSE_MOUTH_2 : POSE_MOUTH_1, 1.0f, true);
+    if (mode == MUSE_MODE_SPEAKING && s_rig.mouth > 0.02f) {
+        pose(mouth > 0.9f ? POSE_MOUTH_2 : POSE_MOUTH_1, s_rig.mouth, true);
     }
     if (!xeye) {
         eye_glow(bright);
@@ -974,7 +994,9 @@ void muse_pixel_render(const muse_pose_t *p)
             for (int g = 0; g < fi; g++) {
                 po += MOOD_FRAME_COUNTS[g];
             }
-            static bool over_eye[64 * 64];
+            /* Lens-coverage bitset (512 B; a 4 KB bool grid before -- internal RAM is
+             * the scarce pool). Prop pixels must never land on the eyes. */
+            static uint8_t over_eye[64 * 64 / 8];
             memset(over_eye, 0, sizeof over_eye);
             int esx = iround(s_look.gx * 2.0f), esy = iround(s_look.gy * 1.0f);
             for (int s2 = 0; s2 < 2; s2++) {
@@ -984,7 +1006,7 @@ void muse_pixel_render(const muse_pose_t *p)
                         for (int ox = -2; ox <= 2; ox++) {
                             int yy = e->y[i2] + esy + oy, xx = e->x[i2] + esx + ox;
                             if (xx >= 0 && xx < 64 && yy >= 0 && yy < 64) {
-                                over_eye[yy * 64 + xx] = true;
+                                over_eye[(yy * 64 + xx) >> 3] |= (uint8_t)(1u << ((yy * 64 + xx) & 7));
                             }
                         }
                     }
@@ -994,7 +1016,11 @@ void muse_pixel_render(const muse_pose_t *p)
                 int idx = MOOD_FRAME_PX[po * 2 + k * 2];
                 uint8_t c = (uint8_t)MOOD_FRAME_PX[po * 2 + k * 2 + 1];
                 int x = idx % 64, y = idx / 64;
-                if (x < 1 || x > 62 || y < 1 || y > 62 || over_eye[y * 64 + x]) {
+                /* The props dissolve in and out with the reaction ramp (rk): a mood
+                 * that pops in full and vanishes mid-frame reads as a cut. */
+                if (x < 1 || x > 62 || y < 1 || y > 62 ||
+                    (over_eye[(y * 64 + x) >> 3] >> ((y * 64 + x) & 7) & 1u) ||
+                    BAYER4[y & 3][x & 3] >= (int)(rk * 16.0f + 0.5f)) {
                     continue;
                 }
                 /* The stone is pale grey, so the gold/dark test would hide most of its props:

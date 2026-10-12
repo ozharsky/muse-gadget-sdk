@@ -12,6 +12,7 @@
 #include "muse_pixel.h"
 #include "sprite_golem.h"
 #include "golem_moods.h"
+#include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 
    /* baked mood-prop frames (all moods) */
 #include "golem_moods.h"   /* pre-baked mood frames (sparse diffs) */
@@ -410,6 +411,13 @@ static struct {
     int sp_tx, sp_ty;   /* the lens sparkle's wander offset */
 } s_look = { .next_gaze = 1.0f, .next_blink = 2.5f, .blink_t = -10.0f, .next_flick = 4.0f, .flick_t = -10.0f };
 
+/* The T3.1 rig: eased expression channels. The targets are computed per frame in
+ * muse_pixel_render; these hold what is actually drawn, so a mood or mode change
+ * reads as motion, not a cut. First frame: settled (no fade-in from zero). */
+static muse_rig_t s_rig;
+static bool s_rig_init;
+static float s_eye_cur[2] = { 1.0f, 1.0f };   /* eased per-eye wink scale (targets in s_eye_scale) */
+
 /* Returns how closed the eyes are (0 open .. 1 shut) and updates the gaze. */
 static float look_update(const muse_pose_t *p, float dt, float *flick)
 {
@@ -462,7 +470,7 @@ static void draw_eyes(float open, float close, float flick, bool xeye, float bri
             }
             continue;
         }
-        float o = open * (1.0f - close) * (1.0f - 0.55f * flick) * s_eye_scale[s];
+        float o = open * (1.0f - close) * (1.0f - 0.55f * flick) * s_eye_cur[s];
         for (int i = 0; i < e->n; i++) {
             px(e->x[i], e->y[i], IDX_SOCKET);          /* wipe the lens back to the visor */
         }
@@ -1164,11 +1172,31 @@ void muse_pixel_render(const muse_pose_t *p)
         open = clampf(1.0f - p->mode_t / 0.45f, 0, 1);
     }
 
+    /* T3.1 rig: from here down the eased channels replace the targets, so an
+     * expression change is motion, not a cut. The glitch's eyelid flicker stays a
+     * deliberate hard cut; the wink scale eases so the lid lands smooth. */
+    muse_rig_t rt_tgt = { .open = open, .widen = widen, .bright = bright, .mouth = mouth, .bloom = bloom };
+    if (!s_rig_init) {
+        s_rig = rt_tgt;
+        s_rig_init = true;
+    }
+    muse_rig_step(&s_rig, &rt_tgt, dt);
+    if (rid != R_GLITCH) {
+        open = s_rig.open;
+    }
+    widen = s_rig.widen;
+    bright = s_rig.bright;
+    mouth = s_rig.mouth;
+    bloom = s_rig.bloom;
+    for (int s = 0; s < 2; s++) {
+        s_eye_cur[s] = muse_ease(s_eye_cur[s], s_eye_scale[s], dt, 0.05f);
+    }
+
     memcpy(s_fb, SPR, sizeof(s_fb));
     animate_light(t, 0.45f + pulse * 0.9f, level, bright);
     chest_core(t, level, bright);
-    if (bloom > 0) {
-        eye_bloom(bloom, D_G3);
+    if (bloom > 0.02f) {
+        eye_bloom(bloom, D_G3);   /* the rig leaves a residue; below this nothing paints */
     }
     draw_eyes(open, close, flick, xeye, bright, widen);
     if (mouth > 0) {
@@ -1205,7 +1233,9 @@ void muse_pixel_render(const muse_pose_t *p)
              * row-wide guard silently clipped every prop crossing the face band anywhere
              * on the row (rain drops vanished mid-fall, arc legs got notched) and those
              * missing strips read as cut-off artifacts. */
-            static bool over_eye[64 * 64];
+            /* Lens-coverage bitset (512 B; a 4 KB bool grid before -- internal RAM is
+             * the scarce pool). Prop pixels must never land on the eyes. */
+            static uint8_t over_eye[64 * 64 / 8];
             memset(over_eye, 0, sizeof over_eye);
             int esx = iround(s_look.gx * 2.0f), esy = iround(s_look.gy * 1.0f);
             for (int s2 = 0; s2 < 2; s2++) {
@@ -1215,7 +1245,7 @@ void muse_pixel_render(const muse_pose_t *p)
                         for (int ox = -2; ox <= 2; ox++) {
                             int yy = e->y[i2] + esy + oy, xx = e->x[i2] + esx + ox;
                             if (xx >= 0 && xx < 64 && yy >= 0 && yy < 64) {
-                                over_eye[yy * 64 + xx] = true;
+                                over_eye[(yy * 64 + xx) >> 3] |= (uint8_t)(1u << ((yy * 64 + xx) & 7));
                             }
                         }
                     }
@@ -1225,7 +1255,11 @@ void muse_pixel_render(const muse_pose_t *p)
                 int idx = MOOD_FRAME_PX[po * 2 + k * 2];
                 uint8_t c = (uint8_t)MOOD_FRAME_PX[po * 2 + k * 2 + 1];
                 int x = idx % 64, y = idx / 64;
-                if (x < 1 || x > 62 || y < 1 || y > 62 || over_eye[y * 64 + x]) {
+                /* The props dissolve in and out with the reaction ramp (rk): a mood
+                 * that pops in full and vanishes mid-frame reads as a cut. */
+                if (x < 1 || x > 62 || y < 1 || y > 62 ||
+                    (over_eye[(y * 64 + x) >> 3] >> ((y * 64 + x) & 7) & 1u) ||
+                    BAYER4[y & 3][x & 3] >= (int)(rk * 16.0f + 0.5f)) {
                     continue;
                 }
                 uint8_t under = pxat(x, y);

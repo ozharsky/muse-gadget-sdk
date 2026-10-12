@@ -20,6 +20,7 @@
 
 #include "muse_pixel.h"
 #include "muse_lip.h"
+#include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "sprite_data.h"
 #include "shodan_poses.h"   /* the baked face-pose library (art-pipeline/shodan_poses/) */
 
@@ -262,6 +263,12 @@ static void init_eyes(void)
 static struct {
     float last_t, next_gaze, gx, gy, tx, ty, next_blink, blink_t, next_flick, flick_t;
 } s_look = { .next_gaze = 1.0f, .next_blink = 2.5f, .blink_t = -10.0f, .next_flick = 4.0f, .flick_t = -10.0f };
+
+/* The T3.1 rig: eased expression channels. The targets are computed per frame in
+ * muse_pixel_render; these hold what is actually drawn, so a mood or mode change
+ * reads as motion, not a cut. First frame: settled (no fade-in from zero). */
+static muse_rig_t s_rig;
+static bool s_rig_init;
 
 /* Returns how closed the eyes are (0 open .. 1 shut) and updates the gaze. */
 static float look_update(const muse_pose_t *p, float dt, float *flick)
@@ -826,6 +833,20 @@ void muse_pixel_render(const muse_pose_t *p)
         open = clampf(1.0f - p->mode_t / 0.45f, 0, 1);
     }
 
+    /* T3.1 rig: the glow eases and the mouth presence dissolves in and out; the
+     * reaction poses already ramp with rk. open stays raw (boot/off quantize the
+     * lid already). */
+    muse_rig_t rt_tgt = { .open = open, .widen = mode == MUSE_MODE_LISTENING ? 1.0f : 0.0f,
+                          .bright = bright, .bloom = bloom,
+                          .mouth = mouth > 0.22f ? 1.0f : 0.0f };
+    if (!s_rig_init) {
+        s_rig = rt_tgt;
+        s_rig_init = true;
+    }
+    muse_rig_step(&s_rig, &rt_tgt, dt);
+    bright = s_rig.bright;
+    bloom = s_rig.bloom;
+
     /* The reaction's face poses, in application order (later poses win overlaps). */
     int face[3];
     float facew[3];
@@ -882,15 +903,15 @@ void muse_pixel_render(const muse_pose_t *p)
 
     memcpy(s_fb, SPR, sizeof(s_fb));
     animate_light(t, 0.45f + pulse * 0.9f, level);
-    if (bloom > 0) {
-        eye_bloom(bloom, D_G3);
+    if (bloom > 0.02f) {
+        eye_bloom(bloom, D_G3);   /* the rig leaves a residue; below this nothing paints */
     }
     if (xeye) {
         draw_xeyes();
     } else if (nf == 0 && rid == R_NONE) {
         /* Idle-style face: the poses carry the gaze and the blinks. */
-        if (mode == MUSE_MODE_LISTENING) {
-            pose_apply(P_WIDE, 1.0f);
+        if (s_rig.widen > 0.02f) {
+            pose_apply(P_WIDE, s_rig.widen);   /* widens in, relaxes out (rig) */
         }
         if (mode == MUSE_MODE_THINKING) {
             pose_apply(P_HALF, 0.55f);
@@ -916,7 +937,7 @@ void muse_pixel_render(const muse_pose_t *p)
         }
     }
     if (mode == MUSE_MODE_SPEAKING) {
-        pose_apply(mouth > 0.9f ? P_MOUTH_2 : P_MOUTH_1, mouth > 0.22f ? 1.0f : 0.0f);
+        pose_apply(mouth > 0.9f ? P_MOUTH_2 : P_MOUTH_1, s_rig.mouth);
     }
     if (!xeye) {
         pose_eye_glow(bright);
