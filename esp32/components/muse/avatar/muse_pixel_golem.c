@@ -116,39 +116,8 @@ static uint8_t pxat(int x, int y)
     return s_fb[y * W + x];
 }
 
-/* A line of pixels. */
-static void ln(int x0, int y0, int x1, int y1, uint8_t c)
-{
-    int dx = abs(x1 - x0), dy = abs(y1 - y0);
-    int n = dx > dy ? dx : dy;
-    for (int i = 0; i <= n; i++) {
-        px(x0 + (n ? (x1 - x0) * i / n : 0), y0 + (n ? (y1 - y0) * i / n : 0), c);
-    }
-}
-
 /* 3x5 particles: 0 1 ? ! Z */
 enum { G_0, G_1, G_Q, G_BANG, G_Z };
-static const uint8_t GLY[5][5] = { { 7, 5, 5, 5, 7 }, { 2, 6, 2, 2, 7 }, { 7, 1, 3, 0, 2 }, { 2, 2, 2, 0, 2 }, { 7, 1, 2, 4, 7 } };
-
-static void glyph(int x, int y, int g, uint8_t c)
-{
-    for (int r = 0; r < 5; r++) {
-        for (int b = 0; b < 3; b++) {
-            if (GLY[g][r] & (4 >> b)) {
-                px(x + b, y + r, c);
-            }
-        }
-    }
-}
-
-/* Brows: dark bars above the visor. Left runs outer (x 20) to inner (x 27), right mirrors. */
-static void brows(int lo, int li, int ro, int ri, int thick)
-{
-    for (int t = 0; t < thick; t++) {
-        ln(20, lo + t, 27, li + t, IDX_LID);
-        ln(43, ro + t, 36, ri + t, IDX_LID);
-    }
-}
 
 /* A stipple of the state's glow on the visor around the eyes. */
 static void eye_bloom(float k, uint8_t c)
@@ -832,36 +801,6 @@ static void chest_core(float t, float level, float bright)
     }
     /* the voice pip: white-hot with the voice, warm at rest */
     px(cx, cy, level > 0.28f ? D_WHITE : D_G0);
-}
-
-/* An energy field around the head: a dotted ellipse that pulses (the Construct's "halo"). */
-static void halo(float t, float k, uint8_t c)
-{
-    float pulse = sinf(t * 7.0f) * 1.2f;
-    for (int i = 0; i < 360; i += 3) {
-        float a = (float)i * TAU / 360.0f;
-        int x = iround(31.5f + cosf(a) * (21.0f + pulse)), y = iround(31.0f + sinf(a) * (25.0f + pulse));
-        if (BAYER4[(i / 3) & 3][((i / 3) >> 2) & 3] < (int)(k * 16.0f)) {
-            px(x, y, c);
-        }
-    }
-}
-
-/* A crackle of lightning from each eye, redrawn every few frames so it jumps. */
-static void lightning(float t, uint8_t c1, uint8_t c2)
-{
-    int seed = (int)(t * 14.0f);
-    for (int side = -1; side <= 1; side += 2) {
-        int x = 31 + side * 12, y = 23;
-        for (int seg = 0; seg < 4; seg++) {
-            int nx = x + side * (3 + (int)(hash2(seed, seg + side) % 3u));
-            int ny = y + (int)(hash2(seed + 7, seg * 3 + side) % 7u) - 3;
-            ln(x, y, nx, ny, c1);
-            px(nx, ny + 1, c2);
-            x = nx;
-            y = ny;
-        }
-    }
 }
 
 /* ---------------------------------------------------------------------------

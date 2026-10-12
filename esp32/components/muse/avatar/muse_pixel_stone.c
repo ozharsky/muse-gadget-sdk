@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "muse_pixel.h"
+#include "stone_moods.h"
 #include "sprite_stone.h"
 
 #if defined(__has_include) && __has_include("esp_attr.h")
@@ -96,15 +97,6 @@ static inline void px(int x, int y, uint8_t c)
 {
     if ((unsigned)x < W && (unsigned)y < H) {
         s_fb[y * W + x] = c;
-    }
-}
-
-static void ln(int x0, int y0, int x1, int y1, uint8_t c)
-{
-    int dx = abs(x1 - x0), dy = abs(y1 - y0);
-    int n = dx > dy ? dx : dy;
-    for (int i = 0; i <= n; i++) {
-        px(x0 + (n ? (x1 - x0) * i / n : 0), y0 + (n ? (y1 - y0) * i / n : 0), c);
     }
 }
 
@@ -454,52 +446,64 @@ static void draw_wave(float t, float level)
 }
 
 /* ---------------------------------------------------------------------------
- * Reactions: the 20 core moods (the avatar.react command). The relay's other moods map to the nearest of these.
+ * Reactions: all 52 relay moods (the avatar.react command). Face acting for the core 20 is in C; the props are baked clips (stone_moods.h).
  * ------------------------------------------------------------------------- */
 
 enum {
-    R_NONE, R_SMIRK, R_SCAN, R_ALERT, R_GLITCH, R_SQUINT, R_ANGRY, R_SURPRISED, R_PLEASED,
-    R_LAUGH, R_WINK, R_SLEEPY, R_CONFUSED, R_EVIL, R_HACKED, R_POWERUP, R_BORED, R_DISGUST, R_TARGET,
-    R_NERVOUS, R_PROUD, R_COUNT
+    R_NONE, R_SMIRK, R_SCAN, R_ALERT, R_GLITCH, R_SQUINT, R_ANGRY, R_SURPRISED, R_PLEASED, R_LAUGH, R_WINK, R_SLEEPY, R_CONFUSED, R_EVIL, R_HACKED, R_POWERUP, R_BORED, R_DISGUST, R_TARGET, R_NERVOUS, R_PROUD, R_EXCITED, R_CONFETTI, R_SUNNY, R_RAIN, R_STORM, R_COLD, R_RAINBOW, R_SEARCHING, R_BROWSING, R_READING, R_WRITING, R_CHECKING, R_CALCULATING, R_CALENDAR, R_MONITORING, R_GENERATING, R_RUNNING, R_INVOKING, R_DELEGATING, R_REMEMBERING, R_SHRUG, R_EMBARRASSED, R_SCARED, R_COOL, R_MIND_BLOWN, R_CRYING_LAUGHING, R_SAD, R_NOD, R_CLOUDY, R_WINDY, R_HOT, R_SNOW,
+    R_COUNT
 };
 
 static const struct { const char *name; float dur; } REACTIONS[R_COUNT] = {
-    [R_SMIRK] = { "smirk", 2.8f },       [R_SCAN] = { "scan", 2.6f },         [R_ALERT] = { "alert", 2.2f },
-    [R_GLITCH] = { "glitch", 1.8f },     [R_SQUINT] = { "squint", 2.6f },     [R_ANGRY] = { "angry", 2.6f },
-    [R_SURPRISED] = { "surprised", 1.8f }, [R_PLEASED] = { "pleased", 2.6f }, [R_LAUGH] = { "laugh", 2.4f },
-    [R_WINK] = { "wink", 1.6f },         [R_SLEEPY] = { "sleepy", 3.4f },     [R_CONFUSED] = { "confused", 2.6f },
-    [R_EVIL] = { "evil", 3.0f },         [R_HACKED] = { "hacked", 2.4f },     [R_POWERUP] = { "powerup", 2.4f },
-    [R_BORED] = { "bored", 3.2f },       [R_DISGUST] = { "disgust", 2.4f },   [R_TARGET] = { "target", 2.6f },
-    [R_NERVOUS] = { "nervous", 2.6f },   [R_PROUD] = { "proud", 2.8f },
-};
-
-/* Moods this face has no props for -> the nearest core mood (a judgment call; the golem drew a prop for each). */
-static const struct { const char *name, *as; } ALIASES[] = {
-    { "excited", "powerup" }, { "confetti", "pleased" }, { "sunny", "pleased" }, { "rain", "bored" }, { "storm", "angry" },
-    { "cold", "nervous" }, { "rainbow", "pleased" },
-    { "searching", "scan" }, { "browsing", "scan" }, { "reading", "squint" }, { "writing", "smirk" }, { "checking", "target" },
-    { "calculating", "squint" }, { "calendar", "bored" }, { "monitoring", "scan" }, { "generating", "powerup" }, { "running", "powerup" },
-    { "invoking", "powerup" }, { "delegating", "smirk" }, { "remembering", "confused" },
-    { "shrug", "confused" }, { "embarrassed", "nervous" }, { "scared", "nervous" }, { "cool", "smirk" }, { "mind_blown", "surprised" },
-    { "crying_laughing", "laugh" }, { "sad", "bored" }, { "nod", "proud" },
-    { "cloudy", "bored" }, { "windy", "squint" }, { "hot", "disgust" }, { "snow", "nervous" },
+    [R_SMIRK] = { "smirk", 2.8f },  [R_SCAN] = { "scan", 2.6f },  [R_ALERT] = { "alert", 2.2f },
+    [R_GLITCH] = { "glitch", 1.8f },  [R_SQUINT] = { "squint", 2.6f },  [R_ANGRY] = { "angry", 2.6f },
+    [R_SURPRISED] = { "surprised", 1.8f },  [R_PLEASED] = { "pleased", 2.6f },  [R_LAUGH] = { "laugh", 2.4f },
+    [R_WINK] = { "wink", 1.6f },  [R_SLEEPY] = { "sleepy", 3.4f },  [R_CONFUSED] = { "confused", 2.6f },
+    [R_EVIL] = { "evil", 3.0f },  [R_HACKED] = { "hacked", 2.4f },  [R_POWERUP] = { "powerup", 2.4f },
+    [R_BORED] = { "bored", 3.2f },  [R_DISGUST] = { "disgust", 2.4f },  [R_TARGET] = { "target", 2.6f },
+    [R_NERVOUS] = { "nervous", 2.6f },  [R_PROUD] = { "proud", 2.8f },  [R_EXCITED] = { "excited", 2.8f },
+    [R_CONFETTI] = { "confetti", 3.4f },  [R_SUNNY] = { "sunny", 3.0f },  [R_RAIN] = { "rain", 3.2f },
+    [R_STORM] = { "storm", 3.2f },  [R_COLD] = { "cold", 3.0f },  [R_RAINBOW] = { "rainbow", 3.2f },
+    [R_SEARCHING] = { "searching", 2.6f },  [R_BROWSING] = { "browsing", 3.0f },  [R_READING] = { "reading", 3.0f },
+    [R_WRITING] = { "writing", 3.0f },  [R_CHECKING] = { "checking", 2.4f },  [R_CALCULATING] = { "calculating", 3.0f },
+    [R_CALENDAR] = { "calendar", 3.0f },  [R_MONITORING] = { "monitoring", 2.8f },  [R_GENERATING] = { "generating", 3.0f },
+    [R_RUNNING] = { "running", 3.0f },  [R_INVOKING] = { "invoking", 2.8f },  [R_DELEGATING] = { "delegating", 2.8f },
+    [R_REMEMBERING] = { "remembering", 2.8f },  [R_SHRUG] = { "shrug", 2.6f },  [R_EMBARRASSED] = { "embarrassed", 2.8f },
+    [R_SCARED] = { "scared", 2.6f },  [R_COOL] = { "cool", 2.8f },  [R_MIND_BLOWN] = { "mind_blown", 2.8f },
+    [R_CRYING_LAUGHING] = { "crying_laughing", 2.8f },  [R_SAD] = { "sad", 3.0f },  [R_NOD] = { "nod", 2.4f },
+    [R_CLOUDY] = { "cloudy", 3.0f },  [R_WINDY] = { "windy", 3.0f },  [R_HOT] = { "hot", 3.0f },
+    [R_SNOW] = { "snow", 3.4f },
 };
 
 static volatile int s_react_req;     /* set from any task; the renderer picks it up */
 static int s_react_id;
 static float s_react_start;
 
+/* A single standby pip that breathes on its own, so the fully-dark OFF state is
+ * not a frozen frame (the CRT collapse leaves one pixel; it was byte-identical).
+ * The arms grow/shrink with the beat and a spark rotates round the cross. */
+static void off_pip(float t)
+{
+    float s = 0.5f + 0.5f * sinf(t * 2.6f);
+    int half = 1 + (int)(s * 3.0f);              /* arms grow 1..4 px and back */
+    uint8_t c = s > 0.5f ? D_G1 : D_G0;
+    for (int x = 32 - half; x <= 32 + half; x++) {
+        px(x, 32, c);
+    }
+    for (int y = 32 - half; y <= 32 + half; y++) {
+        px(32, y, c);
+    }
+    px(32, 32, s > 0.75f ? D_G0 : D_ACC);
+    static const int spx[4] = { 0, 1, 0, -1 }, spy[4] = { -1, 0, 1, 0 };
+    int ph = (int)lroundf(t * 25.0f) & 3;               /* the spark walks the cross, one step per 40 ms frame */
+    px(32 + spx[ph], 32 + spy[ph], D_WHITE);
+}
+
 /* The relay's [react:name] (via avatar.react / the Hermes mood list). false if the name is unknown. */
 bool muse_pixel_react(const char *name)
 {
     if (!name) {
         return false;
-    }
-    for (size_t k = 0; k < sizeof(ALIASES) / sizeof(ALIASES[0]); k++) {
-        if (strcmp(name, ALIASES[k].name) == 0) {
-            name = ALIASES[k].as;
-            break;
-        }
     }
     for (int i = 1; i < R_COUNT; i++) {
         if (strcmp(name, REACTIONS[i].name) == 0) {
@@ -512,31 +516,6 @@ bool muse_pixel_react(const char *name)
 
 /* 3x5 particles: 0 1 ? ! Z */
 enum { G_0, G_1, G_Q, G_BANG, G_Z };
-static const uint8_t GLY[5][5] = { { 7, 5, 5, 5, 7 }, { 2, 6, 2, 2, 7 }, { 7, 1, 3, 0, 2 }, { 2, 2, 2, 0, 2 }, { 7, 1, 2, 4, 7 } };
-
-static void glyph(int x, int y, int g, uint8_t c, bool outline)
-{
-    if (outline) {                                    /* a dark outline so it reads over the face */
-        for (int r = 0; r < 5; r++) {
-            for (int b = 0; b < 3; b++) {
-                if (GLY[g][r] & (4 >> b)) {
-                    for (int dx = -1; dx <= 1; dx++) {
-                        for (int dy = -1; dy <= 1; dy++) {
-                            px(x + b + dx, y + r + dy, IDX_BLACK);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    for (int r = 0; r < 5; r++) {
-        for (int b = 0; b < 3; b++) {
-            if (GLY[g][r] & (4 >> b)) {
-                px(x + b, y + r, c);
-            }
-        }
-    }
-}
 
 /* A stipple of the state's glow on the skin around the eyes. */
 static void eye_bloom(float k, uint8_t c)
@@ -555,36 +534,6 @@ static void eye_bloom(float k, uint8_t c)
                     }
                 }
             }
-        }
-    }
-}
-
-/* An energy ring around the head: it shows on the dark hair and background only, never over the face. */
-static void halo(float t, float k, uint8_t c)
-{
-    float pulse = sinf(t * 7.0f) * 1.2f;
-    for (int i = 0; i < 360; i += 3) {
-        float a = (float)i * TAU / 360.0f;
-        int x = iround(31.5f + cosf(a) * (29.0f + pulse)), y = iround(31.5f + sinf(a) * (29.0f + pulse));
-        if (BAYER4[(i / 3) & 3][((i / 3) >> 2) & 3] < (int)(k * 16.0f) && (unsigned)x < W && (unsigned)y < H && s_fb[y * W + x] <= 4) {
-            s_fb[y * W + x] = c;
-        }
-    }
-}
-
-/* A crackle of lightning from each eye's outer corner, redrawn every few frames so it jumps. */
-static void lightning(float t, uint8_t c1, uint8_t c2)
-{
-    int seed = (int)(t * 14.0f);
-    for (int side = -1; side <= 1; side += 2) {
-        int x = side < 0 ? 16 : 51, y = 26;
-        for (int seg = 0; seg < 4; seg++) {
-            int nx = x + side * (3 + (int)(hash2(seed, seg + side) % 3u));
-            int ny = y + (int)(hash2(seed + 7, seg * 3 + side) % 7u) - 3;
-            ln(x, y, nx, ny, c1);
-            px(nx, ny + 1, c2);
-            x = nx;
-            y = ny;
         }
     }
 }
@@ -1003,170 +952,47 @@ void muse_pixel_render(const muse_pose_t *p)
         draw_wave(t, level);
     }
     if (rid != R_NONE) {
-        int tick = (int)(t * 12.0f);
-        switch (rid) {
-        case R_SMIRK:
-            halo(t, 0.25f * rk, D_G3);
-            break;
-        case R_SCAN: {                                         /* a sweep down the face, mapping it as it goes */
-            int y = 12 + (int)(rt / REACTIONS[R_SCAN].dur * 42.0f);
-            for (int yy = 12; yy < y - 2; yy += 3) {
-                for (int x = 10; x < 53; x++) {
-                    uint8_t u = s_fb[yy * W + x];
-                    if (((x + yy) & 1) == 0 && u < SPR_N && SPR_PAL[u][0] > 120) {
-                        s_fb[yy * W + x] = D_G2;               /* scanned rows keep a faint grid */
-                    }
-                }
+        /* The props: a baked clip per reaction (stone_moods.h, from bake_moods.py). Frames overlay
+         * as sparse diffs; the face acting above stays in C. Paint rule: never over the eye lenses,
+         * and only over dark or gold under-pixels, so a mood never rewrites the stone's face. */
+        int fi = -1;
+        for (unsigned g = 0; g < sizeof(MOODS) / sizeof(MOODS[0]); g++) {
+            if (strcmp((const char *)MOODS[g].name, REACTIONS[rid].name) == 0) {
+                fi = MOODS[g].off + (int)(rt * 1000.0f / (float)MOOD_FRAME_DT_MS) % MOODS[g].n;
+                break;
             }
-            for (int x = 8; x < 55; x++) {
-                px(x, y, D_WHITE);
-                px(x, y - 1, D_G0);
-                px(x, y - 2, D_G2);
-            }
-            if (rt > 0.3f && ((tick & 3) == 0)) {
-                glyph(48 + (tick & 1) * 3, y - 6, (tick >> 1) & 1 ? G_0 : G_1, D_G1, true);
-            }
-            break;
         }
-        case R_ALERT:
-            halo(t, 0.9f, D_G1);
-            if ((((int)(rt * 6.0f)) & 1) == 0) {
-                glyph(51, 5, G_BANG, D_WHITE, true);
+        if (fi >= 0) {
+            int po = 0;
+            for (int g = 0; g < fi; g++) {
+                po += MOOD_FRAME_COUNTS[g];
             }
-            break;
-        case R_GLITCH:
-            for (int k = 0; k < 5; k++) {                      /* binary digits spilling through */
-                glyph(4 + (int)(hash2(tick, k) % 54u), 4 + (int)(hash2(tick + 3, k) % 50u), hash2(k, tick) & 1, k & 1 ? D_G0 : D_G2, false);
-            }
-            break;
-        case R_SQUINT:
-            if (((int)(rt * 3.0f)) & 1) {
-                glyph(51, 10, G_Q, D_G1, true);
-            }
-            break;
-        case R_ANGRY:
-            halo(t, 0.9f, D_G1);
-            if (tick & 1) {
-                lightning(t, D_WHITE, D_G0);
-            }
-            break;
-        case R_EVIL:
-            halo(t, 1.0f, D_G1);
-            if (tick & 1) {
-                lightning(t, D_G0, D_WHITE);
-            }
-            break;
-        case R_SURPRISED:
-            glyph(51, 5, G_BANG, D_WHITE, true);
-            break;
-        case R_PLEASED:
-            halo(t, 0.5f * rk, D_G1);
-            if (tick & 1) {                                    /* twinkles by the eyes */
-                static const int tw[2][2] = { { 13, 24 }, { 50, 24 } };
-                for (int i = 0; i < 2; i++) {
-                    int cx = tw[i][0], cy = tw[i][1];
-                    px(cx, cy, D_WHITE); px(cx - 1, cy + 1, D_G0); px(cx + 1, cy + 1, D_G0); px(cx, cy + 2, D_G0);
-                }
-            }
-            break;
-        case R_LAUGH:
-            halo(t, (tick & 1) ? 0.5f : 0.1f, D_G2);
-            break;
-        case R_WINK:
-            if (wink_s >= 0.5f) {
-                static const int sm[7][2] = { { 22, 49 }, { 21, 49 }, { 20, 48 }, { 19, 47 }, { 41, 49 }, { 42, 48 }, { 43, 47 } };
-                for (int i = 0; i < 7; i++) {                  /* the smile pulls up at both ends, more on the winking side */
-                    px(sm[i][0], sm[i][1], IDX_BLACK);
-                }
-                for (int cx = 18; cx < 25; cx++) {             /* the cheek rises under the shut eye */
-                    uint8_t c = s_fb[30 * W + cx];
-                    if (c == IDX_SKIN || c == IDX_STONE_L || c == IDX_HI2) {
-                        s_fb[30 * W + cx] = IDX_HI;
+            static bool over_eye[64 * 64];
+            memset(over_eye, 0, sizeof over_eye);
+            int esx = iround(s_look.gx * 2.0f), esy = iround(s_look.gy * 1.0f);
+            for (int s2 = 0; s2 < 2; s2++) {
+                const eye_t *e = &s_eye[s2];
+                for (int i2 = 0; i2 < e->n; i2++) {
+                    for (int oy = -1; oy <= 1; oy++) {
+                        for (int ox = -2; ox <= 2; ox++) {
+                            int yy = e->y[i2] + esy + oy, xx = e->x[i2] + esx + ox;
+                            if (xx >= 0 && xx < 64 && yy >= 0 && yy < 64) {
+                                over_eye[yy * 64 + xx] = true;
+                            }
+                        }
                     }
                 }
             }
-            if (rt > 0.3f && rt < 0.95f) {                     /* a spark by the open eye */
-                px(51, 23, D_WHITE); px(50, 23, D_G0); px(52, 23, D_G0); px(51, 22, D_G0); px(51, 24, D_G0);
-            }
-            break;
-        case R_SLEEPY:
-            for (int k = 0; k < 3; k++) {                      /* Zs drifting up */
-                int y = 24 - (int)fmodf(rt * 6.0f + (float)k * 8.0f, 22.0f);
-                if (y > 2) {
-                    glyph(51 + k * 3 + (int)(sinf(rt * 2.0f + (float)k) * 1.5f), y, G_Z, k == 0 ? D_WHITE : D_G0, true);
-                }
-            }
-            break;
-        case R_CONFUSED:
-            if (((int)(rt * 4.0f)) & 1) {
-                glyph(46, 4, G_Q, D_G0, true);
-            }
-            break;
-        case R_HACKED:
-            for (int x = 1; x < 63; x += 3) {                  /* digits raining down */
-                if (hash2(x, 5) % 3u) {
+            for (int k = 0; k < MOOD_FRAME_COUNTS[fi]; k++) {
+                int idx = MOOD_FRAME_PX[po * 2 + k * 2];
+                uint8_t c = (uint8_t)MOOD_FRAME_PX[po * 2 + k * 2 + 1];
+                int x = idx % 64, y = idx / 64;
+                if (x < 1 || x > 62 || y < 1 || y > 62 || over_eye[y * 64 + x]) {
                     continue;
                 }
-                int head = ((int)(t * (20.0f + (float)(hash2(x, 9) % 20u)) + (float)(hash2(x, 2) % 70u))) % 76 - 8;
-                glyph(x, head, hash2(x, tick) & 1, D_G0, false);
-                glyph(x, head - 7, hash2(x, tick + 1) & 1, D_G2, false);
-                glyph(x, head - 14, hash2(x, tick + 2) & 1, D_G3, false);
-            }
-            break;
-        case R_POWERUP:
-            for (int k = 0; k < 3; k++) {                      /* rings pouring outward */
-                float r = fmodf(rt * 22.0f + (float)k * 9.0f, 30.0f);
-                if (r > 8.0f) {
-                    for (int i = 0; i < 64; i += 2) {
-                        float a2 = (float)i * TAU / 64.0f;
-                        px(iround(31.5f + cosf(a2) * r), iround(31.5f + sinf(a2) * r), r < 18.0f ? D_G0 : D_G2);
-                    }
-                }
-            }
-            halo(t, clampf(rt * 0.8f, 0, 1), D_G1);
-            break;
-        case R_BORED:
-            for (int k = 0; k < 3; k++) {
-                if (rt > 0.5f + (float)k * 0.6f) {
-                    px(46 + k * 3, 8, D_WHITE);
-                }
-            }
-            break;
-        case R_TARGET: {                                       /* brackets close in, then lock */
-            float k = clampf(rt / 1.2f, 0, 1);
-            int sz = 29 - (int)(k * 19.0f);
-            int cx = 31, cy = 31;
-            uint8_t c = rt > 1.3f ? D_G0 : D_WHITE;
-            for (int sx = -1; sx <= 1; sx += 2) {
-                for (int sy = -1; sy <= 1; sy += 2) {
-                    int x = cx + sx * sz, y = cy + sy * sz;
-                    ln(x, y, x - sx * 5, y, c);
-                    ln(x, y, x, y - sy * 5, c);
-                }
-            }
-            if (rt > 1.2f && (((int)(rt * 8.0f)) & 1) == 0) {
-                ln(cx - 14, cy, cx - 6, cy, D_WHITE); ln(cx + 6, cy, cx + 14, cy, D_WHITE);
-                ln(cx, cy - 14, cx, cy - 6, D_WHITE); ln(cx, cy + 6, cx, cy + 14, D_WHITE);
-            }
-            break;
-        }
-        case R_NERVOUS: {                                      /* a bead of sweat */
-            int y = 16 + (int)fmodf(rt * 9.0f, 20.0f);
-            px(53, y, D_G0); px(52, y + 1, D_G0); px(53, y + 1, D_WHITE); px(54, y + 1, D_G0); px(53, y + 2, D_G0);
-            break;
-        }
-        case R_PROUD:
-            halo(t * 0.5f, 0.35f + 0.3f * sinf(t * 3.0f), D_G1);
-            break;
-        default:
-            break;
-        }
-        if (rid == R_GLITCH && (tick & 3) == 0) {              /* a split image: ghosts of the eyes */
-            for (int e = 0; e < 2; e++) {
-                for (int i = 0; i < s_eye[e].n; i++) {
-                    px(s_eye[e].x[i] + 2, s_eye[e].y[i], D_G3);
-                    px(s_eye[e].x[i] - 2, s_eye[e].y[i], D_WHITE);
-                }
+                /* The stone is pale grey, so the gold/dark test would hide most of its props:
+                 * here a prop paints anywhere off the lenses. */
+                px(x, y, c);
             }
         }
     }
@@ -1241,10 +1067,7 @@ void muse_pixel_render(const muse_pose_t *p)
             }
         }
         if (vh < 3) {
-            int half = iround(32.0f * (1.0f - k * k * k));
-            for (int x = 32 - half; x <= 32 + half; x++) {
-                px(x, 32, D_G0);
-            }
+            off_pip(t);                                /* the standby dot breathes, no dead frame */
         }
     }
     vignette();
