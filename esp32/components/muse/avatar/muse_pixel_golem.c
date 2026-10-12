@@ -14,8 +14,7 @@
 #include "golem_moods.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
-
-   /* baked mood-prop frames (all moods) */
+#include "muse_crack.h" /* the error state's persistent crack tears */
 #include "golem_moods.h"   /* pre-baked mood frames (sparse diffs) */
 
 #if defined(__has_include) && __has_include("esp_attr.h")
@@ -102,6 +101,10 @@ static float frand(void)
 {
     return (float)(irand() & 0xffff) / 65535.0f;
 }
+
+/* The error cracks (muse_crack.h): persistent tears instead of per-frame teleports. */
+static muse_crack_t s_cracks;
+static bool s_cracks_run;
 
 static inline void px(int x, int y, uint8_t c)
 {
@@ -796,6 +799,26 @@ static void chest_core(float t, float level, float bright)
     px(cx, cy, level > 0.28f ? D_WHITE : D_G0);
 }
 
+/* Thinking: the core works. Three sparks circuit the chest core -- the golem's
+ * "computing" read, in place of the old half-lid that collided with the sleepy row.
+ * The dots ride the plate's rim (r ~ 10) so they never cross the face or the lens;
+ * the tail dot trails the lead by a fixed angle, so the circuit has a direction. */
+static float s_think_k;   /* eased 0..1: the sparks are motion, not a cut */
+static void think_spin(float t, float k)
+{
+    for (int i = 0; i < 3; i++) {
+        float a = t * 2.2f + (float)i * (TAU / 3.0f);
+        int x = 31 + iround(cosf(a) * 10.5f), y = 49 + iround(sinf(a) * 9.0f);
+        int tx = 31 + iround(cosf(a - 0.55f) * 10.5f), ty = 49 + iround(sinf(a - 0.55f) * 9.0f);
+        if (BAYER4[y & 3][x & 3] < (int)(k * 16.0f) + 1) {
+            px(x, y, D_WHITE);
+        }
+        if (BAYER4[ty & 3][tx & 3] < (int)(k * 9.0f)) {
+            px(tx, ty, D_G1);
+        }
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * Effects
  * ------------------------------------------------------------------------- */
@@ -1034,9 +1057,13 @@ void muse_pixel_render(const muse_pose_t *p)
         pulse = 0.55f + level * 0.8f;
         break;
     case MUSE_MODE_THINKING:
-        open = 0.55f;
+        /* Thinking is the core WORKING, not the lids drooping: the eyes stay open
+         * (the idle scheduler already ponders the gaze up into a corner) and the
+         * think_spin sparks circuit the chest core below. The old half-lid here
+         * read as a milder sleepy -- the droop is the sleepy row's signature. */
+        open = 0.85f;
         pulse = 0.9f;
-        bright = 0.7f;
+        bright = 0.75f;
         break;
     case MUSE_MODE_SPEAKING:
         open = 0.95f;
@@ -1201,6 +1228,11 @@ void muse_pixel_render(const muse_pose_t *p)
     memcpy(s_fb, SPR, sizeof(s_fb));
     animate_light(t, 0.45f + pulse * 0.9f, level, bright);
     chest_core(t, level, bright);
+    s_think_k += ((mode == MUSE_MODE_THINKING ? 1.0f : 0.0f) - s_think_k) *
+                 (dt > 0.0f ? 1.0f - expf(-dt / 0.2f) : 1.0f);
+    if (s_think_k > 0.02f) {
+        think_spin(t, s_think_k);
+    }
     if (bloom > 0.02f) {
         eye_bloom(bloom, D_G3);   /* the rig leaves a residue; below this nothing paints */
     }
@@ -1324,9 +1356,20 @@ void muse_pixel_render(const muse_pose_t *p)
     /* Stone doesn't interfere: the golem never glitches in speech, joy, or rest. It cracks
      * (heated stone) on error and re-forms out of dust on boot — that is all. */
     if (mode == MUSE_MODE_ERROR) {
-        glitch(3, 4, 4, 60);
+        /* Error is ONE ongoing event, not per-frame noise: each tear opens, strains and
+         * knits back over seconds (muse_crack.h) instead of teleporting anew every frame. */
+        if (!s_cracks_run) {
+            muse_crack_init(&s_cracks, (uint32_t)(frand() * 100000.0f) + 3u,
+                            3, 4.0f, 59.0f, 4.0f, 0.35f);
+            s_cracks_run = true;
+        }
+        muse_crack_step(&s_cracks, dt);
+        muse_crack_apply(&s_cracks, s_fb, W, H, IDX_BLACK);
     } else if (mode == MUSE_MODE_BOOT) {
         glitch((int)((1.0f - boot) * 5.0f), 4, 4, 60);
+    }
+    if (mode != MUSE_MODE_ERROR) {
+        s_cracks_run = false;   /* leaving ERROR: the next entry starts calm */
     }
 
     if (mode == MUSE_MODE_BOOT && boot < 1.0f) {

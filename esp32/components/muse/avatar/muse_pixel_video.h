@@ -21,6 +21,10 @@ bool muse_pixel_video_active(void);
 // Advance + decode; call from muse_pixel_render when active (LVGL task).
 void muse_pixel_video_render(void);
 
+// Clip frames decoded so far; the device render bench (>render.bench) reads it and can
+// reset it, so decode frames can be timed apart from the player's repeat frames.
+int muse_pixel_video_decodes(bool reset);
+
 // The faces' scale-path contract (muse_pixel.h), over the clip's own palette.
 void muse_pixel_video_set_size(int px_size);
 void muse_pixel_video_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1);

@@ -4,8 +4,10 @@
 
 #include "muse_pixel.h"
 #include "muse_pixel_video.h"
+#include "bench_videos.h"   /* the compiled clip table, for the player bench */
 
 #include <math.h>
+#include <stdio.h>
 #include "esp_timer.h"
 #include "sdkconfig.h"
 #include "muse_settings.h"
@@ -108,7 +110,9 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
     }
 }
 
-void muse_pixel_render(const muse_pose_t *p)
+void muse_pixel_render(const muse_pose_t *p);
+
+static void render_frame(const muse_pose_t *p)
 {
     muse_pixel_video_render();   /* applies a pending start/stop; no-op when idle */
     if (muse_pixel_video_active()) {
@@ -148,6 +152,129 @@ void muse_pixel_render(const muse_pose_t *p)
         shodan_pixel_render(p);
         shodan_pixel_glitch(amp);
         break;
+    }
+}
+
+/* ---- Device-side frame-cost bench (>render.bench[=N]) ------------------------------
+ * Measures the real per-frame cost of the two canvas paths on this chip in this build:
+ * phase 1 renders N plain face frames, phase 2 plays the first compiled clip for N
+ * frames (the player path). Both phases time the whole render call; the scale/blit to
+ * the LCD happens later, per strip, and is not counted -- the same boundary as the host
+ * harnesses (dump_anim.c for the face, video_harness.c for the player). All state moves
+ * on the LVGL task; the console only sets the request. */
+static volatile int s_bench_req;         /* frames per phase; 0 = none pending */
+static int s_bench_phase;               /* 0 idle, 1 face, 2 player */
+static int s_bench_n, s_bench_count;
+static int64_t s_bench_sum, s_bench_min, s_bench_max;        /* face path, us */
+static int64_t s_bench_vsum, s_bench_vmin, s_bench_vmax;     /* player path, us */
+static int64_t s_bench_dsum;           /* player path, only the frames that decoded */
+static int s_bench_dn;
+static int64_t s_bench_prev, s_bench_psum;
+static int s_bench_pn;
+static const char *s_bench_clip = "";
+
+void muse_pixel_bench(int frames)
+{
+    if (frames < 20) {
+        frames = 20;
+    }
+    if (frames > 2000) {
+        frames = 2000;
+    }
+    s_bench_req = frames;
+}
+
+static void bench_report(void)
+{
+    long fa = s_bench_n ? (long)(s_bench_sum / s_bench_n) : 0;
+    long va = s_bench_n ? (long)(s_bench_vsum / s_bench_n) : 0;
+    long da = s_bench_dn ? (long)(s_bench_dsum / s_bench_dn) : 0;
+    long fp = s_bench_pn ? (long)(s_bench_psum / s_bench_pn) : 0;
+    printf("@render.bench face n=%d avg=%ldus min=%ld max=%ld | player(%s) n=%d avg=%ldus min=%ld max=%ld decode avg=%ldus x%d | frame avg=%ldus %ld.%ldfps\n",
+           s_bench_n, fa, (long)(s_bench_min == INT64_MAX ? 0 : s_bench_min), (long)s_bench_max,
+           s_bench_clip, s_bench_n, va, (long)(s_bench_vmin == INT64_MAX ? 0 : s_bench_vmin), (long)s_bench_vmax,
+           da, s_bench_dn,
+           fp, fp ? 10000000 / fp / 10 : 0, fp ? (10000000 / fp) % 10 : 0);
+    fflush(stdout);
+    s_bench_phase = 0;
+}
+
+void muse_pixel_render(const muse_pose_t *p)
+{
+    if (s_bench_req && !s_bench_phase) {
+        s_bench_n = s_bench_req;
+        s_bench_req = 0;
+        s_bench_phase = 1;
+        s_bench_count = s_bench_dn = s_bench_pn = 0;
+        s_bench_sum = s_bench_vsum = s_bench_dsum = s_bench_psum = 0;
+        s_bench_min = s_bench_vmin = INT64_MAX;
+        s_bench_max = s_bench_vmax = 0;
+        s_bench_prev = 0;
+        muse_pixel_video("stop");   /* phase 1 measures the face path */
+        printf("@render.bench start face n=%d, then the player (stay on the face, keep it awake)\n", s_bench_n);
+        fflush(stdout);
+    }
+    if (!s_bench_phase) {
+        render_frame(p);
+        return;
+    }
+    int64_t t0 = esp_timer_get_time();
+    int d0 = s_bench_phase == 2 ? muse_pixel_video_decodes(false) : 0;
+    render_frame(p);
+    int64_t t1 = esp_timer_get_time();
+    int d1 = s_bench_phase == 2 ? muse_pixel_video_decodes(false) : 0;
+    int64_t us = t1 - t0;
+    if (s_bench_phase == 1) {
+        if (muse_pixel_video_active()) {
+            s_bench_prev = 0;        /* a clip is in the way: wait, don't count */
+            return;
+        }
+        if (s_bench_prev) {
+            s_bench_psum += t0 - s_bench_prev;
+            s_bench_pn++;
+        }
+        s_bench_prev = t0;
+        s_bench_sum += us;
+        if (us < s_bench_min) {
+            s_bench_min = us;
+        }
+        if (us > s_bench_max) {
+            s_bench_max = us;
+        }
+        s_bench_count++;
+        if (s_bench_count >= s_bench_n) {
+            s_bench_phase = 2;       /* face done: play a clip and measure the player */
+            s_bench_count = 0;
+            s_bench_prev = 0;
+            (void)muse_pixel_video_decodes(true);   /* zero the decode counter */
+            if (BENCH_VIDEO_COUNT > 0) {
+                s_bench_clip = BENCH_VIDEOS[0].name;
+                muse_pixel_video(s_bench_clip);
+            } else {
+                s_bench_clip = "(none compiled)";
+                bench_report();
+            }
+        }
+    } else if (s_bench_phase == 2) {
+        if (!muse_pixel_video_active()) {
+            return;                  /* nothing playing: wait for the pending start */
+        }
+        s_bench_vsum += us;
+        if (us < s_bench_vmin) {
+            s_bench_vmin = us;
+        }
+        if (us > s_bench_vmax) {
+            s_bench_vmax = us;
+        }
+        if (d1 > d0) {
+            s_bench_dsum += us;      /* this call decoded a clip frame */
+            s_bench_dn++;
+        }
+        s_bench_count++;
+        if (s_bench_count >= s_bench_n) {
+            muse_pixel_video("stop");
+            bench_report();
+        }
     }
 }
 

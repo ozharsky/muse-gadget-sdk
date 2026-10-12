@@ -55,3 +55,10 @@ void muse_pixel_set_size(int px);
  * image never has to exist in RAM.
  */
 void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1);
+
+/*
+ * Bench (>render.bench[=N]): measure the next N frames' render cost on the face
+ * path, then N on the clip player's, and print the averages over the console --
+ * the device-side frame budget. Requested from any task; runs on the render task.
+ */
+void muse_pixel_bench(int frames);

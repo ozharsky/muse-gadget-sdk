@@ -44,6 +44,7 @@
 #include "muse_state.h"
 #include "muse_ui.h"
 #include "avatar/muse_pixel_video.h"
+#include "muse_pixel.h"             /* >render.bench: muse_pixel_bench */
 #include "muse_voice.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_WATCHER_CAMERA
@@ -1158,6 +1159,39 @@ static bool bench_ui_command(const char *line)
     }
     if (!strncmp(line, "react=", 6)) {
         printf("@react %s %s\n", line + 6, muse_ui_react(line + 6) ? "ok" : "unknown");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "render.bench", 12)) {
+        /* Bench: the device-side frame-cost bench -- N frames of the plain face, then
+         * N frames of the first compiled clip (the player), averages printed over the
+         * console when the run finishes ("@render.bench face n=... avg=..."). Stays on
+         * the face view; takes roughly 2N rendered frames (the ack says when it ends). */
+        int n = line[12] == '=' ? atoi(line + 13) : 300;
+        muse_pixel_bench(n);
+        printf("@render.bench scheduled n=%d (face then player; stay on the face, keep it awake)\n", n);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "mode=", 5)) {
+        /* Bench: hold a state on the glass (idle|listening|thinking|speaking|error|off|boot)
+         * for QA. The state machine owns the mode in normal life; this pins it until the
+         * next real event (a press, a turn, another >mode=). */
+        static const struct { const char *name; int mode; } MODES[] = {
+            { "boot", MUSE_MODE_BOOT }, { "idle", MUSE_MODE_IDLE },
+            { "listening", MUSE_MODE_LISTENING }, { "thinking", MUSE_MODE_THINKING },
+            { "speaking", MUSE_MODE_SPEAKING }, { "error", MUSE_MODE_ERROR },
+            { "off", MUSE_MODE_OFF },
+        };
+        for (unsigned i = 0; i < sizeof(MODES) / sizeof(MODES[0]); i++) {
+            if (!strcmp(line + 5, MODES[i].name)) {
+                muse_state_set_mode((muse_mode_t)MODES[i].mode);
+                printf("@mode %s\n", MODES[i].name);
+                fflush(stdout);
+                return true;
+            }
+        }
+        printf("@mode.error unknown \"%s\": boot|idle|listening|thinking|speaking|error|off\n", line + 5);
         fflush(stdout);
         return true;
     }

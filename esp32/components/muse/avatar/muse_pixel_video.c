@@ -46,6 +46,7 @@ static const bench_video_t *s_clip;     /* NULL = faces own the canvas */
 static int s_loops_left;                /* -1 = play forever */
 static int64_t s_start_us;
 static int s_frame_last;
+static int s_decodes;                   /* clip frames decoded (bench counter) */
 
 static uint16_t s_pal[32];
 static uint16_t s_pal_dim[32];
@@ -141,6 +142,7 @@ static void apply_pending(void)
 
 static void decode_frame(const bench_video_t *v, int fi)
 {
+    s_decodes++;
     if (v->fmt == FMT_I4) {
         const uint8_t *src = v->frames + (size_t)fi * (W / 2) * H;
         for (int y = 0; y < H; y++) {
@@ -183,6 +185,15 @@ void muse_pixel_video_render(void)
         s_frame_last = fi;
         decode_frame(v, fi);
     }
+}
+
+int muse_pixel_video_decodes(bool reset)
+{
+    int v = s_decodes;
+    if (reset) {
+        s_decodes = 0;
+    }
+    return v;
 }
 
 void muse_pixel_video_set_size(int px_size)

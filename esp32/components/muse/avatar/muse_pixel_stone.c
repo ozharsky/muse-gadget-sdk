@@ -14,6 +14,7 @@
 #include "muse_lip.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
+#include "muse_crack.h" /* the error state's persistent crack tears */
 #include "stone_moods.h"
 #include "sprite_stone.h"
 
@@ -97,6 +98,10 @@ static float frand(void)
 {
     return (float)(irand() & 0xffff) / 65535.0f;
 }
+
+/* The error cracks (muse_crack.h): persistent tears instead of per-frame teleports. */
+static muse_crack_t s_cracks;
+static bool s_cracks_run;
 
 static inline void px(int x, int y, uint8_t c)
 {
@@ -1091,7 +1096,15 @@ void muse_pixel_render(const muse_pose_t *p)
         glitch(2, 3, 6, 58);
     }
     if (mode == MUSE_MODE_ERROR) {
-        glitch(5, 6, 4, 60);
+        /* Error is ONE ongoing event, not per-frame noise: each tear opens, strains and
+         * knits back over seconds (muse_crack.h) instead of teleporting anew every frame. */
+        if (!s_cracks_run) {
+            muse_crack_init(&s_cracks, (uint32_t)(frand() * 100000.0f) + 3u,
+                            5, 4.0f, 59.0f, 6.0f, 0.30f);
+            s_cracks_run = true;
+        }
+        muse_crack_step(&s_cracks, dt);
+        muse_crack_apply(&s_cracks, s_fb, W, H, IDX_BLACK);
     } else if (mode == MUSE_MODE_SPEAKING) {
         glitch(1 + (int)(level * 3.0f), 2 + (int)(level * 2.0f), 6, 58);
     } else if (mode == MUSE_MODE_BOOT) {
@@ -1100,6 +1113,9 @@ void muse_pixel_render(const muse_pose_t *p)
         glitch(2, 3, 6, 58);
     } else if (fmodf(t, 6.3f) < 0.12f) {
         glitch(1, 2, 6, 58);   /* now and then, even at rest */
+    }
+    if (mode != MUSE_MODE_ERROR) {
+        s_cracks_run = false;  /* leaving ERROR: the next entry starts calm */
     }
 
     if (mode == MUSE_MODE_BOOT && boot < 1.0f) {
