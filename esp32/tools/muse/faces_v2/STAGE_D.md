@@ -24,3 +24,19 @@ Ported the three approved Stage B art sets into the shipping avatar tree and fla
 ## Still per the card (Stage C)
 New animation CONTENT on the new art (idle beats / extended mood set / clip reactions).
 The faces currently ship with the existing animation layer running on the new art.
+
+
+## 2026-10-12 late: memory pass + crash fix, re-flashed (af04f61)
+- Owner asked for the full memory/optimization pass before sign-off: audit clean by address in
+  the ELF -- statics >1KB are audio/BLE/framework or deliberate; over_eye is already a 512 B
+  bitset x2; avatar frame buffers + mood px in PSRAM; all art tables const->flash. Live:
+  int 34K/17K, dma 29K/17K, psram 3.96 MB free, app flash 27% free.
+- Root-caused the morning unattributed panic (flash coredump, decode archived here): an
+  agent-flip race -- hermes_mode() flips synchronously while CMD_AGENT waits in the queue; one
+  hatch_task iteration ran hermes_step() on a still-open Muse turn -> xStreamBufferReceive
+  wrote s_hbuf(NULL)+pcm_bytes=0x280 -> StoreProhibited.
+- Fixed in af04f61 (pushed): turn_t.hermes pins the backend at turn_start; the loop/pump step
+  only with the owning backend; hermes_step fails the turn gracefully if the mic buffer is
+  missing. Suite 207/207 OK (6 skipped).
+- Re-flashed; banner verified live: Compile time Oct 12 2026 14:30:32. Coredump kept in the
+  device partition + archived here as crash_coredump_musechat.bin / crash_decode_musechat.txt.
