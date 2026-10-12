@@ -128,12 +128,12 @@ enum { G_0, G_1, G_Q, G_BANG, G_Z };
 /* A stipple of the state's glow on the visor around the eyes. */
 static void eye_bloom(float k, uint8_t c)
 {
-    static const int cx[2] = { 20, 43 };
+    static const int cx[2] = { 21, 42 };
     for (int e = 0; e < 2; e++) {
         for (int dy = -5; dy <= 5; dy++) {
             for (int dx = -8; dx <= 8; dx++) {
                 float d2 = (float)(dx * dx) / 2.6f + (float)(dy * dy);
-                int x = cx[e] + dx, y = 23 + dy;
+                int x = cx[e] + dx, y = 29 + dy;
                 if (d2 < 22.0f && ((x + y) & 1) == 0 && BAYER4[y & 3][x & 3] < (int)((1.0f - d2 / 22.0f) * 16.0f * k)) {
                     uint8_t cur = s_fb[y * W + x];
                     if (cur == IDX_SOCKET || cur == IDX_SKIN || (cur < SPR_N && SPR_PAL[cur][0] > 110)) {
@@ -151,7 +151,7 @@ static void eye_bloom(float k, uint8_t c)
 static void draw_wave(float t, float level)
 {
     float lv = level < 0.12f ? 0.12f : level;
-    static const int cx = 31, cy = 54;
+    static const int cx = 31, cy = 53;
     for (int ring = 0; ring < 3; ring++) {
         float ph = fmodf(t * (2.2f + lv * 2.5f) + (float)ring / 3.0f, 1.0f);
         float r = 4.0f + ph * (lv * 16.0f + 10.0f);
@@ -164,8 +164,10 @@ static void draw_wave(float t, float level)
             }
             uint8_t cur = pxat(x, y);
             uint8_t c = (i & 1) ? D_G1 : D_G0;
-            /* Guard: a dynamic index (>= SPR_N) is glow already, not stone -- skip it. */
-            if (cur < SPR_N && SPR_PAL[cur][1] > 60 && SPR_PAL[cur][1] >= SPR_PAL[cur][0]) {
+            /* Guard: a dynamic index (>= SPR_N) is glow already, not stone -- skip it.
+             * C5 palette: never over the face plate or the eyes (all warm -- the old
+             * green test never fires on this palette). */
+            if ((cur < SPR_N && cur == IDX_SKIN) || SPR_KIND[y * W + x] == 2) {
                 continue;                                /* don't paint over the golem itself */
             }
             if (BAYER4[y & 3][x & 3] < (int)(fade * 16.0f)) {
@@ -389,7 +391,7 @@ static void init_eyes(void)
                 continue;
             }
             eye_t *e = &s_eye[x < 32 ? 0 : 1];
-            if (e->n < 24) {
+            if (e->n < 48) {   /* C5 lens = 38 px per eye */
                 e->x[e->n] = (uint8_t)x;
                 e->y[e->n] = (uint8_t)y;
                 e->c[e->n] = SPR[y * W + x];
@@ -500,34 +502,35 @@ static void draw_eyes(float open, float close, bool xeye, float bright, float wi
  * sprite rows cannot be relied on as the closed shape). */
 static void draw_mouth(float open)
 {
-    static const int x0 = 28, x1 = 35;         /* the carved slot (x 28..35, y 30..31) */
+    /* C5: the carved smile (rows 37..38) IS the closed mouth -- at rest this leaves it
+     * alone. The speaking inhale parts the slot downward from the smile line. */
+    static const int x0 = 28, x1 = 35;
+    if (open < 0.2f) {
+        return;
+    }
     for (int r = 0; r < 3; r++) {              /* wipe to face plate first (3 rows of slack) */
         for (int x = x0 + r; x <= x1 - r; x++) {
-            px(x, 30 + r, IDX_SKIN);
+            px(x, 37 + r, IDX_SKIN);
         }
     }
-    if (open < 0.2f) {                         /* closed: the flat carved slit */
-        for (int x = x0; x <= x1; x++) {
-            px(x, 30, IDX_LID);
-        }
-    } else if (open < 0.45f) {                 /* half: a small rounded O (2 rows) */
+    if (open < 0.45f) {                        /* half: a small rounded O (2 rows) */
         for (int x = x0 + 1; x <= x1 - 1; x++) {
-            px(x, 30, IDX_LID);
+            px(x, 37, IDX_LID);
         }
         for (int x = x0 + 2; x <= x1 - 2; x++) {
-            px(x, 31, IDX_BLACK);
+            px(x, 38, IDX_BLACK);
         }
     } else {                                   /* open: a tall O — dark walls, hollow, a floor */
         for (int x = x0 + 2; x <= x1 - 2; x++) {
-            px(x, 30, IDX_LID);
-            px(x, 31, IDX_BLACK);
-            px(x, 32, IDX_BLACK);
+            px(x, 37, IDX_LID);
+            px(x, 38, IDX_BLACK);
+            px(x, 39, IDX_BLACK);
             if (open > 0.9f && x >= x0 + 3 && x <= x1 - 3) {
-                px(x, 33, IDX_LID);
+                px(x, 40, IDX_LID);
             }
         }
-        px(x0 + 1, 31, IDX_LID); px(x1 - 1, 31, IDX_LID);
-        px(x0 + 1, 32, IDX_LID); px(x1 - 1, 32, IDX_LID);
+        px(x0 + 1, 38, IDX_LID); px(x1 - 1, 38, IDX_LID);
+        px(x0 + 1, 39, IDX_LID); px(x1 - 1, 39, IDX_LID);
     }
 }
 
@@ -662,11 +665,11 @@ static void motes_init(void)
         }
     }
     /* the body pixels the glint field drifts over: a ~1/4 spatial subset of the
-     * solid stone, never the lens (rank >= 18 is the cream eye) */
+     * solid stone; never the top ranks (plate/glint) nor the kind-2 lens */
     for (int y = 3; y < H - 3; y++) {
         for (int x = 3; x < W - 3; x++) {
             uint8_t k = s_pix_k[y * W + x];
-            if (k == 0 || k > 17 || ((x * 3 + y * 5) & 3) != 0) {
+            if (k == 0 || k > SPR_N - 3 || SPR_KIND[y * W + x] == 2 || ((x * 3 + y * 5) & 3) != 0) {
                 continue;
             }
             if (s_mote_n < MOTE_N) {
@@ -762,7 +765,7 @@ static void chest_core(float t, float level, float bright)
 {
     /* The core GLOWS — synced to the breath beat and the VOICE level (level now drives the
      * swell, no longer voided). Dense hot centre, soft falloff, no sparse dither specks. */
-    int cx = 31, cy = 49;                 /* the plate's true centre (y46..53 + keyhole) */
+    int cx = 31, cy = 52;                 /* the C5 core seal's true centre (31.5, 51.5) */
     float beat = 0.5f + 0.5f * sinf(t * 3.4f);
     float drive = 0.35f + 0.65f * level;                          /* the voice itself */
     drive = fmaxf(drive * bright, 0.25f * bright);
@@ -807,8 +810,8 @@ static void think_spin(float t, float k)
 {
     for (int i = 0; i < 3; i++) {
         float a = t * 2.2f + (float)i * (TAU / 3.0f);
-        int x = 31 + iround(cosf(a) * 10.5f), y = 49 + iround(sinf(a) * 9.0f);
-        int tx = 31 + iround(cosf(a - 0.55f) * 10.5f), ty = 49 + iround(sinf(a - 0.55f) * 9.0f);
+        int x = 31 + iround(cosf(a) * 10.5f), y = 52 + iround(sinf(a) * 9.0f);
+        int tx = 31 + iround(cosf(a - 0.55f) * 10.5f), ty = 52 + iround(sinf(a - 0.55f) * 9.0f);
         if (BAYER4[y & 3][x & 3] < (int)(k * 16.0f) + 1) {
             px(x, y, D_WHITE);
         }
