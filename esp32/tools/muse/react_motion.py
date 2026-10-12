@@ -138,7 +138,10 @@ def sweep(args):
             a, b = [s.strip() for s in pair.split(">")]
             for off in [float(o) for o in args.offsets.split(",")]:
                 fire2 = args.fire + off
-                total = fire2 + 2.4
+                # run past the fired mood's own life (max duration 3.4 s) so the
+                # "settled" reference frame is a steady face, not a mid-mood frame
+                # of the mood's OWN animation cycle.
+                total = fire2 + 4.0
                 f2 = f_frame(fire2)
                 px_pair = run_frames(exe, tmp, f"p_{a}_{b}_{off}", [(a, args.fire), (b, fire2)], total)
                 px_base = run_frames(exe, tmp, f"b_{b}_{off}", [(b, fire2)], total)
@@ -161,15 +164,16 @@ def sweep(args):
                 #    before the fire (its props animate on their own clock);
                 #  - worst: the pair's worst frame over the onset window must not
                 #    out-step the worst of EITHER solo transition (A leaving, B
-                #    arriving) by 200 px -- a 1 px dy nudge is a whole-frame step
-                #    (~900 px) in a solo onset too, so it is not a snap;
-                #  - settle: within the baseline's envelope + the 0.4 s fall.
-                #  the worst-frame allowance scales with how much a 1 px whole-frame
-                #  step already moves on this face (a busier frame steps more pixels).
+                #    arriving) by the allowance -- a 1 px dy nudge is a whole-frame
+                #    step (~900 px) in a solo onset too, so it is not a snap; the
+                #    allowance scales with how much a 1 px step already moves on
+                #    this face (a busier frame steps more pixels);
                 allow_worst = max(200.0, 0.15 * max(wb, a_worst))
                 ok_jump = jp_net <= jb_net + a_amb + 150
                 ok_worst = wp <= max(wb, a_worst) + allow_worst
-                ok_settle = sp <= sb + 10
+                #  settle within the baseline's envelope + one cross-fade window
+                #  (FALL 0.4 s) + the palette/rig tail (~0.16 s) = +14 frames.
+                ok_settle = sp <= sb + 14
                 rows.append({
                     "pair": f"{a}>{b}", "off": off, "fire2": fire2,
                     "jumpB_base_net": jb_net, "jumpB_pair_net": jp_net,
