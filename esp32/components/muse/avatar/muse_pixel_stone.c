@@ -13,6 +13,7 @@
 #include "muse_pixel.h"
 #include "muse_lip.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
+#include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
 #include "stone_moods.h"
 #include "sprite_stone.h"
 
@@ -245,9 +246,16 @@ static void init_eyes(void)
     s_eyes_init = true;
 }
 
-static struct {
-    float last_t, next_gaze, gx, gy, tx, ty, next_blink, blink_t, next_flick, flick_t;
-} s_look = { .next_gaze = 1.0f, .next_blink = 2.5f, .blink_t = -10.0f, .next_flick = 4.0f, .flick_t = -10.0f };
+/* The idle scheduler (T3.2): blink cadence (doubles, doze blinks), speed-classed
+ * saccades, micro-expression beats and the breath -- the shared muse_idle.h,
+ * host-tested in tools/muse/idle_test.c. */
+static muse_idle_t s_idle;
+
+/* Eased speaking level, and the half-lid it drives (hysteretic: the stone's lids
+ * are 3-state, and a syllable stream must not strobe them). */
+static float s_spk;
+static bool s_spk_lid;
+static float s_spk_hold;
 
 /* The T3.1 rig: eased expression channels. The targets are computed per frame in
  * muse_pixel_render; these hold what is actually drawn, so a mood or mode change
@@ -255,33 +263,15 @@ static struct {
 static muse_rig_t s_rig;
 static bool s_rig_init;
 
-/* Returns how closed the eyes are for a blink (0 open .. 1 shut) and updates the gaze. */
-static float look_update(const muse_pose_t *p, float dt)
+/* Returns how closed the eyes are for a blink (0 open .. 1 shut) and steps the gaze/beats. */
+static float look_update(const muse_pose_t *p, float dt, bool allow_ev)
 {
-    if (p->mode == MUSE_MODE_LISTENING) {
-        s_look.tx = s_look.ty = 0;
-    } else if (p->t >= s_look.next_gaze) {
-        s_look.tx = frand() * 2.0f - 1.0f;
-        s_look.ty = (frand() * 2.0f - 1.0f) * 0.6f;
-        if (p->mode == MUSE_MODE_THINKING) {
-            s_look.tx = s_look.tx < 0 ? -1.0f : 1.0f;
-            s_look.ty = -0.7f;
-        }
-        s_look.next_gaze = p->t + 1.2f + frand() * 2.6f;
+    if (!s_idle.rng) {
+        muse_idle_init(&s_idle, (uint32_t)(frand() * 100000.0f) + 13u);
     }
-    float k = 1.0f - expf(-dt * 14.0f);
-    s_look.gx += (s_look.tx - s_look.gx) * k;
-    s_look.gy += (s_look.ty - s_look.gy) * k;
-    if (p->t >= s_look.next_blink) {
-        s_look.blink_t = p->t;
-        s_look.next_blink = p->t + 2.4f + frand() * 3.2f;
-    }
-    if (p->t >= s_look.next_flick) {
-        s_look.flick_t = p->t;
-        s_look.next_flick = p->t + 3.0f + frand() * 5.0f;
-    }
-    float b = (p->t - s_look.blink_t) / 0.2f;
-    return b >= 0 && b < 1 ? sinf(b * 3.1416f) : 0.0f;
+    int gm = p->mode == MUSE_MODE_LISTENING ? 1 : p->mode == MUSE_MODE_THINKING ? 2 : 0;
+    muse_idle_step(&s_idle, p->t, dt, gm, allow_ev);
+    return muse_idle_shut(&s_idle, p->t);
 }
 
 /* ---------------------------------------------------------------------------
@@ -740,8 +730,8 @@ void muse_pixel_render(const muse_pose_t *p)
     if (!s_eyes_init) {
         init_eyes();
     }
-    float dt = s_look.last_t > 0 ? clampf(p->t - s_look.last_t, 0, 0.2f) : 0.04f;
-    s_look.last_t = p->t;
+    float dt = s_idle.last_t > 0 ? clampf(p->t - s_idle.last_t, 0, 0.2f) : 0.04f;
+    s_idle.last_t = p->t;
 
     muse_mode_t mode = p->mode;
     float t = p->t, level = clampf(p->level, 0, 1);
@@ -776,7 +766,12 @@ void muse_pixel_render(const muse_pose_t *p)
         tgt = &SCHEMES[MUSE_MODE_THINKING];           /* a violet flicker */
     }
     update_palette(tgt, dt);
-    float close = look_update(p, dt);
+    /* T3.2: beats only start while no reaction and no mode owns the face; a REACT
+     * cancels any beat in flight (see muse_idle.h for the priority rules). */
+    bool allow_ev = rid == R_NONE &&
+                    (mode == MUSE_MODE_IDLE || mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_THINKING);
+    float close = look_update(p, dt, allow_ev);
+    s_spk = muse_ease(s_spk, mode == MUSE_MODE_SPEAKING ? clampf(level * 1.3f, 0, 1) : 0.0f, dt, 0.14f);
     if (mode != MUSE_MODE_SPEAKING) {
         s_lip.state = 0;
         s_lip.hold = 0;
@@ -937,7 +932,7 @@ void muse_pixel_render(const muse_pose_t *p)
     if (xeye) {
         xeyes();
     } else {
-        float gx = s_look.gx, gy = s_look.gy;
+        float gx = s_idle.gx, gy = s_idle.gy;
         if (rid == R_SCAN) {
             gx = 0.0f;
             gy = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
@@ -949,10 +944,32 @@ void muse_pixel_render(const muse_pose_t *p)
             lid = lq < 0.34f ? 0.0f : lq < 0.67f ? 0.5f : 1.0f;
         } else {
             lid = fmaxf(blink, mode == MUSE_MODE_THINKING ? 0.5f : 0.0f);
+            /* Squint-on-speech: half-lid while the voice runs loud, with hysteresis
+             * and a 0.35 s hold so a syllable stream cannot strobe the 3-state lids. */
+            s_spk_hold += dt;
+            if (!s_spk_lid && s_spk > 0.55f && s_spk_hold > 0.35f) {
+                s_spk_lid = true;
+                s_spk_hold = 0;
+            } else if (s_spk_lid && s_spk < 0.30f && s_spk_hold > 0.35f) {
+                s_spk_lid = false;
+                s_spk_hold = 0;
+            }
+            if (mode != MUSE_MODE_SPEAKING) {
+                s_spk_lid = false;
+                s_spk_hold = 0;
+            }
+            if (s_spk_lid) {
+                lid = fmaxf(lid, 0.5f);
+            }
+        }
+        float evk = muse_idle_ev_k(&s_idle, t);
+        if (s_idle.ev == MUSE_IDLE_EV_SQUINT && evk > 0.35f) {
+            lid = fmaxf(lid, 0.5f);            /* an idle squint beat */
         }
         float lids[2] = { lid, lid };
         bool wides[2], arcs[2] = { false, false };
-        wides[0] = wides[1] = (mode == MUSE_MODE_LISTENING || (widen > 0.5f && nface == 0));
+        wides[0] = wides[1] = (mode == MUSE_MODE_LISTENING || (widen > 0.5f && nface == 0) ||
+                               (s_idle.ev == MUSE_IDLE_EV_WIDEN && evk > 0.35f));
         if (rid == R_WINK) {
             float lidl = wink_s < 0.2f ? 0.0f : wink_s < 0.65f ? 0.5f : 1.0f;
             lids[0] = lidl;
@@ -960,13 +977,22 @@ void muse_pixel_render(const muse_pose_t *p)
             wides[0] = wides[1] = false;
             arcs[0] = true;
             gx = gy = 0.0f;
+        } else if (s_idle.ev == MUSE_IDLE_EV_WINK) {
+            /* An idle wink beat: one lid, no lean (the scheduler times it). */
+            float q = evk < 0.2f ? 0.0f : evk < 0.6f ? 0.5f : 1.0f;
+            lids[s_idle.ev_side] = q;
+            arcs[s_idle.ev_side] = q >= 1.0f;
+            wides[s_idle.ev_side] = false;
         }
         draw_eyes(gx, gy, lids, wides, arcs);
         for (int i = 0; i < nface; i++) {
             pose(face_pose[i], face_w[i], face_pose[i] != POSE_WINK);
         }
-        if (happy > 0 && nface == 0) {
-            pose(POSE_PLEASED, happy, true);
+        if (nface == 0) {
+            float sm = fmaxf(happy, s_idle.ev == MUSE_IDLE_EV_SMILE ? evk * 0.5f : 0.0f);
+            if (sm > 0) {
+                pose(POSE_PLEASED, sm, true);
+            }
         }
     }
     if (mode == MUSE_MODE_SPEAKING && s_rig.mouth > 0.02f) {
@@ -998,7 +1024,7 @@ void muse_pixel_render(const muse_pose_t *p)
              * the scarce pool). Prop pixels must never land on the eyes. */
             static uint8_t over_eye[64 * 64 / 8];
             memset(over_eye, 0, sizeof over_eye);
-            int esx = iround(s_look.gx * 2.0f), esy = iround(s_look.gy * 1.0f);
+            int esx = iround(s_idle.gx * 2.0f), esy = iround(s_idle.gy * 1.0f);
             for (int s2 = 0; s2 < 2; s2++) {
                 const eye_t *e = &s_eye[s2];
                 for (int i2 = 0; i2 < e->n; i2++) {
@@ -1029,8 +1055,8 @@ void muse_pixel_render(const muse_pose_t *p)
             }
         }
     }
-    /* A slow breath, a hop when petted, a shake on error. */
-    int dy = iround(sinf(t * 1.4f) * 0.6f) - (happy > 0 ? (int)(fabsf(sinf(t * 9.0f)) * 2.5f * happy) : 0);
+    /* A slow breath (the scheduler's wandering bob), a hop when petted, a shake on error. */
+    int dy = iround(muse_idle_breath(&s_idle)) - (happy > 0 ? (int)(fabsf(sinf(t * 9.0f)) * 2.5f * happy) : 0);
     if (rid == R_SURPRISED && rt < 0.35f) {
         dy -= 2;
     }

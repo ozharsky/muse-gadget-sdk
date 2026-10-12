@@ -13,6 +13,7 @@
 #include "sprite_golem.h"
 #include "golem_moods.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
+#include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
 
    /* baked mood-prop frames (all moods) */
 #include "golem_moods.h"   /* pre-baked mood frames (sparse diffs) */
@@ -365,7 +366,7 @@ static void update_palette(const scheme_t *t, float dt)
 }
 
 /* ---------------------------------------------------------------------------
- * Eyes: the two amber lenses, animated (open / close / look / blink / flicker)
+ * Eyes: the two amber lenses, animated (open / close / look / blink / wink)
  * ------------------------------------------------------------------------- */
 
 typedef struct {
@@ -406,10 +407,14 @@ static void init_eyes(void)
     s_eyes_init = true;
 }
 
-static struct {
-    float last_t, next_gaze, gx, gy, tx, ty, next_blink, blink_t, next_flick, flick_t;
-    int sp_tx, sp_ty;   /* the lens sparkle's wander offset */
-} s_look = { .next_gaze = 1.0f, .next_blink = 2.5f, .blink_t = -10.0f, .next_flick = 4.0f, .flick_t = -10.0f };
+/* The idle scheduler (T3.2): blink cadence (doubles, doze blinks), speed-classed
+ * saccades, micro-expression beats and the breath -- the shared muse_idle.h,
+ * host-tested in tools/muse/idle_test.c. The reaction poses still poke s_idle.tx/ty
+ * directly; the scheduler treats a poke as the new target. */
+static muse_idle_t s_idle;
+
+/* The lens sparkle: the hot pixel inside each lens wanders on its own slow beat. */
+static int s_sp_tx, s_sp_ty;
 
 /* The T3.1 rig: eased expression channels. The targets are computed per frame in
  * muse_pixel_render; these hold what is actually drawn, so a mood or mode change
@@ -418,41 +423,21 @@ static muse_rig_t s_rig;
 static bool s_rig_init;
 static float s_eye_cur[2] = { 1.0f, 1.0f };   /* eased per-eye wink scale (targets in s_eye_scale) */
 
-/* Returns how closed the eyes are (0 open .. 1 shut) and updates the gaze. */
-static float look_update(const muse_pose_t *p, float dt, float *flick)
+/* Returns how closed the eyes are (0 open .. 1 shut) and steps the gaze/beats. */
+static float look_update(const muse_pose_t *p, float dt, bool allow_ev)
 {
-    if (p->mode == MUSE_MODE_LISTENING) {
-        s_look.tx = s_look.ty = 0;
-    } else if (p->t >= s_look.next_gaze) {
-        s_look.tx = frand() * 2.0f - 1.0f;
-        s_look.ty = (frand() * 2.0f - 1.0f) * 0.6f;
-        if (p->mode == MUSE_MODE_THINKING) {
-            s_look.tx = s_look.tx < 0 ? -1.0f : 1.0f;
-            s_look.ty = -0.7f;
-        }
-        s_look.next_gaze = p->t + 1.2f + frand() * 2.6f;
+    if (!s_idle.rng) {
+        muse_idle_init(&s_idle, (uint32_t)(frand() * 100000.0f) + 11u);
     }
-    float k = 1.0f - expf(-dt * 14.0f);
-    s_look.gx += (s_look.tx - s_look.gx) * k;
-    s_look.gy += (s_look.ty - s_look.gy) * k;
-    /* a slow lens sparkle: the hot pixel inside each lens wanders on its own slow beat */
-    s_look.sp_tx = iround(1.6f * sinf(p->t * 0.9f));
-    s_look.sp_ty = iround(0.9f * sinf(p->t * 0.53f + 1.3f));
-    if (p->t >= s_look.next_blink) {
-        s_look.blink_t = p->t;
-        s_look.next_blink = p->t + 2.4f + frand() * 3.2f;
-    }
-    if (p->t >= s_look.next_flick) {
-        s_look.flick_t = p->t;
-        s_look.next_flick = p->t + 3.0f + frand() * 5.0f;
-    }
-    *flick = clampf(1.0f - (p->t - s_look.flick_t) / 0.18f, 0, 1);
-    float b = (p->t - s_look.blink_t) / 0.2f;
-    return b >= 0 && b < 1 ? sinf(b * 3.1416f) : 0.0f;
+    int gm = p->mode == MUSE_MODE_LISTENING ? 1 : p->mode == MUSE_MODE_THINKING ? 2 : 0;
+    muse_idle_step(&s_idle, p->t, dt, gm, allow_ev);
+    s_sp_tx = iround(1.6f * sinf(p->t * 0.9f));
+    s_sp_ty = iround(0.9f * sinf(p->t * 0.53f + 1.3f));
+    return muse_idle_shut(&s_idle, p->t);
 }
 
 /* Edits only the eye's own pixels, so the visor around them stays as drawn. */
-static void draw_eyes(float open, float close, float flick, bool xeye, float bright, float widen)
+static void draw_eyes(float open, float close, bool xeye, float bright, float widen)
 {
     for (int s = 0; s < 2; s++) {
         const eye_t *e = &s_eye[s];
@@ -470,7 +455,7 @@ static void draw_eyes(float open, float close, float flick, bool xeye, float bri
             }
             continue;
         }
-        float o = open * (1.0f - close) * (1.0f - 0.55f * flick) * s_eye_cur[s];
+        float o = open * (1.0f - close) * s_eye_cur[s];
         for (int i = 0; i < e->n; i++) {
             px(e->x[i], e->y[i], IDX_SOCKET);          /* wipe the lens back to the visor */
         }
@@ -480,7 +465,7 @@ static void draw_eyes(float open, float close, float flick, bool xeye, float bri
             }
             continue;
         }
-        int sx = iround(s_look.gx * 2.0f), sy = iround(s_look.gy * 1.0f);
+        int sx = iround(s_idle.gx * 2.0f), sy = iround(s_idle.gy * 1.0f);
         int top = e->ymin;
         for (int i = 0; i < e->n; i++) {
             if (o < 0.62f && e->y[i] == top) {
@@ -489,8 +474,8 @@ static void draw_eyes(float open, float close, float flick, bool xeye, float bri
             uint8_t c = e->c[i];
             int ox = 0, oy = 0;
             if (c == IDX_EYE_U) {                    /* the glint: wanders over the lens */
-                ox = s_look.sp_tx;
-                oy = s_look.sp_ty;
+                ox = s_sp_tx;
+                oy = s_sp_ty;
                 if (bright > 0.8f) {
                     c = D_G0;
                 }
@@ -989,8 +974,8 @@ void muse_pixel_render(const muse_pose_t *p)
         init_eyes();
     }
     s_frame++;                        /* monotonic per-frame ticks for the ambient layers */
-    float dt = s_look.last_t > 0 ? clampf(p->t - s_look.last_t, 0, 0.2f) : 0.04f;
-    s_look.last_t = p->t;
+    float dt = s_idle.last_t > 0 ? clampf(p->t - s_idle.last_t, 0, 0.2f) : 0.04f;
+    s_idle.last_t = p->t;
 
     muse_mode_t mode = p->mode;
     float t = p->t, level = clampf(p->level, 0, 1);
@@ -1031,8 +1016,11 @@ void muse_pixel_render(const muse_pose_t *p)
         tgt = &SCHEMES[MUSE_MODE_SPEAKING];           /* a sickly yellow */
     }
     update_palette(tgt, dt);
-    float flick;
-    float close = look_update(p, dt, &flick);
+    /* T3.2: beats only start while no reaction and no mode owns the face; a REACT
+     * cancels any beat in flight (see muse_idle.h for the priority rules). */
+    bool allow_ev = rid == R_NONE &&
+                    (mode == MUSE_MODE_IDLE || mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_THINKING);
+    float close = look_update(p, dt, allow_ev);
 
     /* Per-mode parameters. */
     float open = 0.8f, bright = 0.6f, pulse = 0.35f, widen = 0, mouth = 0;
@@ -1072,10 +1060,10 @@ void muse_pixel_render(const muse_pose_t *p)
     float bloom = 0;
     switch (rid) {
     case R_SMIRK:
-        open = 0.62f; bright = 1.0f; bloom = 0.6f; s_look.tx = 0.9f;
+        open = 0.62f; bright = 1.0f; bloom = 0.6f; s_idle.tx = 0.9f;
         break;
     case R_SQUINT:
-        open = 0.35f; bright = 0.5f; s_look.tx = -0.8f;
+        open = 0.35f; bright = 0.5f; s_idle.tx = -0.8f;
         break;
     case R_SURPRISED:
         open = 1.2f; widen = 1.0f; bright = 1.0f; mouth = 1.0f; bloom = 0.8f;
@@ -1090,7 +1078,7 @@ void muse_pixel_render(const muse_pose_t *p)
         open = 0.75f; bright = 1.0f; bloom = 1.0f;
         break;
     case R_SCAN:
-        bright = 0.9f; bloom = 0.5f; s_look.ty = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
+        bright = 0.9f; bloom = 0.5f; s_idle.ty = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
         break;
     case R_GLITCH:
         open = (((int)(t * 20.0f)) % 3) ? open : 0.1f;
@@ -1108,16 +1096,16 @@ void muse_pixel_render(const muse_pose_t *p)
         open = fmaxf(0.15f, 0.7f - rt * 0.22f); bright = 0.3f;
         break;
     case R_CONFUSED:
-        open = 0.85f; s_look.tx = ((int)(t * 2.6f) & 1) ? 1.0f : -1.0f; s_look.ty = -0.2f;
+        open = 0.85f; s_idle.tx = ((int)(t * 2.6f) & 1) ? 1.0f : -1.0f; s_idle.ty = -0.2f;
         break;
     case R_BORED:
-        open = 0.45f; bright = 0.4f; s_look.tx = cosf(rt * 2.2f); s_look.ty = 0.7f * sinf(rt * 2.2f);
+        open = 0.45f; bright = 0.4f; s_idle.tx = cosf(rt * 2.2f); s_idle.ty = 0.7f * sinf(rt * 2.2f);
         break;
     case R_DISGUST:
         open = 0.4f; bright = 0.7f;
         break;
     case R_NERVOUS:
-        open = 1.0f; widen = 1.0f; s_look.tx = ((int)(t * 7.0f) & 1) ? 1.0f : -1.0f; s_look.ty = 0;
+        open = 1.0f; widen = 1.0f; s_idle.tx = ((int)(t * 7.0f) & 1) ? 1.0f : -1.0f; s_idle.ty = 0;
         break;
     case R_PROUD:
         open = 0.8f; bright = 1.0f; bloom = 0.5f;
@@ -1126,7 +1114,7 @@ void muse_pixel_render(const muse_pose_t *p)
         bright = 1.0f; bloom = clampf(rt * 1.2f, 0, 1); open = 1.0f; widen = 1.0f;
         break;
     case R_TARGET:
-        open = 0.7f; bright = 1.0f; s_look.tx = 0; s_look.ty = 0;
+        open = 0.7f; bright = 1.0f; s_idle.tx = 0; s_idle.ty = 0;
         break;
     case R_EXCITED:
         open = 1.0f; widen = 1.0f; bright = 1.0f; bloom = 0.7f;
@@ -1172,6 +1160,24 @@ void muse_pixel_render(const muse_pose_t *p)
         open = clampf(1.0f - p->mode_t / 0.45f, 0, 1);
     }
 
+    /* Idle beats (T3.2): only while allowed; a reaction cancels them outright. The
+     * golem's lids are thresholded (<0.3 seam, <0.62 half-lid), so the squint-on-
+     * speech coupling that reads as a lid droop on the other faces would only
+     * chatter a threshold here -- its voice stays the chest core. */
+    float evk = muse_idle_ev_k(&s_idle, t);
+    if (s_idle.ev == MUSE_IDLE_EV_WIDEN) {
+        widen = fmaxf(widen, evk);
+    } else if (s_idle.ev == MUSE_IDLE_EV_SMILE) {
+        open = fmaxf(open, 0.9f);
+        bright = fmaxf(bright, 0.7f + 0.3f * evk);   /* a warm flare */
+        bloom = fmaxf(bloom, 0.5f * evk);
+    } else if (s_idle.ev == MUSE_IDLE_EV_WINK) {
+        s_eye_scale[s_idle.ev_side] = 0.0f;          /* eased by s_eye_cur below */
+    }
+    if (s_idle.ev == MUSE_IDLE_EV_SQUINT) {
+        close = fmaxf(close, evk * 0.5f);            /* the beat reads as a half-lid dip */
+    }
+
     /* T3.1 rig: from here down the eased channels replace the targets, so an
      * expression change is motion, not a cut. The glitch's eyelid flicker stays a
      * deliberate hard cut; the wink scale eases so the lid lands smooth. */
@@ -1198,7 +1204,7 @@ void muse_pixel_render(const muse_pose_t *p)
     if (bloom > 0.02f) {
         eye_bloom(bloom, D_G3);   /* the rig leaves a residue; below this nothing paints */
     }
-    draw_eyes(open, close, flick, xeye, bright, widen);
+    draw_eyes(open, close, xeye, bright, widen);
     if (mouth > 0) {
         draw_mouth(mouth);
     } else if (mode != MUSE_MODE_OFF) {
@@ -1237,7 +1243,7 @@ void muse_pixel_render(const muse_pose_t *p)
              * the scarce pool). Prop pixels must never land on the eyes. */
             static uint8_t over_eye[64 * 64 / 8];
             memset(over_eye, 0, sizeof over_eye);
-            int esx = iround(s_look.gx * 2.0f), esy = iround(s_look.gy * 1.0f);
+            int esx = iround(s_idle.gx * 2.0f), esy = iround(s_idle.gy * 1.0f);
             for (int s2 = 0; s2 < 2; s2++) {
                 const eye_t *e = &s_eye[s2];
                 for (int i2 = 0; i2 < e->n; i2++) {

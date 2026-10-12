@@ -21,6 +21,7 @@
 #include "muse_pixel.h"
 #include "muse_lip.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
+#include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
 #include "sprite_data.h"
 #include "shodan_poses.h"   /* the baked face-pose library (art-pipeline/shodan_poses/) */
 
@@ -260,9 +261,14 @@ static void init_eyes(void)
     s_eyes_init = true;
 }
 
-static struct {
-    float last_t, next_gaze, gx, gy, tx, ty, next_blink, blink_t, next_flick, flick_t;
-} s_look = { .next_gaze = 1.0f, .next_blink = 2.5f, .blink_t = -10.0f, .next_flick = 4.0f, .flick_t = -10.0f };
+/* The idle scheduler (T3.2): blink cadence (doubles, doze blinks), speed-classed
+ * saccades, micro-expression beats and the breath -- the shared muse_idle.h,
+ * host-tested in tools/muse/idle_test.c. The reaction poses still poke s_idle.tx/ty
+ * directly; the scheduler treats a poke as the new target. */
+static muse_idle_t s_idle;
+
+/* Eased speaking level: the squint-on-speech lid droop rides the voice. */
+static float s_spk;
 
 /* The T3.1 rig: eased expression channels. The targets are computed per frame in
  * muse_pixel_render; these hold what is actually drawn, so a mood or mode change
@@ -270,34 +276,15 @@ static struct {
 static muse_rig_t s_rig;
 static bool s_rig_init;
 
-/* Returns how closed the eyes are (0 open .. 1 shut) and updates the gaze. */
-static float look_update(const muse_pose_t *p, float dt, float *flick)
+/* Returns how closed the eyes are (0 open .. 1 shut) and steps the gaze/beats. */
+static float look_update(const muse_pose_t *p, float dt, bool allow_ev)
 {
-    if (p->mode == MUSE_MODE_LISTENING) {
-        s_look.tx = s_look.ty = 0;
-    } else if (p->t >= s_look.next_gaze) {
-        s_look.tx = frand() * 2.0f - 1.0f;
-        s_look.ty = (frand() * 2.0f - 1.0f) * 0.6f;
-        if (p->mode == MUSE_MODE_THINKING) {
-            s_look.tx = s_look.tx < 0 ? -1.0f : 1.0f;
-            s_look.ty = -0.7f;
-        }
-        s_look.next_gaze = p->t + 1.2f + frand() * 2.6f;
+    if (!s_idle.rng) {
+        muse_idle_init(&s_idle, (uint32_t)(frand() * 100000.0f) + 7u);
     }
-    float k = 1.0f - expf(-dt * 14.0f);
-    s_look.gx += (s_look.tx - s_look.gx) * k;
-    s_look.gy += (s_look.ty - s_look.gy) * k;
-    if (p->t >= s_look.next_blink) {
-        s_look.blink_t = p->t;
-        s_look.next_blink = p->t + 2.4f + frand() * 3.2f;
-    }
-    if (p->t >= s_look.next_flick) {
-        s_look.flick_t = p->t;
-        s_look.next_flick = p->t + 3.0f + frand() * 5.0f;
-    }
-    *flick = clampf(1.0f - (p->t - s_look.flick_t) / 0.18f, 0, 1);
-    float b = (p->t - s_look.blink_t) / 0.2f;
-    return b >= 0 && b < 1 ? sinf(b * 3.1416f) : 0.0f;
+    int gm = p->mode == MUSE_MODE_LISTENING ? 1 : p->mode == MUSE_MODE_THINKING ? 2 : 0;
+    muse_idle_step(&s_idle, p->t, dt, gm, allow_ev);
+    return muse_idle_shut(&s_idle, p->t);
 }
 
 /* One baked pose blended into the framebuffer: a sparse index delta with ordered
@@ -683,8 +670,8 @@ void muse_pixel_render(const muse_pose_t *p)
     if (!s_eyes_init) {
         init_eyes();
     }
-    float dt = s_look.last_t > 0 ? clampf(p->t - s_look.last_t, 0, 0.2f) : 0.04f;
-    s_look.last_t = p->t;
+    float dt = s_idle.last_t > 0 ? clampf(p->t - s_idle.last_t, 0, 0.2f) : 0.04f;
+    s_idle.last_t = p->t;
 
     muse_mode_t mode = p->mode;
     float t = p->t, level = clampf(p->level, 0, 1);
@@ -719,13 +706,16 @@ void muse_pixel_render(const muse_pose_t *p)
         tgt = &SCHEMES[MUSE_MODE_THINKING];           /* a violet flicker */
     }
     update_palette(tgt, dt);
-    float flick;
-    float close = look_update(p, dt, &flick);
+    /* T3.2: beats only start while no reaction and no mode owns the face; a REACT
+     * cancels any beat in flight (see muse_idle.h for the priority rules). */
+    bool allow_ev = rid == R_NONE &&
+                    (mode == MUSE_MODE_IDLE || mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_THINKING);
+    float close = look_update(p, dt, allow_ev);
+    s_spk = muse_ease(s_spk, mode == MUSE_MODE_SPEAKING ? clampf(level * 1.3f, 0, 1) : 0.0f, dt, 0.14f);
     if (mode != MUSE_MODE_SPEAKING) {
         s_lip.state = 0;
         s_lip.hold = 0;
     }
-    (void)flick;   /* the pose face carries the blinks; the old lens flicker is gone (pack parity) */
 
     /* Per-mode parameters. */
     float open = 0.8f, bright = 0.6f, pulse = 0.35f, mouth = 0;
@@ -909,25 +899,41 @@ void muse_pixel_render(const muse_pose_t *p)
     if (xeye) {
         draw_xeyes();
     } else if (nf == 0 && rid == R_NONE) {
-        /* Idle-style face: the poses carry the gaze and the blinks. */
-        if (s_rig.widen > 0.02f) {
-            pose_apply(P_WIDE, s_rig.widen);   /* widens in, relaxes out (rig) */
+        /* Idle-style face: the scheduler owns the gaze, the blinks and the beats. */
+        float evk = muse_idle_ev_k(&s_idle, t);
+        float wdw = s_rig.widen;
+        if (s_idle.ev == MUSE_IDLE_EV_WIDEN) {
+            wdw = fmaxf(wdw, evk);             /* a brief "noticed something" */
+        }
+        if (wdw > 0.02f) {
+            pose_apply(P_WIDE, wdw);           /* widens in, relaxes out (rig) */
         }
         if (mode == MUSE_MODE_THINKING) {
             pose_apply(P_HALF, 0.55f);
-            pose_apply(P_UP, clampf(-s_look.gy, 0, 1));
-            pose_apply(s_look.gx > 0 ? P_RIGHT : P_LEFT, clampf(fabsf(s_look.gx) * 0.8f, 0, 1));
+            pose_apply(P_UP, clampf(-s_idle.gy, 0, 1));
+            pose_apply(s_idle.gx > 0 ? P_RIGHT : P_LEFT, clampf(fabsf(s_idle.gx) * 0.8f, 0, 1));
         } else if (mode != MUSE_MODE_LISTENING) {
-            pose_apply(P_RIGHT, clampf(s_look.gx, 0, 1) * 0.9f);
-            pose_apply(P_LEFT, clampf(-s_look.gx, 0, 1) * 0.9f);
-            pose_apply(P_DOWN, clampf(s_look.gy, 0, 1) * 0.9f);
-            pose_apply(P_UP, clampf(-s_look.gy, 0, 1) * 0.9f);
+            pose_apply(P_RIGHT, clampf(s_idle.gx, 0, 1) * 0.9f);
+            pose_apply(P_LEFT, clampf(-s_idle.gx, 0, 1) * 0.9f);
+            pose_apply(P_DOWN, clampf(s_idle.gy, 0, 1) * 0.9f);
+            pose_apply(P_UP, clampf(-s_idle.gy, 0, 1) * 0.9f);
+        }
+        if (s_idle.ev == MUSE_IDLE_EV_SQUINT) {
+            pose_apply(P_SQUINT, evk * 0.9f);
+        } else if (s_idle.ev == MUSE_IDLE_EV_SMILE) {
+            pose_apply(P_SMIRK, evk * 0.4f);    /* a faint smirk, not the full act */
         }
         float shut = close;
+        if (mode == MUSE_MODE_SPEAKING) {
+            shut = fmaxf(shut, s_spk * 0.45f);  /* squint-on-speech: lids ride the voice */
+        }
         if (mode == MUSE_MODE_BOOT || mode == MUSE_MODE_OFF) {
             shut = fmaxf(close, 1.0f - open);   /* boot/off: open is eyes_open */
         }
         pose_apply(P_CLOSED, shut);
+        if (s_idle.ev == MUSE_IDLE_EV_WINK) {
+            pose_apply(P_WINK, evk);            /* an idle wink beat */
+        }
         if (happy > 0) {
             pose_apply(P_PLEASED, happy);
         }
@@ -1103,8 +1109,8 @@ void muse_pixel_render(const muse_pose_t *p)
             }
         }
     }
-    /* A slow breath, a hop when petted, a shake on error. */
-    int dy = iround(sinf(t * 1.4f) * 0.6f) - (happy > 0 ? (int)(fabsf(sinf(t * 9.0f)) * 2.5f * happy) : 0);
+    /* A slow breath (the scheduler's wandering bob), a hop when petted, a shake on error. */
+    int dy = iround(muse_idle_breath(&s_idle)) - (happy > 0 ? (int)(fabsf(sinf(t * 9.0f)) * 2.5f * happy) : 0);
     if (rid == R_SURPRISED && rt < 0.35f) {
         dy -= 2;
     }
