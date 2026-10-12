@@ -14,6 +14,9 @@
 #include "golem_moods.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
+
+/* Stage C: golem's own resting rhythm -- eager, bouncy, twice as busy. */
+static const muse_idle_cfg_t s_idle_cfg = MUSE_IDLE_PERSONA_GOLEM;
 #include "muse_crack.h" /* the error state's persistent crack tears */
 #include "muse_blend.h" /* the cross-mood blend: live moods cross-fade instead of cutting */
 #include "golem_moods.h"   /* pre-baked mood frames (sparse diffs) */
@@ -431,7 +434,7 @@ static float s_eye_cur[2] = { 1.0f, 1.0f };   /* eased per-eye wink scale (targe
 static float look_update(const muse_pose_t *p, float dt, bool allow_ev)
 {
     if (!s_idle.rng) {
-        muse_idle_init(&s_idle, (uint32_t)(frand() * 100000.0f) + 11u);
+        muse_idle_init_cfg(&s_idle, (uint32_t)(frand() * 100000.0f) + 11u, &s_idle_cfg);
     }
     int gm = p->mode == MUSE_MODE_LISTENING ? 1 : p->mode == MUSE_MODE_THINKING ? 2 : 0;
     muse_idle_step(&s_idle, p->t, dt, gm, allow_ev);
@@ -761,16 +764,17 @@ static void off_pip(float t)
 }
 
 /* The chest emblem's core breathes; it flares with the voice. */
-static void chest_core(float t, float level, float bright)
+static void chest_core(float t, float level, float bright, float thump)
 {
     /* The core GLOWS — synced to the breath beat and the VOICE level (level now drives the
      * swell, no longer voided). Dense hot centre, soft falloff, no sparse dither specks. */
     int cx = 31, cy = 52;                 /* the C5 core seal's true centre (31.5, 51.5) */
     float beat = 0.5f + 0.5f * sinf(t * 3.4f);
+    beat = fminf(1.0f, beat + 1.25f * thump);   /* Stage C: the accent thump rides the resting pulse */
     float drive = 0.35f + 0.65f * level;                          /* the voice itself */
     drive = fmaxf(drive * bright, 0.25f * bright);
     float rr = (12.0f + 24.0f * (0.30f + 0.70f * beat)) * (0.85f + 0.55f * drive);
-    int hot = 6 + (int)(4.0f * drive);                            /* the hot centre follows level */
+    int hot = 6 + (int)(4.0f * drive + 4.0f * thump);                            /* the hot centre follows level */
     for (int dy = -8; dy <= 8; dy++) {
         for (int dx = -8; dx <= 8; dx++) {
             float d2 = (float)(dx * dx) / 1.4f + (float)(dy * dy);
@@ -1347,6 +1351,10 @@ void muse_pixel_render(const muse_pose_t *p)
         close = fmaxf(close, evk * 0.5f);            /* the beat reads as a half-lid dip */
     }
 
+    /* Stage C accent: the core thump -- golem's signature beat. The renderer below
+     * shapes it into the chest-core flare and a one-pixel body kick. */
+    float thump = s_idle.ev == MUSE_IDLE_EV_ACCENT ? evk : 0.0f;
+
     /* T3.1 rig: from here down the eased channels replace the targets, so an
      * expression change is motion, not a cut. The glitch's eyelid flicker stays a
      * deliberate hard cut; the wink scale eases so the lid lands smooth. */
@@ -1369,7 +1377,7 @@ void muse_pixel_render(const muse_pose_t *p)
 
     memcpy(s_fb, SPR, sizeof(s_fb));
     animate_light(t, 0.45f + pulse * 0.9f, level, bright);
-    chest_core(t, level, bright);
+    chest_core(t, level, bright, thump);
     s_think_k += ((mode == MUSE_MODE_THINKING ? 1.0f : 0.0f) - s_think_k) *
                  (dt > 0.0f ? 1.0f - expf(-dt / 0.2f) : 1.0f);
     if (s_think_k > 0.02f) {
@@ -1469,7 +1477,7 @@ void muse_pixel_render(const muse_pose_t *p)
      * The breath now lives in the continuous ambient layers below. The mood's dy
      * blends by weight and rounds: two moods trading opposite nudges step through
      * zero one pixel at a time instead of jumping. */
-    float dyf = dy_mood;
+    float dyf = dy_mood - 1.2f * thump;   /* the accent thump kicks the body a pixel */
     if (happy > 0) {
         dyf -= fabsf(sinf(t * 9.0f)) * 3.5f * happy;
     }

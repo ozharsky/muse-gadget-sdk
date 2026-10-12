@@ -22,6 +22,9 @@
 #include "muse_lip.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
+
+/* Stage C: shodan's own resting rhythm -- precise, quick, a little impatient. */
+static const muse_idle_cfg_t s_idle_cfg = MUSE_IDLE_PERSONA_SHODAN;
 #include "muse_crack.h" /* the error state's persistent crack tears */
 #include "muse_blend.h" /* the cross-mood blend: live moods cross-fade instead of cutting */
 #include "sprite_data.h"
@@ -286,7 +289,7 @@ static bool s_rig_init;
 static float look_update(const muse_pose_t *p, float dt, bool allow_ev)
 {
     if (!s_idle.rng) {
-        muse_idle_init(&s_idle, (uint32_t)(frand() * 100000.0f) + 7u);
+        muse_idle_init_cfg(&s_idle, (uint32_t)(frand() * 100000.0f) + 7u, &s_idle_cfg);
     }
     int gm = p->mode == MUSE_MODE_LISTENING ? 1 : p->mode == MUSE_MODE_THINKING ? 2 : 0;
     muse_idle_step(&s_idle, p->t, dt, gm, allow_ev);
@@ -1036,6 +1039,28 @@ void muse_pixel_render(const muse_pose_t *p)
         pose_apply(P_CLOSED, shut);
         if (s_idle.ev == MUSE_IDLE_EV_WINK) {
             pose_apply(P_WINK, evk);            /* an idle wink beat */
+        }
+        if (s_idle.ev == MUSE_IDLE_EV_ACCENT) {
+            /* The halo tick (Stage C): a bright scan ring sweeps outward across the
+             * face -- the reading that survives the cable corona -- with a short
+             * glitch blip at the start. */
+            float au = muse_idle_ev_u(&s_idle, t);
+            if (au >= 0.0f) {
+                float rr = 5.0f + au * 25.0f;
+                uint8_t rc = au < 0.55f ? D_WHITE : (au < 0.85f ? D_G0 : D_G1);
+                for (int i = 0; i < 360; i += 2) {
+                    float ang = (float)i * TAU / 360.0f;
+                    float ca = cosf(ang), sa = sinf(ang);
+                    px(iround(31.5f + ca * rr), iround(33.0f + sa * (rr * 1.15f)), rc);
+                    /* The inner companion line (green) carries the ring where the
+                     * white would vanish -- crossing the light face. */
+                    px(iround(31.5f + ca * (rr - 1.6f)),
+                       iround(33.0f + sa * ((rr - 1.6f) * 1.15f)), au < 0.55f ? D_G0 : D_G1);
+                }
+                if (au < 0.18f) {
+                    glitch(1, 2, 6, 58);
+                }
+            }
         }
         if (happy > 0) {
             pose_apply(P_PLEASED, happy);

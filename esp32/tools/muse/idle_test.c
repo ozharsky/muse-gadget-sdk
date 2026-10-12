@@ -227,12 +227,114 @@ static void test_breath(void)
     printf("breath: %.2f..%.2f, period %.2f-%.2f s\n", lo, hi, min_gap, max_gap);
 }
 
+
+/* ---- 5. Stage C: the personas rest differently, and the accent beat fires ------ */
+static const muse_idle_cfg_t p_shodan = MUSE_IDLE_PERSONA_SHODAN;
+static const muse_idle_cfg_t p_stone = MUSE_IDLE_PERSONA_STONE;
+static const muse_idle_cfg_t p_golem = MUSE_IDLE_PERSONA_GOLEM;
+
+typedef struct {
+    int blinks, doubles, doze;
+    int beats, accents;
+    int micro, dart, drift;
+    float lid_sum;
+} persona_stats_t;
+
+static persona_stats_t persona_run(const muse_idle_cfg_t *cfg, uint32_t seed, float secs)
+{
+    persona_stats_t st = { 0 };
+    muse_idle_t s;
+    muse_idle_init_cfg(&s, seed, cfg);
+    bool in_blink = false, ev_open = false;
+    float prev_start = -1e9f, ltx = 0, lty = 0;
+    for (float t = 0; t < secs; t += DT) {
+        muse_idle_step(&s, t, DT, 0, true);
+        float sh = muse_idle_shut(&s, t);
+        if (!in_blink && sh > 0.02f) {
+            st.blinks++;
+            st.lid_sum += s.blink_dur;
+            if (prev_start > -1e8f) {
+                float gap = t - prev_start;
+                if (gap > 0.25f && gap < 0.75f) {
+                    st.doubles++;
+                }
+            }
+            if (s.blink_dur > 0.28f) {
+                st.doze++;
+            }
+            prev_start = t;
+            in_blink = true;
+        } else if (in_blink && sh <= 0.02f) {
+            in_blink = false;
+        }
+        if (s.tx != ltx || s.ty != lty) {
+            if (s.gaze_tau > 0.09f) {
+                st.drift++;
+            } else if (fabsf(s.tx - ltx) + fabsf(s.ty - lty) < 0.6f) {
+                st.micro++;
+            } else {
+                st.dart++;
+            }
+            ltx = s.tx;
+            lty = s.ty;
+        }
+        float k = muse_idle_ev_k(&s, t);
+        if (!ev_open && s.ev != MUSE_IDLE_EV_NONE && k > 0.05f) {
+            ev_open = true;
+            st.beats++;
+            if (s.ev == MUSE_IDLE_EV_ACCENT) {
+                st.accents++;
+                check(s.ev_dur >= 0.4f && s.ev_dur <= 1.75f, "accent duration inside the envelope bounds");
+            }
+        } else if (ev_open && s.ev == MUSE_IDLE_EV_NONE) {
+            ev_open = false;
+        }
+    }
+    return st;
+}
+
+static void test_personas(void)
+{
+    persona_stats_t sh = persona_run(&p_shodan, 1001u, 1200.0f);
+    persona_stats_t st = persona_run(&p_stone, 1002u, 1200.0f);
+    persona_stats_t go = persona_run(&p_golem, 1003u, 1200.0f);
+
+    check(sh.accents >= 1 && st.accents >= 1 && go.accents >= 1,
+          "every persona fires its accent beat");
+    check(go.accents > st.accents, "the eager golem accents more often than the ponderous stone");
+    check(st.lid_sum / st.blinks > sh.lid_sum / sh.blinks * 1.2f,
+          "stone's lids travel heavier than shodan's");
+    check(go.doubles / (float)go.blinks > st.doubles / (float)st.blinks,
+          "golem doubles its blinks more often than stone");
+    check(go.beats > st.beats, "golem beats more often than stone");
+    check(go.blinks > st.blinks, "golem blinks faster than stone");
+    check(st.drift > sh.drift, "stone drifts more than shodan");
+    printf("personas (1200 s): shodan %d blinks/%d beats/%d accents | stone %d/%d/%d drift %d | golem %d/%d/%d doubles %d\n",
+           sh.blinks, sh.beats, sh.accents, st.blinks, st.beats, st.accents, st.drift,
+           go.blinks, go.beats, go.accents, go.doubles);
+
+    /* the accent honors the beat priority rules like any other micro beat */
+    muse_idle_t s;
+    muse_idle_init_cfg(&s, 42u, &p_golem);
+    float t = 0;
+    for (; t < 600.0f && !(s.ev == MUSE_IDLE_EV_ACCENT && muse_idle_ev_k(&s, t) > 0.2f); t += DT) {
+        muse_idle_step(&s, t, DT, 0, true);
+    }
+    check(s.ev == MUSE_IDLE_EV_ACCENT, "an accent eventually plays when allowed");
+    check(muse_idle_ev_u(&s, t) >= 0.0f, "the accent's progress reads 0..1 while playing");
+    muse_idle_step(&s, t + DT, DT, 0, false);
+    check(s.ev == MUSE_IDLE_EV_NONE && muse_idle_ev_k(&s, t + DT) == 0.0f,
+          "REACT pre-empts the accent like any micro beat");
+    check(muse_idle_ev_u(&s, t + DT) < 0.0f, "a canceled accent has no progress");
+}
+
 int main(void)
 {
     test_cadence();
     test_gaze();
     test_micro();
     test_breath();
+    test_personas();
     if (fails) {
         fprintf(stderr, "IDLE TEST FAILED (%d)\n", fails);
         return 1;

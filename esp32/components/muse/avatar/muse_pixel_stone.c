@@ -14,6 +14,9 @@
 #include "muse_lip.h"
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
+
+/* Stage C: stone's own resting rhythm -- massive, slow, deliberate. */
+static const muse_idle_cfg_t s_idle_cfg = MUSE_IDLE_PERSONA_STONE;
 #include "muse_crack.h" /* the error state's persistent crack tears */
 #include "muse_blend.h" /* the cross-mood blend: live moods cross-fade instead of cutting */
 #include "stone_moods.h"
@@ -273,7 +276,7 @@ static bool s_rig_init;
 static float look_update(const muse_pose_t *p, float dt, bool allow_ev)
 {
     if (!s_idle.rng) {
-        muse_idle_init(&s_idle, (uint32_t)(frand() * 100000.0f) + 13u);
+        muse_idle_init_cfg(&s_idle, (uint32_t)(frand() * 100000.0f) + 13u, &s_idle_cfg);
     }
     int gm = p->mode == MUSE_MODE_LISTENING ? 1 : p->mode == MUSE_MODE_THINKING ? 2 : 0;
     muse_idle_step(&s_idle, p->t, dt, gm, allow_ev);
@@ -434,6 +437,26 @@ static void animate_light(float t, float speed, float level)
                 } else if (level > 0.3f && ((hash2(x, y + 7) + (uint32_t)(t * 12.0f)) & 15u) == 0u) {
                     s_fb[y * W + x] = SPR_BRIGHT[SPR_BRIGHT[s_fb[y * W + x]]];
                 }
+            }
+        }
+    }
+}
+
+/* The kintsugi veins catch the light (the Stage C accent beat): a bright sweep
+ * travels the gold, faster and stronger than the resting glints. */
+static void vein_glint(float t, float k)
+{
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            if (SPR_KIND[y * W + x] != 1) {
+                continue;
+            }
+            float ph = fmodf((float)(x * 9 + y * 13) / 96.0f - t * 2.2f, 1.0f);
+            if (ph < 0.0f) {
+                ph += 1.0f;
+            }
+            if (ph < 0.10f + 0.58f * k) {
+                s_fb[y * W + x] = ph < 0.03f + 0.30f * k ? D_WHITE : D_G0;
             }
         }
     }
@@ -1143,6 +1166,12 @@ void muse_pixel_render(const muse_pose_t *p)
     }
     if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
         draw_wave(t, level);
+    }
+    if (s_idle.ev == MUSE_IDLE_EV_ACCENT && !xeye) {
+        float gk = muse_idle_ev_k(&s_idle, t);
+        if (gk > 0.0f) {
+            vein_glint(t, gk);   /* Stage C accent: a glint runs the kintsugi veins */
+        }
     }
     /* The props: every live mood draws its own baked clip (stone_moods.h, from
      * bake_moods.py) as sparse diffs, cross-fading by its blend weight; the face

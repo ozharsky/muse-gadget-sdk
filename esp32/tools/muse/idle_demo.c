@@ -6,7 +6,7 @@
  * and tools/muse/idle_timeline.py measures it from the frames.
  *
  *   cc -O2 -I components/muse tools/muse/idle_demo.c <face renderer>.c -lm -o /tmp/idle_demo
- *   /tmp/idle_demo OUTDIR [secs] [idle|listening|thinking|speaking]
+ *   /tmp/idle_demo OUTDIR [secs] [idle|listening|thinking|speaking] [start_s]
  */
 #include <errno.h>
 #include <math.h>
@@ -65,6 +65,7 @@ int main(int argc, char **argv)
     const char *dir = argc > 1 ? argv[1] : ".";
     float secs = argc > 2 ? (float)atof(argv[2]) : 30.0f;
     const char *mode_name = argc > 3 ? argv[3] : "idle";
+    float start = argc > 4 ? (float)atof(argv[4]) : 0.0f;   /* rt seconds to begin the capture at */
 
     muse_mode_t mode = MUSE_MODE_IDLE;
     bool talky = false;
@@ -86,9 +87,10 @@ int main(int argc, char **argv)
     const float base = 10.0f;
     int frames = (int)(secs / DT + 0.5f);
     int warm = (int)(WARMUP / DT + 0.5f);
+    int first = (int)(start / DT + 0.5f);   /* capture begins at this rt second */
     int wrote = 0;
     double render_us = 0, scale_us = 0;
-    for (int i = -warm; i < frames; i++) {
+    for (int i = -warm; i < first + frames; i++) {
         float rt = (float)i * DT;
         muse_pose_t p = {
             .mode = mode,
@@ -99,10 +101,10 @@ int main(int argc, char **argv)
         double t0 = now_us();
         muse_pixel_render(&p);
         double t1 = now_us();
-        if (i >= 0) {
+        if (i >= first) {
             muse_pixel_scale(buf, N, 0, N - 1, 0, N - 1);
             char path[512];
-            snprintf(path, sizeof(path), "%s/%03d.ppm", dir, i);
+            snprintf(path, sizeof(path), "%s/%03d.ppm", dir, i - first);
             if (!save(path)) {
                 fprintf(stderr, "idle_demo: cannot write %s\n", path);
                 return 1;
