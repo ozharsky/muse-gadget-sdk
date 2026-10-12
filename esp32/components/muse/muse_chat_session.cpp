@@ -235,6 +235,7 @@ struct turn_t {
     phase_t phase;
     uint32_t gen;
     bool text;               /* typed at the console: the reply goes there, unspoken */
+    bool hermes;             /* owning backend, pinned at turn_start (live hermes_mode can flip mid-turn) */
     bool end_requested, end_sent, chat_posted, acked;
     int64_t dict_id, chat_id;
     int64_t start_us, end_sent_us, chat_us, last_event_us, last_content_us;
@@ -1100,6 +1101,7 @@ static bool turn_start(uint32_t gen, bool text)
     s_turn.texts = texts;
     s_turn.gen = gen;
     s_turn.text = text;
+    s_turn.hermes = hermes_mode();
     s_turn.tts_msg = -1;
     memset(s_marks, 0, sizeof(s_marks));
     s_reply_shown[0] = '\0';
@@ -1117,7 +1119,7 @@ static void turn_begin(uint32_t gen)
     if (!turn_start(gen, false)) {
         return;
     }
-    if (hermes_mode()) {
+    if (s_turn.hermes) {   /* route by the pinned backend; a live mode flip must not reroute this turn */
         if (!s_hbuf) {
             s_hbuf = static_cast<uint8_t *>(psram_alloc(HERMES_MAX_BYTES));
         }
@@ -2513,6 +2515,11 @@ static bool hermes_stream_pump(void)
 static void hermes_step(void)
 {
     if (s_turn.phase == P_LISTEN) {
+        if (!s_hbuf) {   /* allocated at turn_begin; missing means OOM -- fail the turn, never write */
+            ESP_LOGE(TAG, "hermes: mic buffer missing at listen; failing the turn");
+            turn_fail("OUT OF MEMORY");
+            return;
+        }
         size_t room = HERMES_MAX_BYTES - s_turn.pcm_bytes;
         size_t got = room ? xStreamBufferReceive(s_in, s_hbuf + s_turn.pcm_bytes, room & ~(size_t)1, 0) : 0;
         s_turn.pcm_bytes += got;
@@ -3436,7 +3443,9 @@ static void hatch_task(void *arg)
                          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
                 s_vm_try_us = now_us() + 30 * 1000000LL;
             }
-            hermes_step();
+            if (s_turn.hermes) {
+                hermes_step();   /* only its own backend steps a turn; a live flip waits for CMD_AGENT */
+            }
             continue;
         }
         /* A network change (or loss) leaves the old socket dead without telling us: drop it now and
@@ -3482,7 +3491,7 @@ static void hatch_task(void *arg)
             continue;
         }
         bool sent = true;
-        if (s_turn.phase == P_LISTEN) {
+        if (s_turn.phase == P_LISTEN && !s_turn.hermes) {
             sent = VOICE_NOTE ? record_note() : pump_mic();
         }
         if (!sent) {

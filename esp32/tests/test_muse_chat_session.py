@@ -56,6 +56,7 @@ bool muse_hatch_caption_at(const char *text, size_t, char *out, size_t cap) {
 static void turn_finish() { s_turn.phase = P_IDLE; }
 static void turn_fail(const char *) { turn_finish(); }
 static bool ensure_connected() { return true; }
+static bool hermes_mode() { return false; }   /* turn backend probe (real one lives in muse_chat_session.cpp, line 917) */
 bool muse_hatch_configured() { return true; }
 static void resampler_init(resampler_t *, int, int) {}
 ''' + reset + handlers + r'''
