@@ -5,8 +5,10 @@
  * driver exists for how a reaction CHANGES the face -- the T3.1 rig evidence: a cut
  * lands as one huge per-frame delta, an eased transition spreads over a few frames.
  *
+ * A SECOND reaction can fire later (the mood-pair case, for the cross-mood blend):
+ *
  *   cc -O2 -I components/muse tools/muse/react_demo.c <face renderer>.c -lm -o /tmp/rdemo
- *   /tmp/rdemo OUTDIR smirk [fire_s] [total_s]
+ *   /tmp/rdemo OUTDIR smirk [fire_s] [total_s] [name2 [fire2_s]]
  */
 #include <errno.h>
 #include <math.h>
@@ -49,8 +51,16 @@ int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : ".";
     const char *name = argc > 2 ? argv[2] : "smirk";
+    const char *name2 = argc > 5 ? argv[5] : NULL;
     float fire = argc > 3 ? (float)atof(argv[3]) : 1.5f;
+    float fire2 = argc > 6 ? (float)atof(argv[6]) : 0.0f;
     float total = argc > 4 ? (float)atof(argv[4]) : fire + 4.5f;
+    if (name2 && fire2 <= 0.0f) {
+        fire2 = fire + 1.5f;
+        if (total < fire2 + 1.5f) {
+            total = fire2 + 1.5f;
+        }
+    }
     if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
         fprintf(stderr, "react_demo: cannot create %s\n", dir);
         return 1;
@@ -59,7 +69,7 @@ int main(int argc, char **argv)
     const float base = 10.0f;
     int frames = (int)(total / DT + 0.5f);
     int warm = (int)(WARMUP / DT + 0.5f);
-    bool fired = false;
+    bool fired = false, fired2 = false;
     int wrote = 0;
     for (int i = -warm; i < frames; i++) {
         float rt = i * DT;
@@ -71,6 +81,15 @@ int main(int argc, char **argv)
             fprintf(stderr, "react_demo: fired %s at t=%.2f (%d recorded frames)\n",
                     name, rt, wrote);
             fired = true;
+        }
+        if (name2 && !fired2 && rt >= fire2) {
+            if (!muse_pixel_react(name2)) {
+                fprintf(stderr, "react_demo: the face does not know '%s'\n", name2);
+                return 1;
+            }
+            fprintf(stderr, "react_demo: fired %s at t=%.2f (%d recorded frames)\n",
+                    name2, rt, wrote);
+            fired2 = true;
         }
         muse_pose_t p = {
             .mode = MUSE_MODE_IDLE,
@@ -92,6 +111,10 @@ int main(int argc, char **argv)
     }
     if (!fired) {
         fprintf(stderr, "react_demo: %s never fired (fire %.2f > total %.2f)\n", name, fire, total);
+        return 1;
+    }
+    if (name2 && !fired2) {
+        fprintf(stderr, "react_demo: %s never fired (fire2 %.2f > total %.2f)\n", name2, fire2, total);
         return 1;
     }
     fprintf(stderr, "react_demo: %d frames\n", wrote);

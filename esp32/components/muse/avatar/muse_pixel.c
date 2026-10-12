@@ -23,6 +23,7 @@
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
 #include "muse_crack.h" /* the error state's persistent crack tears */
+#include "muse_blend.h" /* the cross-mood blend: live moods cross-fade instead of cutting */
 #include "sprite_data.h"
 #include "shodan_poses.h"   /* the baked face-pose library (art-pipeline/shodan_poses/) */
 
@@ -413,8 +414,6 @@ static const struct { const char *name; float dur; } REACTIONS[R_COUNT] = {
 };
 
 static volatile int s_react_req;     /* set from any task; the renderer picks it up */
-static int s_react_id;
-static float s_react_start;
 
 /* Muse's avatar.react command. false if there's no reaction by that name. */
 bool muse_pixel_react(const char *name)
@@ -670,6 +669,143 @@ void muse_pixel_glitch(float amp)
     }
 }
 
+/* --- The cross-mood blend (muse_blend.h) ------------------------------------------
+ * The faces used to replace the previous mood in one frame. Now every live mood
+ * acts on a copy of the mode's own values; the face-pose stack takes each live
+ * mood's deltas with its own fading weight, the glow channels blend by weight, and
+ * the discrete things (the tremor, the dy nudges, the glitch bursts, the palette's
+ * mood override) read from the owning mood. One live mood reproduces the old path
+ * exactly (its weight == rk). --- */
+static muse_blend_t s_blend;
+
+typedef struct {
+    float bright, bloom;          /* glow channels */
+    float hovr;                   /* the pleased lift (joins the pet response) */
+    int   dy;                     /* the mood's discrete nudge, rows */
+    int   shake;                  /* the mood's tremor */
+    bool  sh_ovr;                 /* the tremor above is the mood's, not the mode's */
+    int   nface;                  /* the mood's face poses (weighted deltas) */
+    int   face[3];
+    float facew[3];
+} shodan_act_t;
+
+#define SHN_FACE(a, id, w) do { (a)->face[(a)->nface] = (id); (a)->facew[(a)->nface] = (w); (a)->nface++; } while (0)
+
+/* One mood's acting, over the mode's own values (the old per-reaction switches).
+ * ren is the mood's render weight: rk for a lone mood, falling while it hands
+ * over -- so the pose deltas and the acted bits dissolve with it. */
+static void shodan_act_mood(shodan_act_t *a, int rid, float rt, float ren, float t)
+{
+    switch (rid) {
+    case R_SMIRK:
+        a->bright = 1.0f; a->bloom = 0.6f; SHN_FACE(a, P_SMIRK, ren);
+        break;
+    case R_SQUINT:
+        a->bright = 0.5f; SHN_FACE(a, P_SQUINT, ren);
+        break;
+    case R_SURPRISED:
+        a->bright = 1.0f; a->bloom = 0.8f; SHN_FACE(a, P_SURPRISED, ren);
+        if (rt < 0.35f) {
+            a->dy -= 2;
+        }
+        break;
+    case R_PLEASED:
+        a->hovr = ren; a->bloom = 0.6f; SHN_FACE(a, P_PLEASED, ren);
+        break;
+    case R_ANGRY:
+        a->bright = 1.0f; a->bloom = 1.0f; SHN_FACE(a, P_ANGRY, ren);
+        if (rt < 0.6f) { a->shake = ((int)(t * 30.0f)) & 1 ? 1 : -1; a->sh_ovr = true; }
+        break;
+    case R_EVIL:
+        a->bright = 1.0f; a->bloom = 1.0f; SHN_FACE(a, P_EVIL, ren);
+        if (rt < 0.6f) { a->shake = ((int)(t * 30.0f)) & 1 ? 1 : -1; a->sh_ovr = true; }
+        break;
+    case R_SCAN: {
+        a->bright = 0.9f; a->bloom = 0.5f;
+        float gy = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
+        SHN_FACE(a, P_UP, clampf(-gy, 0, 1) * 0.9f * ren);
+        SHN_FACE(a, P_DOWN, clampf(gy, 0, 1) * 0.9f * ren);
+        break;
+    }
+    case R_GLITCH:
+        if (((int)(t * 20.0f)) % 3 == 0) {
+            SHN_FACE(a, P_CLOSED, 1.0f);   /* the eyelid flicker stays a deliberate hard cut */
+        }
+        break;
+    case R_LAUGH:
+        SHN_FACE(a, sinf(t * 26.0f) > -0.2f ? P_LAUGH : P_PLEASED, ren);
+        a->dy += ((int)(t * 11.0f)) & 1 ? -1 : 0;
+        break;
+    case R_WINK: {
+        a->bright = 1.0f; a->bloom = 0.7f;
+        float ww = clampf(fminf((rt - 0.25f) / 0.08f, (0.95f - rt) / 0.08f), 0, 1);
+        SHN_FACE(a, P_WINK, ww * ren);
+        break;
+    }
+    case R_SLEEPY: {
+        a->bright = 0.3f;
+        SHN_FACE(a, P_SLEEPY, clampf(rt / 1.2f, 0, 1) * ren);
+        float wp = clampf((rt - 1.8f) / 1.2f, 0, 0.85f);
+        SHN_FACE(a, P_CLOSED, wp * ((ren >= 1.0f || rt < 1.0f) ? 1.0f : ren));
+        if (rt > 0.8f) {
+            a->dy += 1 + (rt > 2.0f ? 1 : 0);
+        }
+        break;
+    }
+    case R_CONFUSED:
+        SHN_FACE(a, ((int)(t * 2.6f) & 1) ? P_CONFUSED_L : P_CONFUSED_R, ren);
+        break;
+    case R_BORED:
+        a->bright = 0.4f; SHN_FACE(a, P_BORED, ren);
+        a->dy += 1;
+        break;
+    case R_DISGUST:
+        a->bright = 0.7f; SHN_FACE(a, P_DISGUST, ren);
+        break;
+    case R_NERVOUS:
+        SHN_FACE(a, ((int)(t * 7.0f) & 1) ? P_NERVOUS_L : P_NERVOUS_R, ren);
+        a->shake = ((int)(t * 40.0f)) & 1 ? 1 : 0; a->sh_ovr = true;
+        break;
+    case R_PROUD:
+        a->bright = 1.0f; a->bloom = 0.5f; SHN_FACE(a, P_PROUD, ren);
+        a->dy -= 1;
+        break;
+    case R_POWERUP:
+        a->bright = 1.0f; a->bloom = clampf(rt * 1.2f, 0, 1);
+        SHN_FACE(a, P_TARGET, clampf(rt * 2.0f, 0, 1) * ren);
+        break;
+    case R_TARGET:
+        a->bright = 1.0f; SHN_FACE(a, P_TARGET, ren);
+        break;
+    case R_ALERT:
+        SHN_FACE(a, P_ALERT, ren);
+        if (rt < 0.6f) { a->shake = ((int)(t * 30.0f)) & 1 ? 1 : -1; a->sh_ovr = true; }
+        break;
+    default:
+        break;
+    }
+}
+
+/* The palette's mood override: which scheme a mood pushes the face toward (the
+ * mode's own, if the mood has no override). The old if/else chain, per mood. */
+static const scheme_t *shodan_scheme_mood(int rid, float rt)
+{
+    if (rid == R_ANGRY || rid == R_EVIL || (rid == R_ALERT && (((int)(rt * 4.0f)) & 1) == 0) ||
+        (rid == R_TARGET && rt > 1.3f)) {
+        return &SCHEMES[MUSE_MODE_ERROR];
+    }
+    if (rid == R_DISGUST) {
+        return &SCHEMES[MUSE_MODE_SPEAKING];           /* a sickly yellow-green */
+    }
+    if (rid == R_SLEEPY) {
+        return &SCHEMES[MUSE_MODE_OFF];                /* the light dims */
+    }
+    if (rid == R_HACKED && (((int)(rt * 9.0f)) % 5) == 0) {
+        return &SCHEMES[MUSE_MODE_THINKING];           /* a violet flicker */
+    }
+    return NULL;
+}
+
 void muse_pixel_render(const muse_pose_t *p)
 {
     if (!s_eyes_init) {
@@ -684,36 +820,69 @@ void muse_pixel_render(const muse_pose_t *p)
     int rq = s_react_req;
     if (rq) {
         s_react_req = 0;
-        s_react_id = rq;
-        s_react_start = t;
+        muse_blend_fire(&s_blend, rq, REACTIONS[rq].dur);
     }
-    int rid = R_NONE;
-    float rt = 0, rk = 0;
-    if (s_react_id != R_NONE) {
-        rt = t - s_react_start;
-        float dur = REACTIONS[s_react_id].dur;
-        if (rt >= dur) {
-            s_react_id = R_NONE;
-        } else {
-            rid = s_react_id;
-            rk = clampf(fminf(rt / 0.15f, (dur - rt) / 0.4f), 0, 1);
+    muse_blend_step(&s_blend, dt);
+    /* The owning mood drives what cannot blend (the palette's mood override and the
+     * discrete bursts); the weighted layers read every live slot. */
+    int top = muse_blend_top(&s_blend);
+    int rid = top >= 0 ? s_blend.s[top].id : R_NONE;
+    /* The palette's mood override rides the blend too: every live mood's scheme (the
+     * old if/else chain, shodan_scheme_mood) mixes in by weight, so the face's whole
+     * look slides between two moods instead of stepping. One mood lands exactly on
+     * its scheme; the palette's own ease below still smooths the remainder. */
+    scheme_t st = SCHEMES[mode];
+    {
+        float ws = 0.0f, acc[5][3] = {{ 0 }}, f_hue = 0, f_sat = 0, f_val = 0, f_spread = 0;
+        for (int si = 0; si < s_blend.n; si++) {
+            const muse_blend_slot_t *sl = &s_blend.s[si];
+            if (sl->w <= MUSE_BLEND_EPS) {
+                continue;
+            }
+            const scheme_t *sc = shodan_scheme_mood(sl->id, sl->age);
+            if (!sc) {
+                sc = &SCHEMES[mode];
+            }
+            uint32_t cols[5] = { sc->f[0], sc->f[1], sc->f[2], sc->f[3], sc->acc };
+            for (int k = 0; k < 5; k++) {
+                acc[k][0] += sl->w * (float)((cols[k] >> 16) & 255);
+                acc[k][1] += sl->w * (float)((cols[k] >> 8) & 255);
+                acc[k][2] += sl->w * (float)(cols[k] & 255);
+            }
+            f_hue += sl->w * sc->hue;
+            f_sat += sl->w * sc->sat;
+            f_val += sl->w * sc->val;
+            f_spread += sl->w * sc->spread;
+            ws += sl->w;
+        }
+        if (ws > 0.0f) {
+            float S = ws > 1.0f ? ws : 1.0f;
+            uint32_t cols[5] = { st.f[0], st.f[1], st.f[2], st.f[3], st.acc };
+            for (int k = 0; k < 5; k++) {
+                int c[3];
+                for (int ch = 0; ch < 3; ch++) {
+                    float b = (float)((cols[k] >> (16 - ch * 8)) & 255);
+                    float v = b + (acc[k][ch] - b * ws) / S;
+                    c[ch] = v < 0.0f ? 0 : (v > 255.0f ? 255 : iround(v));
+                }
+                uint32_t nc = ((uint32_t)c[0] << 16) | ((uint32_t)c[1] << 8) | (uint32_t)c[2];
+                if (k < 4) {
+                    st.f[k] = nc;
+                } else {
+                    st.acc = nc;
+                }
+            }
+            st.hue = st.hue + (f_hue - st.hue * ws) / S;
+            st.sat = st.sat + (f_sat - st.sat * ws) / S;
+            st.val = st.val + (f_val - st.val * ws) / S;
+            st.spread = st.spread + (f_spread - st.spread * ws) / S;
         }
     }
-    const scheme_t *tgt = &SCHEMES[mode];
-    if (rid == R_ANGRY || rid == R_EVIL || (rid == R_ALERT && (((int)(rt * 4.0f)) & 1) == 0) ||
-        (rid == R_TARGET && rt > 1.3f)) {
-        tgt = &SCHEMES[MUSE_MODE_ERROR];
-    } else if (rid == R_DISGUST) {
-        tgt = &SCHEMES[MUSE_MODE_SPEAKING];           /* a sickly yellow-green */
-    } else if (rid == R_SLEEPY) {
-        tgt = &SCHEMES[MUSE_MODE_OFF];                /* the light dims */
-    } else if (rid == R_HACKED && (((int)(rt * 9.0f)) % 5) == 0) {
-        tgt = &SCHEMES[MUSE_MODE_THINKING];           /* a violet flicker */
-    }
-    update_palette(tgt, dt);
-    /* T3.2: beats only start while no reaction and no mode owns the face; a REACT
-     * cancels any beat in flight (see muse_idle.h for the priority rules). */
-    bool allow_ev = rid == R_NONE &&
+    update_palette(&st, dt);
+    /* T3.2: beats only start while no mood is in charge and no mode owns the face; a
+     * REACT cancels any beat in flight (see muse_idle.h for the priority rules). A
+     * mood that is fading out no longer cancels them -- its props are leaving. */
+    bool allow_ev = !muse_blend_busy(&s_blend) &&
                     (mode == MUSE_MODE_IDLE || mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_THINKING);
     float close = look_update(p, dt, allow_ev);
     s_spk = muse_ease(s_spk, mode == MUSE_MODE_SPEAKING ? clampf(level * 1.3f, 0, 1) : 0.0f, dt, 0.14f);
@@ -754,65 +923,46 @@ void muse_pixel_render(const muse_pose_t *p)
         break;
     }
     float bloom = 0;
-    switch (rid) {
-    case R_SMIRK:
-        bright = 1.0f; bloom = 0.6f;
-        break;
-    case R_SQUINT:
-        bright = 0.5f;
-        break;
-    case R_SURPRISED:
-        bright = 1.0f; bloom = 0.8f;
-        break;
-    case R_PLEASED:
-        happy = fmaxf(happy, rk); bloom = 0.6f;
-        break;
-    case R_ANGRY:
-        bright = 1.0f; bloom = 1.0f;
-        break;
-    case R_EVIL:
-        bright = 1.0f; bloom = 1.0f;
-        break;
-    case R_SCAN:
-        bright = 0.9f; bloom = 0.5f;
-        break;
-    case R_GLITCH:
-        break;
-    case R_LAUGH:
-        break;
-    case R_WINK:
-        bright = 1.0f; bloom = 0.7f;
-        break;
-    case R_SLEEPY:
-        bright = 0.3f;
-        break;
-    case R_CONFUSED:
-        break;
-    case R_BORED:
-        bright = 0.4f;
-        break;
-    case R_DISGUST:
-        bright = 0.7f;
-        break;
-    case R_NERVOUS:
-        break;
-    case R_PROUD:
-        bright = 1.0f; bloom = 0.5f;
-        break;
-    case R_POWERUP:
-        bright = 1.0f; bloom = clampf(rt * 1.2f, 0, 1);
-        break;
-    case R_TARGET:
-        bright = 1.0f;
-        break;
-    default:
-        break;
+    /* The cross-mood blend (muse_blend.h): every live mood acts on a copy of the
+     * mode's own values; the glow channels blend by weight (w/sum(w) with the sum
+     * held at >= 1, so one mood lands at full weight and the last one out ramps
+     * back to the mode's own acting), the face-pose stack takes each live mood's
+     * deltas with its own fading weight, and the discrete bits (the tremor, the dy
+     * nudges) come from the owning mood. */
+    shodan_act_t a0 = { .bright = bright, .bloom = 0.0f };
+    float wsum = 0, c_bright = 0, c_bloom = 0, c_dy = 0;
+    int face[6], nf = 0;
+    float facew[6];
+    for (int si = 0; si < s_blend.n; si++) {
+        const muse_blend_slot_t *sl = &s_blend.s[si];
+        if (sl->w <= MUSE_BLEND_EPS) {
+            continue;
+        }
+        shodan_act_t a = a0;
+        shodan_act_mood(&a, sl->id, sl->age, muse_blend_rend(sl), t);
+        c_bright += sl->w * a.bright;
+        c_bloom += sl->w * a.bloom;
+        c_dy += sl->w * (float)a.dy;
+        wsum += sl->w;
+        for (int pi = 0; pi < a.nface && nf < 6; pi++) {
+            face[nf] = a.face[pi];
+            facew[nf] = a.facew[pi];
+            nf++;
+        }
     }
-    if ((rid == R_ALERT || rid == R_ANGRY || rid == R_EVIL) && rt < 0.6f) {
-        shake = ((int)(t * 30.0f)) & 1 ? 1 : -1;
+    shodan_act_t atop = a0;
+    if (top >= 0) {
+        shodan_act_mood(&atop, s_blend.s[top].id, s_blend.s[top].age, muse_blend_rend(&s_blend.s[top]), t);
     }
-    if (rid == R_NERVOUS) {
-        shake = ((int)(t * 40.0f)) & 1 ? 1 : 0;
+    float dy_mood = 0.0f;
+    if (wsum > 0.0f) {
+        float S = wsum > 1.0f ? wsum : 1.0f;
+        bright = a0.bright + (c_bright - a0.bright * wsum) / S;
+        bloom = a0.bloom + (c_bloom - a0.bloom * wsum) / S;
+        dy_mood = (c_dy - (float)a0.dy * wsum) / S;
+    }
+    if (atop.hovr > happy) {
+        happy = atop.hovr;     /* R_PLEASED: the mood's own lift joins the pet response */
     }
     if (happy > 0) {
         bright = 1.0f;
@@ -842,59 +992,7 @@ void muse_pixel_render(const muse_pose_t *p)
     bright = s_rig.bright;
     bloom = s_rig.bloom;
 
-    /* The reaction's face poses, in application order (later poses win overlaps). */
-    int face[3];
-    float facew[3];
-    int nf = 0;
-    switch (rid) {
-    case R_SMIRK:     face[nf] = P_SMIRK;     facew[nf++] = rk; break;
-    case R_SQUINT:    face[nf] = P_SQUINT;    facew[nf++] = rk; break;
-    case R_SURPRISED: face[nf] = P_SURPRISED; facew[nf++] = rk; break;
-    case R_PLEASED:   face[nf] = P_PLEASED;   facew[nf++] = rk; break;
-    case R_ANGRY:     face[nf] = P_ANGRY;     facew[nf++] = rk; break;
-    case R_EVIL:      face[nf] = P_EVIL;      facew[nf++] = rk; break;
-    case R_SCAN: {
-        float gy = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
-        face[nf] = P_UP;   facew[nf++] = clampf(-gy, 0, 1) * 0.9f;
-        face[nf] = P_DOWN; facew[nf++] = clampf(gy, 0, 1) * 0.9f;
-        break;
-    }
-    case R_GLITCH:
-        if (((int)(t * 20.0f)) % 3 == 0) {
-            face[nf] = P_CLOSED; facew[nf++] = 1.0f;
-        }
-        break;
-    case R_LAUGH:
-        face[nf] = sinf(t * 26.0f) > -0.2f ? P_LAUGH : P_PLEASED;
-        facew[nf++] = rk;
-        break;
-    case R_WINK: {
-        float ww = clampf(fminf((rt - 0.25f) / 0.08f, (0.95f - rt) / 0.08f), 0, 1);
-        face[nf] = P_WINK; facew[nf++] = ww;
-        break;
-    }
-    case R_SLEEPY: {
-        face[nf] = P_SLEEPY; facew[nf++] = clampf(rt / 1.2f, 0, 1);
-        float wp = clampf((rt - 1.8f) / 1.2f, 0, 0.85f);
-        face[nf] = P_CLOSED; facew[nf++] = wp * ((rk >= 1.0f || rt < 1.0f) ? 1.0f : rk);
-        break;
-    }
-    case R_CONFUSED:
-        face[nf] = ((int)(t * 2.6f) & 1) ? P_CONFUSED_L : P_CONFUSED_R;
-        facew[nf++] = rk;
-        break;
-    case R_BORED:     face[nf] = P_BORED;     facew[nf++] = rk; break;
-    case R_DISGUST:   face[nf] = P_DISGUST;   facew[nf++] = rk; break;
-    case R_NERVOUS:
-        face[nf] = ((int)(t * 7.0f) & 1) ? P_NERVOUS_L : P_NERVOUS_R;
-        facew[nf++] = rk;
-        break;
-    case R_PROUD:     face[nf] = P_PROUD;     facew[nf++] = rk; break;
-    case R_POWERUP:   face[nf] = P_TARGET;    facew[nf++] = clampf(rt * 2.0f, 0, 1); break;
-    case R_TARGET:    face[nf] = P_TARGET;    facew[nf++] = rk; break;
-    case R_ALERT:     face[nf] = P_ALERT;     facew[nf++] = rk; break;
-    default: break;
-    }
+    /* The face poses come from the blend above (each live mood's deltas, weighted). */
 
     memcpy(s_fb, SPR, sizeof(s_fb));
     animate_light(t, 0.45f + pulse * 0.9f, level);
@@ -903,7 +1001,7 @@ void muse_pixel_render(const muse_pose_t *p)
     }
     if (xeye) {
         draw_xeyes();
-    } else if (nf == 0 && rid == R_NONE) {
+    } else if (nf == 0 && wsum == 0.0f) {
         /* Idle-style face: the scheduler owns the gaze, the blinks and the beats. */
         float evk = muse_idle_ev_k(&s_idle, t);
         float wdw = s_rig.widen;
@@ -956,9 +1054,17 @@ void muse_pixel_render(const muse_pose_t *p)
     if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
         draw_wave(t, level);
     }
-    if (rid != R_NONE) {
-        int tick = (int)(t * 12.0f);
-        switch (rid) {
+    /* The mood decorations: every live mood draws its own bits, fading with the
+     * blend (the cases that carry an rk weight take the mood's render weight). */
+    int tick = (int)(t * 12.0f);
+    for (int si = 0; si < s_blend.n; si++) {
+        const muse_blend_slot_t *sl = &s_blend.s[si];
+        if (sl->w <= MUSE_BLEND_EPS) {
+            continue;
+        }
+        float rt = sl->age;
+        float rk = muse_blend_rend(sl);
+        switch (sl->id) {
         case R_SMIRK:
             halo(t, 0.25f * rk, D_G3);
             break;
@@ -1105,7 +1211,7 @@ void muse_pixel_render(const muse_pose_t *p)
         default:
             break;
         }
-        if (rid == R_GLITCH && (tick & 3) == 0) {              /* a split image: ghosts of the eyes */
+        if (sl->id == R_GLITCH && (tick & 3) == 0) {           /* a split image: ghosts of the eyes */
             for (int e = 0; e < 2; e++) {
                 for (int i = 0; i < s_eye[e].n; i++) {
                     px(s_eye[e].x[i] + 2, s_eye[e].y[i], D_G3);
@@ -1114,19 +1220,16 @@ void muse_pixel_render(const muse_pose_t *p)
             }
         }
     }
-    /* A slow breath (the scheduler's wandering bob), a hop when petted, a shake on error. */
-    int dy = iround(muse_idle_breath(&s_idle)) - (happy > 0 ? (int)(fabsf(sinf(t * 9.0f)) * 2.5f * happy) : 0);
-    if (rid == R_SURPRISED && rt < 0.35f) {
-        dy -= 2;
+    /* A slow breath (the scheduler's wandering bob), a hop when petted, a shake on
+     * error. The mood's dy blends by weight and rounds: two moods trading opposite
+     * nudges step through zero one pixel at a time instead of jumping. */
+    float dyf = (float)iround(muse_idle_breath(&s_idle)) + dy_mood;
+    if (happy > 0) {
+        dyf -= fabsf(sinf(t * 9.0f)) * 2.5f * happy;
     }
-    if (rid == R_LAUGH) {
-        dy += ((int)(t * 11.0f)) & 1 ? -1 : 0;
-    } else if (rid == R_SLEEPY && rt > 0.8f) {
-        dy += 1 + (rt > 2.0f ? 1 : 0);
-    } else if (rid == R_PROUD) {
-        dy -= 1;
-    } else if (rid == R_BORED) {
-        dy += 1;
+    int dy = iround(dyf);
+    if (atop.sh_ovr) {
+        shake = atop.shake;    /* the owning mood's tremor replaces the mode's */
     }
     if (dy) {
         shift_rows(dy);

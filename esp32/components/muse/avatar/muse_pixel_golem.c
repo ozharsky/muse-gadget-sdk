@@ -15,6 +15,7 @@
 #include "muse_rig.h"   /* T3.1 rig: eased expression channels */
 #include "muse_idle.h"  /* T3.2 idle scheduler: blink cadence, saccades, micro beats, breath */
 #include "muse_crack.h" /* the error state's persistent crack tears */
+#include "muse_blend.h" /* the cross-mood blend: live moods cross-fade instead of cutting */
 #include "golem_moods.h"   /* pre-baked mood frames (sparse diffs) */
 
 #if defined(__has_include) && __has_include("esp_attr.h")
@@ -218,8 +219,6 @@ static const struct { const char *name; float dur; } REACTIONS[R_COUNT] = {
 };
 
 static volatile int s_react_req;     /* set from any task; the renderer picks it up */
-static int s_react_id;
-static float s_react_start;
 
 /* The relay's [react:name] (via avatar.react / the Hermes mood list). false if the name is unknown. */
 bool muse_pixel_react(const char *name)
@@ -991,6 +990,155 @@ void muse_pixel_glitch(float amp)
     }
 }
 
+/* --- The cross-mood blend (muse_blend.h) ------------------------------------------
+ * The faces used to replace the previous mood in one frame. Now every live mood
+ * acts on a copy of the mode's own values; the weighted layers (the props) draw
+ * each mood with its own blend weight and the continuous channels blend by weight,
+ * so a second mood arriving mid-flight hands over instead of cutting. The discrete
+ * things (the tremor, the dy nudges, the glitch bursts, the palette's mood
+ * override) read from the owning mood. One live mood reproduces the old path
+ * exactly (its weight == rk). --- */
+static muse_blend_t s_blend;
+
+typedef struct {
+    float open, widen, bright, bloom, mouth;
+    float tx, ty;                 /* gaze target; applies only while ovr */
+    bool  ovr;
+    float eye[2];                 /* per-eye scale (the wink) */
+    float hovr;                   /* the pleased lift (joins the pet response) */
+    int   dy;                     /* the mood's discrete nudge, rows */
+    int   shake;                  /* the mood's tremor */
+    bool  sh_ovr;                 /* the tremor above is the mood's, not the mode's */
+} golem_act_t;
+
+/* One mood's acting, over the mode's own values (the old per-reaction switch). */
+static void golem_act_mood(golem_act_t *a, int rid, float rt, float rk, float t)
+{
+    switch (rid) {
+    case R_SMIRK:
+        a->open = 0.62f; a->bright = 1.0f; a->bloom = 0.6f; a->tx = 0.9f; a->ovr = true;
+        break;
+    case R_SQUINT:
+        a->open = 0.35f; a->bright = 0.5f; a->tx = -0.8f; a->ovr = true;
+        break;
+    case R_SURPRISED:
+        a->open = 1.2f; a->widen = 1.0f; a->bright = 1.0f; a->mouth = 1.0f; a->bloom = 0.8f;
+        if (rt < 0.35f) {
+            a->dy -= 2;
+        }
+        break;
+    case R_PLEASED:
+        a->hovr = rk; a->bloom = 0.6f;
+        break;
+    case R_ANGRY:
+        a->open = 0.9f; a->bright = 1.0f; a->bloom = 1.0f;
+        if (rt < 0.6f) { a->shake = ((int)(t * 30.0f)) & 1 ? 1 : -1; a->sh_ovr = true; }
+        break;
+    case R_EVIL:
+        a->open = 0.75f; a->bright = 1.0f; a->bloom = 1.0f;
+        if (rt < 0.6f) { a->shake = ((int)(t * 30.0f)) & 1 ? 1 : -1; a->sh_ovr = true; }
+        break;
+    case R_SCAN:
+        a->bright = 0.9f; a->bloom = 0.5f;
+        a->ty = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur); a->ovr = true;
+        break;
+    case R_GLITCH:
+        if (((int)(t * 20.0f)) % 3 == 0) {
+            a->open = 0.1f;       /* the eyelid flicker stays a deliberate hard cut */
+        }
+        break;
+    case R_LAUGH:
+        a->open = 0.4f; a->mouth = fmodf(rt * 2.4f, 1.0f) < 0.45f ? 1.0f : 0.12f;   /* three slow ha-ha's */
+        a->dy += ((int)(t * 11.0f)) & 1 ? -1 : 0;
+        break;
+    case R_WINK:
+        a->open = 0.9f; a->bright = 1.0f; a->bloom = 0.7f;
+        if (rt > 0.25f && rt < 0.95f) {
+            a->eye[0] = 0.0f;
+        }
+        break;
+    case R_SLEEPY:
+        a->open = fmaxf(0.15f, 0.7f - rt * 0.22f); a->bright = 0.3f;
+        if (rt > 0.8f) {
+            a->dy += 1 + (rt > 2.0f ? 1 : 0);
+        }
+        break;
+    case R_CONFUSED:
+        a->open = 0.85f; a->tx = ((int)(t * 2.6f) & 1) ? 1.0f : -1.0f; a->ty = -0.2f; a->ovr = true;
+        break;
+    case R_BORED:
+        a->open = 0.45f; a->bright = 0.4f;
+        a->tx = cosf(rt * 2.2f); a->ty = 0.7f * sinf(rt * 2.2f); a->ovr = true;
+        a->dy += 1;
+        break;
+    case R_DISGUST:
+        a->open = 0.4f; a->bright = 0.7f;
+        break;
+    case R_NERVOUS:
+        a->open = 1.0f; a->widen = 1.0f;
+        a->tx = ((int)(t * 7.0f) & 1) ? 1.0f : -1.0f; a->ty = 0; a->ovr = true;
+        a->shake = ((int)(t * 40.0f)) & 1 ? 1 : 0; a->sh_ovr = true;
+        break;
+    case R_PROUD:
+        a->open = 0.8f; a->bright = 1.0f; a->bloom = 0.5f;
+        a->dy -= 1;
+        break;
+    case R_POWERUP:
+        a->bright = 1.0f; a->bloom = clampf(rt * 1.2f, 0, 1); a->open = 1.0f; a->widen = 1.0f;
+        break;
+    case R_TARGET:
+        a->open = 0.7f; a->bright = 1.0f; a->tx = 0; a->ty = 0; a->ovr = true;
+        break;
+    case R_EXCITED:
+        a->open = 1.0f; a->widen = 1.0f; a->bright = 1.0f; a->bloom = 0.7f;
+        break;
+    case R_SUNNY:
+        a->open = 0.55f; a->bright = 1.0f; a->bloom = 0.6f;
+        break;
+    case R_CONFETTI:
+    case R_RAINBOW:
+        a->open = 0.9f; a->bright = 1.0f; a->bloom = 0.5f;
+        break;
+    case R_COLD:
+        a->open = 0.45f; a->bright = 0.6f;
+        break;
+    case R_RAIN:
+        a->open = 0.7f; a->bright = 0.7f;
+        break;
+    case R_STORM:
+        a->open = 1.0f; a->widen = 1.0f; a->bright = 1.0f;
+        break;
+    default:
+        break;
+    }
+}
+
+/* The palette's mood override: which scheme a mood pushes the face toward (the
+ * mode's own, if the mood has no override). The old if/else chain, per mood. */
+static const scheme_t *golem_scheme_mood(int rid, float rt)
+{
+    if (rid == R_ANGRY || rid == R_EVIL || (rid == R_ALERT && (((int)(rt * 4.0f)) & 1) == 0) ||
+        (rid == R_TARGET && rt > 1.3f)) {
+        return &SCHEMES[MUSE_MODE_ERROR];
+    }
+    if (rid == R_DISGUST) {
+        return &SCHEMES[MUSE_MODE_SPEAKING];           /* a sickly yellow */
+    }
+    if (rid == R_SLEEPY) {
+        return &SCHEMES[MUSE_MODE_OFF];                /* the light dims */
+    }
+    if (rid == R_HACKED && (((int)(rt * 9.0f)) % 5) == 0) {
+        return &SCHEMES[MUSE_MODE_THINKING];           /* a violet flicker */
+    }
+    if (rid == R_SUNNY || rid == R_CONFETTI || rid == R_RAINBOW) {
+        return &SCHEMES[MUSE_MODE_SPEAKING];           /* warm and bright (gold stays gold) */
+    }
+    if (rid == R_RAIN || rid == R_COLD || rid == R_STORM) {
+        return &SCHEMES[MUSE_MODE_SPEAKING];           /* gold stone: the weather lives in the props */
+    }
+    return NULL;
+}
+
 void muse_pixel_render(const muse_pose_t *p)
 {
     if (!s_eyes_init) {
@@ -1006,42 +1154,69 @@ void muse_pixel_render(const muse_pose_t *p)
     int rq = s_react_req;
     if (rq) {
         s_react_req = 0;
-        s_react_id = rq;
-        s_react_start = t;
+        muse_blend_fire(&s_blend, rq, REACTIONS[rq].dur);
     }
-    int rid = R_NONE;
-    float rt = 0, rk = 0;
-    if (s_react_id != R_NONE) {
-        rt = t - s_react_start;
-        float dur = REACTIONS[s_react_id].dur;
-        if (rt >= dur) {
-            s_react_id = R_NONE;
-        } else {
-            rid = s_react_id;
-            rk = clampf(fminf(rt / 0.15f, (dur - rt) / 0.4f), 0, 1);
+    muse_blend_step(&s_blend, dt);
+    /* The owning mood drives what cannot blend (the palette's mood override and the
+     * discrete bursts); the weighted layers read every live slot. */
+    int top = muse_blend_top(&s_blend);
+    int rid = top >= 0 ? s_blend.s[top].id : R_NONE;
+    /* The palette's mood override rides the blend too: every live mood's scheme (the
+     * old if/else chain, golem_scheme_mood) mixes in by weight, so the face's whole
+     * look slides between two moods instead of stepping. One mood lands exactly on
+     * its scheme; the palette's own ease below still smooths the remainder. */
+    scheme_t st = SCHEMES[mode];
+    {
+        float ws = 0.0f, acc[5][3] = {{ 0 }}, f_sat = 0, f_val = 0, f_warm = 0, f_hue = 0;
+        for (int si = 0; si < s_blend.n; si++) {
+            const muse_blend_slot_t *sl = &s_blend.s[si];
+            if (sl->w <= MUSE_BLEND_EPS) {
+                continue;
+            }
+            const scheme_t *sc = golem_scheme_mood(sl->id, sl->age);
+            if (!sc) {
+                sc = &SCHEMES[mode];
+            }
+            uint32_t cols[5] = { sc->f[0], sc->f[1], sc->f[2], sc->f[3], sc->acc };
+            for (int k = 0; k < 5; k++) {
+                acc[k][0] += sl->w * (float)((cols[k] >> 16) & 255);
+                acc[k][1] += sl->w * (float)((cols[k] >> 8) & 255);
+                acc[k][2] += sl->w * (float)(cols[k] & 255);
+            }
+            f_sat += sl->w * sc->sat;
+            f_val += sl->w * sc->val;
+            f_warm += sl->w * sc->warm_val;
+            f_hue += sl->w * sc->hue_k;
+            ws += sl->w;
+        }
+        if (ws > 0.0f) {
+            float S = ws > 1.0f ? ws : 1.0f;
+            uint32_t cols[5] = { st.f[0], st.f[1], st.f[2], st.f[3], st.acc };
+            for (int k = 0; k < 5; k++) {
+                int c[3];
+                for (int ch = 0; ch < 3; ch++) {
+                    float b = (float)((cols[k] >> (16 - ch * 8)) & 255);
+                    float v = b + (acc[k][ch] - b * ws) / S;
+                    c[ch] = v < 0.0f ? 0 : (v > 255.0f ? 255 : iround(v));
+                }
+                uint32_t nc = ((uint32_t)c[0] << 16) | ((uint32_t)c[1] << 8) | (uint32_t)c[2];
+                if (k < 4) {
+                    st.f[k] = nc;
+                } else {
+                    st.acc = nc;
+                }
+            }
+            st.sat = st.sat + (f_sat - st.sat * ws) / S;
+            st.val = st.val + (f_val - st.val * ws) / S;
+            st.warm_val = st.warm_val + (f_warm - st.warm_val * ws) / S;
+            st.hue_k = st.hue_k + (f_hue - st.hue_k * ws) / S;
         }
     }
-    const scheme_t *tgt = &SCHEMES[mode];
-    if (rid == R_ANGRY || rid == R_EVIL || (rid == R_ALERT && (((int)(rt * 4.0f)) & 1) == 0) ||
-        (rid == R_TARGET && rt > 1.3f)) {
-        tgt = &SCHEMES[MUSE_MODE_ERROR];
-    } else if (rid == R_DISGUST) {
-        tgt = &SCHEMES[MUSE_MODE_SPEAKING];           /* a sickly yellow */
-    } else if (rid == R_SLEEPY) {
-        tgt = &SCHEMES[MUSE_MODE_OFF];                /* the light dims */
-    } else if (rid == R_HACKED && (((int)(rt * 9.0f)) % 5) == 0) {
-        tgt = &SCHEMES[MUSE_MODE_THINKING];           /* a violet flicker */
-    } else if (rid == R_SUNNY || rid == R_CONFETTI || rid == R_RAINBOW) {
-        tgt = &SCHEMES[MUSE_MODE_SPEAKING];           /* warm and bright (gold stays gold) */
-    } else if (rid == R_RAIN || rid == R_COLD || rid == R_STORM) {
-        tgt = &SCHEMES[MUSE_MODE_SPEAKING];           /* gold stone: the weather lives in the props */
-    } else if (rid == R_DISGUST) {
-        tgt = &SCHEMES[MUSE_MODE_SPEAKING];           /* a sickly yellow */
-    }
-    update_palette(tgt, dt);
-    /* T3.2: beats only start while no reaction and no mode owns the face; a REACT
-     * cancels any beat in flight (see muse_idle.h for the priority rules). */
-    bool allow_ev = rid == R_NONE &&
+    update_palette(&st, dt);
+    /* T3.2: beats only start while no mood is in charge and no mode owns the face; a
+     * REACT cancels any beat in flight (see muse_idle.h for the priority rules). A
+     * mood that is fading out no longer cancels them -- its props are leaving. */
+    bool allow_ev = !muse_blend_busy(&s_blend) &&
                     (mode == MUSE_MODE_IDLE || mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_THINKING);
     float close = look_update(p, dt, allow_ev);
 
@@ -1083,93 +1258,57 @@ void muse_pixel_render(const muse_pose_t *p)
     default:
         break;
     }
-    s_eye_scale[0] = s_eye_scale[1] = 1.0f;
+    s_eye_scale[0] = s_eye_scale[1] = 1.0f;   /* targets; the blend refines below */
     float bloom = 0;
-    switch (rid) {
-    case R_SMIRK:
-        open = 0.62f; bright = 1.0f; bloom = 0.6f; s_idle.tx = 0.9f;
-        break;
-    case R_SQUINT:
-        open = 0.35f; bright = 0.5f; s_idle.tx = -0.8f;
-        break;
-    case R_SURPRISED:
-        open = 1.2f; widen = 1.0f; bright = 1.0f; mouth = 1.0f; bloom = 0.8f;
-        break;
-    case R_PLEASED:
-        happy = fmaxf(happy, rk); bloom = 0.6f;
-        break;
-    case R_ANGRY:
-        open = 0.9f; bright = 1.0f; bloom = 1.0f;
-        break;
-    case R_EVIL:
-        open = 0.75f; bright = 1.0f; bloom = 1.0f;
-        break;
-    case R_SCAN:
-        bright = 0.9f; bloom = 0.5f; s_idle.ty = -0.7f + 1.4f * (rt / REACTIONS[R_SCAN].dur);
-        break;
-    case R_GLITCH:
-        open = (((int)(t * 20.0f)) % 3) ? open : 0.1f;
-        break;
-    case R_LAUGH:
-        open = 0.4f; mouth = fmodf(rt * 2.4f, 1.0f) < 0.45f ? 1.0f : 0.12f;   /* three slow ha-ha's */
-        break;
-    case R_WINK:
-        open = 0.9f; bright = 1.0f; bloom = 0.7f;
-        if (rt > 0.25f && rt < 0.95f) {
-            s_eye_scale[0] = 0.0f;
+
+    /* The cross-mood blend (muse_blend.h): every live mood acts on a copy of the
+     * mode's own values; the continuous channels blend by weight (w/sum(w) with the
+     * sum held at >= 1, so one mood lands at full weight and the last one out ramps
+     * back to the mode's own acting), while the discrete bits -- the tremor, the dy
+     * nudges -- come from the owning mood. */
+    golem_act_t a0 = { .open = open, .widen = widen, .bright = bright, .bloom = 0.0f, .mouth = mouth,
+                       .tx = s_idle.tx, .ty = s_idle.ty, .eye = { 1.0f, 1.0f } };
+    float wsum = 0, c_open = 0, c_widen = 0, c_bright = 0, c_bloom = 0, c_mouth = 0;
+    float c_tx = 0, c_ty = 0, c_eye0 = 0, c_eye1 = 0, c_dy = 0;
+    for (int si = 0; si < s_blend.n; si++) {
+        const muse_blend_slot_t *sl = &s_blend.s[si];
+        if (sl->w <= MUSE_BLEND_EPS) {
+            continue;
         }
-        break;
-    case R_SLEEPY:
-        open = fmaxf(0.15f, 0.7f - rt * 0.22f); bright = 0.3f;
-        break;
-    case R_CONFUSED:
-        open = 0.85f; s_idle.tx = ((int)(t * 2.6f) & 1) ? 1.0f : -1.0f; s_idle.ty = -0.2f;
-        break;
-    case R_BORED:
-        open = 0.45f; bright = 0.4f; s_idle.tx = cosf(rt * 2.2f); s_idle.ty = 0.7f * sinf(rt * 2.2f);
-        break;
-    case R_DISGUST:
-        open = 0.4f; bright = 0.7f;
-        break;
-    case R_NERVOUS:
-        open = 1.0f; widen = 1.0f; s_idle.tx = ((int)(t * 7.0f) & 1) ? 1.0f : -1.0f; s_idle.ty = 0;
-        break;
-    case R_PROUD:
-        open = 0.8f; bright = 1.0f; bloom = 0.5f;
-        break;
-    case R_POWERUP:
-        bright = 1.0f; bloom = clampf(rt * 1.2f, 0, 1); open = 1.0f; widen = 1.0f;
-        break;
-    case R_TARGET:
-        open = 0.7f; bright = 1.0f; s_idle.tx = 0; s_idle.ty = 0;
-        break;
-    case R_EXCITED:
-        open = 1.0f; widen = 1.0f; bright = 1.0f; bloom = 0.7f;
-        break;
-    case R_SUNNY:
-        open = 0.55f; bright = 1.0f; bloom = 0.6f;
-        break;
-    case R_CONFETTI:
-    case R_RAINBOW:
-        open = 0.9f; bright = 1.0f; bloom = 0.5f;
-        break;
-    case R_COLD:
-        open = 0.45f; bright = 0.6f;
-        break;
-    case R_RAIN:
-        open = 0.7f; bright = 0.7f;
-        break;
-    case R_STORM:
-        open = 1.0f; widen = 1.0f; bright = 1.0f;
-        break;
-    default:
-        break;
+        golem_act_t a = a0;
+        golem_act_mood(&a, sl->id, sl->age, muse_blend_rk(sl), t);
+        c_open += sl->w * a.open;
+        c_widen += sl->w * a.widen;
+        c_bright += sl->w * a.bright;
+        c_bloom += sl->w * a.bloom;
+        c_mouth += sl->w * a.mouth;
+        c_tx += sl->w * a.tx;
+        c_ty += sl->w * a.ty;
+        c_eye0 += sl->w * a.eye[0];
+        c_eye1 += sl->w * a.eye[1];
+        c_dy += sl->w * (float)a.dy;
+        wsum += sl->w;
     }
-    if ((rid == R_ALERT || rid == R_ANGRY || rid == R_EVIL) && rt < 0.6f) {
-        shake = ((int)(t * 30.0f)) & 1 ? 1 : -1;
+    golem_act_t atop = a0;
+    if (top >= 0) {
+        golem_act_mood(&atop, s_blend.s[top].id, s_blend.s[top].age, muse_blend_rk(&s_blend.s[top]), t);
     }
-    if (rid == R_NERVOUS) {
-        shake = ((int)(t * 40.0f)) & 1 ? 1 : 0;
+    float dy_mood = 0.0f;
+    if (wsum > 0.0f) {
+        float S = wsum > 1.0f ? wsum : 1.0f;
+        open = a0.open + (c_open - a0.open * wsum) / S;
+        widen = a0.widen + (c_widen - a0.widen * wsum) / S;
+        bright = a0.bright + (c_bright - a0.bright * wsum) / S;
+        bloom = a0.bloom + (c_bloom - a0.bloom * wsum) / S;
+        mouth = a0.mouth + (c_mouth - a0.mouth * wsum) / S;
+        s_idle.tx = a0.tx + (c_tx - a0.tx * wsum) / S;
+        s_idle.ty = a0.ty + (c_ty - a0.ty * wsum) / S;
+        s_eye_scale[0] = a0.eye[0] + (c_eye0 - a0.eye[0] * wsum) / S;
+        s_eye_scale[1] = a0.eye[1] + (c_eye1 - a0.eye[1] * wsum) / S;
+        dy_mood = (c_dy - (float)a0.dy * wsum) / S;
+    }
+    if (atop.hovr > happy) {
+        happy = atop.hovr;     /* R_PLEASED: the mood's own lift joins the pet response */
     }
     if (happy > 0) {
         bright = 1.0f;
@@ -1245,59 +1384,69 @@ void muse_pixel_render(const muse_pose_t *p)
     if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
         draw_wave(t, level);
     }
-        if (rid != R_NONE) {
-        /* the props: a baked frame per mood (make_mood_frames2.py). Frames overlay as sparse
-         * diffs; the face acting (eyes/mouth/gaze) above stays in C. Paint rule: never over
-         * the lens (eye-boxes) and only over dark/bronze under-pixels (the mood never
-         * rewrites the character's face). */
-        int fi = -1;
-        for (unsigned g = 0; g < sizeof(MOODS) / sizeof(MOODS[0]); g++) {
-            /* match by NAME against REACTIONS[]: a hand-typed id table drifted from the
-             * enum once (alert played scan, sunny played confetti...), the names cannot. */
-            const char *row = (const char *)MOODS[g].name;
-            if (rid < R_COUNT && strcmp(row, REACTIONS[rid].name) == 0) {
-                fi = MOODS[g].off +
-                     (int)(rt * 1000.0f / (float)MOOD_FRAME_DT_MS) % MOODS[g].n;
-                break;
-            }
+    /* The props: every live mood draws its own baked frame (make_mood_frames2.py) as
+     * sparse diffs, cross-fading by its blend weight; the face acting (eyes/mouth/gaze)
+     * above stays in C. Paint rule: never over the lens (eye-boxes) and only over
+     * dark/bronze under-pixels (the mood never rewrites the character's face). */
+    bool props_live = false;
+    for (int si = 0; si < s_blend.n; si++) {
+        if (muse_blend_rend(&s_blend.s[si]) > MUSE_BLEND_EPS) {
+            props_live = true;
+            break;
         }
-        if (fi >= 0) {
-            int po = 0;
-            for (int g = 0; g < fi; g++) {
-                po += MOOD_FRAME_COUNTS[g];
-            }
-            /* The face is sacred: protect the ACTUAL lens pixels this frame (gaze-shifted,
-             * with the glint's wander and a one-pixel halo), NOT the whole eye rows. A
-             * row-wide guard silently clipped every prop crossing the face band anywhere
-             * on the row (rain drops vanished mid-fall, arc legs got notched) and those
-             * missing strips read as cut-off artifacts. */
-            /* Lens-coverage bitset (512 B; a 4 KB bool grid before -- internal RAM is
-             * the scarce pool). Prop pixels must never land on the eyes. */
-            static uint8_t over_eye[64 * 64 / 8];
-            memset(over_eye, 0, sizeof over_eye);
-            int esx = iround(s_idle.gx * 2.0f), esy = iround(s_idle.gy * 1.0f);
-            for (int s2 = 0; s2 < 2; s2++) {
-                const eye_t *e = &s_eye[s2];
-                for (int i2 = 0; i2 < e->n; i2++) {
-                    for (int oy = -1; oy <= 1; oy++) {
-                        for (int ox = -2; ox <= 2; ox++) {
-                            int yy = e->y[i2] + esy + oy, xx = e->x[i2] + esx + ox;
-                            if (xx >= 0 && xx < 64 && yy >= 0 && yy < 64) {
-                                over_eye[(yy * 64 + xx) >> 3] |= (uint8_t)(1u << ((yy * 64 + xx) & 7));
-                            }
+    }
+    if (props_live) {
+        /* Lens-coverage bitset (512 B; a 4 KB bool grid before -- internal RAM is
+         * the scarce pool). Prop pixels must never land on the eyes. */
+        static uint8_t over_eye[64 * 64 / 8];
+        memset(over_eye, 0, sizeof over_eye);
+        int esx = iround(s_idle.gx * 2.0f), esy = iround(s_idle.gy * 1.0f);
+        for (int s2 = 0; s2 < 2; s2++) {
+            const eye_t *e = &s_eye[s2];
+            for (int i2 = 0; i2 < e->n; i2++) {
+                for (int oy = -1; oy <= 1; oy++) {
+                    for (int ox = -2; ox <= 2; ox++) {
+                        int yy = e->y[i2] + esy + oy, xx = e->x[i2] + esx + ox;
+                        if (xx >= 0 && xx < 64 && yy >= 0 && yy < 64) {
+                            over_eye[(yy * 64 + xx) >> 3] |= (uint8_t)(1u << ((yy * 64 + xx) & 7));
                         }
                     }
                 }
+            }
+        }
+        for (int si = 0; si < s_blend.n; si++) {
+            const muse_blend_slot_t *sl = &s_blend.s[si];
+            float pw = muse_blend_rend(sl);
+            if (pw <= MUSE_BLEND_EPS) {
+                continue;
+            }
+            int fi = -1;
+            for (unsigned g = 0; g < sizeof(MOODS) / sizeof(MOODS[0]); g++) {
+                /* match by NAME against REACTIONS[]: a hand-typed id table drifted from the
+                 * enum once (alert played scan, sunny played confetti...), the names cannot. */
+                const char *row = (const char *)MOODS[g].name;
+                if (sl->id < R_COUNT && strcmp(row, REACTIONS[sl->id].name) == 0) {
+                    fi = MOODS[g].off +
+                         (int)(sl->age * 1000.0f / (float)MOOD_FRAME_DT_MS) % MOODS[g].n;
+                    break;
+                }
+            }
+            if (fi < 0) {
+                continue;
+            }
+            int po = 0;
+            for (int g = 0; g < fi; g++) {
+                po += MOOD_FRAME_COUNTS[g];
             }
             for (int k = 0; k < MOOD_FRAME_COUNTS[fi]; k++) {
                 int idx = MOOD_FRAME_PX[po * 2 + k * 2];
                 uint8_t c = (uint8_t)MOOD_FRAME_PX[po * 2 + k * 2 + 1];
                 int x = idx % 64, y = idx / 64;
-                /* The props dissolve in and out with the reaction ramp (rk): a mood
+                /* The props dissolve in and out with the mood's blend weight (pw): a mood
                  * that pops in full and vanishes mid-frame reads as a cut. */
                 if (x < 1 || x > 62 || y < 1 || y > 62 ||
                     (over_eye[(y * 64 + x) >> 3] >> ((y * 64 + x) & 7) & 1u) ||
-                    BAYER4[y & 3][x & 3] >= (int)(rk * 16.0f + 0.5f)) {
+                    BAYER4[y & 3][x & 3] >= (int)(pw * 16.0f + 0.5f)) {
                     continue;
                 }
                 uint8_t under = pxat(x, y);
@@ -1314,22 +1463,16 @@ void muse_pixel_render(const muse_pose_t *p)
     /* A hop when petted, a shake on error, and the acted dy offsets. The resting
      * breath is NO LONGER an integer whole-frame bob: a ±1 px translate either fires
      * (~845 px change) or does not (0 px), which is exactly the dead/burst pattern.
-     * The breath now lives in the continuous ambient layers below. */
-    int dy = 0;
+     * The breath now lives in the continuous ambient layers below. The mood's dy
+     * blends by weight and rounds: two moods trading opposite nudges step through
+     * zero one pixel at a time instead of jumping. */
+    float dyf = dy_mood;
     if (happy > 0) {
-        dy -= (int)(fabsf(sinf(t * 9.0f)) * 3.5f * happy);
+        dyf -= fabsf(sinf(t * 9.0f)) * 3.5f * happy;
     }
-    if (rid == R_SURPRISED && rt < 0.35f) {
-        dy -= 2;
-    }
-    if (rid == R_LAUGH) {
-        dy += ((int)(t * 11.0f)) & 1 ? -1 : 0;
-    } else if (rid == R_SLEEPY && rt > 0.8f) {
-        dy += 1 + (rt > 2.0f ? 1 : 0);
-    } else if (rid == R_PROUD) {
-        dy -= 1;
-    } else if (rid == R_BORED) {
-        dy += 1;
+    int dy = iround(dyf);
+    if (atop.sh_ovr) {
+        shake = atop.shake;    /* the owning mood's tremor replaces the mode's */
     }
     if (dy) {
         shift_rows(dy);
