@@ -110,8 +110,8 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
 
 void muse_pixel_render(const muse_pose_t *p)
 {
+    muse_pixel_video_render();   /* applies a pending start/stop; no-op when idle */
     if (muse_pixel_video_active()) {
-        muse_pixel_video_render();
         return;
     }
     int target = face_for_agent();
