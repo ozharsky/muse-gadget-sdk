@@ -1,0 +1,13 @@
+token
+google.key
+*.key
+*.log
+venv-stt/
+__pycache__/
+*.pyc
+session_id
+session_id.*
+session_ids.json
+notifications.json
+print_watcher_state.json
+*.bak*

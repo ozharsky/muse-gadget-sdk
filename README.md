@@ -24,6 +24,10 @@ companion for three different agents** — it talks to the one you picked, reach
 out on its own when things happen, and survives the display freezes the stock
 firmware panics on.
 
+**Building this with an AI?** [`docs/AI-SETUP.md`](docs/AI-SETUP.md) is a runbook written
+to be executed end to end by an assistant (build → flash → connect). The agent wire
+contract lives in [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md).
+
 <p align="center">
   <img src=".github/images/fork/face-shodan.png" width="200" alt="SHODAN — the Muse agent face, captured on the glass">
   <img src=".github/images/fork/face-stone.png" width="200" alt="The stone god — the Hermes (default profile) face, captured on the glass">
@@ -47,9 +51,9 @@ count · the on-device inbox, where amber <code>in 1h</code> is a reminder the a
 
 | Slot | Default | Face | Path |
 |---|---|---|---|
-| Muse | SHODAN | pixel SHODAN | Muse cloud VM |
-| Hermes | default profile | **stone god** | Mac relay → Hermes |
-| ALT | any named profile (e.g. `beepbop`) | **jade golem** | Mac relay → that profile |
+| Muse | SHODAN | pixel SHODAN | Muse cloud VM (pair via the app) |
+| Hermes | default profile | **stone god** | your relay → Hermes (bundled in [`relay/`](relay)) |
+| ALT | any named profile (e.g. `my-alt`) | **jade golem** | your relay → that profile |
 
 **Double-tap** the talk button cycles slots (gesture pinned by a host test: tap
 < 300 ms, 1.2 s window; a long press is never a tap). **Settings → Agents** is a
@@ -64,7 +68,7 @@ two-slot world.
 ### 📬 The reverse channel — the gadget reaches out on its own
 
 Every other gadget interaction is poll ("you ask, it answers"). This one is the
-opposite: the Mac relay **pushes a short line** and the device wakes, chirps,
+opposite: the relay **pushes a short line** and the device wakes, chirps,
 speaks it, captions it with a tap hint — and tapping opens the *exact agent that
 raised it*.
 
@@ -102,8 +106,8 @@ that firmware must survive rather than fix:
 ### 🔋 Power, for a board with no reset key
 
 - Restart paths everywhere: **hold the talk button 20 s**, menu Restart, settings
-  button, console `>reboot`, and a Mac-side DTR/RTS pulse that works on a fully
-  hung firmware. A watchdog hard ceiling means a frozen screen always
+  button, console `>reboot`, and a host-side DTR/RTS pulse (`reset_gadget.py`) that
+  works on a fully hung firmware. A watchdog hard ceiling means a frozen screen always
   self-reboots.
 - **Coredumps go to flash** (120 KB partition, 32-task dump) so a panic leaves a
   backtrace even with nobody watching the port; every flash archives its matching
@@ -115,15 +119,16 @@ that firmware must survive rather than fix:
 
 ### 🔗 Connectivity
 
-- **Relay LAN announce + reachability cache** fixed 7-second turns: the Mac relay
-  announces its LAN address, the gadget prefers it over the compiled-in URL and
-  probes netmask-aware.
+- **Relay LAN announce + reachability cache** fixed 7-second turns: the relay
+  announces its LAN address in `/agents`, the gadget stores it and prefers it over
+  the compiled-in URL; the reachability probe is cached and netmask-aware.
 - **Wi-Fi saved-network switching**: tap = switch (joins by name with the target's
   own stored password — never through a credential write), hold = forget,
   range-checked against the scan the settings page actually did.
 - Post-pairing 401 loop fixed (the chat session now uses the provisioned access
-  token, not the SDK identity token); the cross-agent task bridge repaired end to
-  end (idempotency collision, stranded cards, false-success completion).
+  token, not the SDK identity token). The cross-agent **tasking system was later
+  removed whole (2026-10-10)** — its poll held the session task and slowed voice
+  turns; reminders and notifications are the surviving reverse channels.
 
 ### 🖼️ Avatars & UI
 
@@ -148,11 +153,15 @@ cadence, saccades, breathing and the signature accent beats (Stage C)</i></p>
 
 ## Changelog (the `hermes-local` branch)
 
-71 commits over upstream `main` — newest first. Full detail lives in the commits
+116 commits over upstream `main` — newest first. Full detail lives in the commits
 themselves.
 
 | Area | Commits | What |
 |---|---|---|
+| sharing | `a0583fe` `8918603` | On-glass README artwork + idle GIFs, `docs/AGENT-PROTOCOL.md` + `docs/AI-SETUP.md`, the bundled `relay/`, personal-data sanitize; boot-repair self-heal for the lost-pairing state |
+| art program | `51a575c` `345ee1b` `eadf69b` `f5b8c2b` `1da7a32` `937086a` `14f9c22` | Faces v2 on all three faces (A1/B3/C5), per-face idle personas + signature accent beats, easing rig, idle scheduler, moods v3 (all 52 reactions reworked), the on-device video player + indexed clip registry, `art-pipeline` toolchain landed in-repo |
+| sessions | `af04f61` `ca9f534` | Turn backend pinned at start (the agent-flip race); Muse replies speak after the first TTS piece |
+| tasking | `7f107a8` | The relay tasking system removed end to end (owner's call) |
 | docs | `c54ae8c` | This README + `HERMES-FORK.md` |
 | input/UX | `25669b5` `29226a8` `80ce6e3` | Talk-button timing (a 2 s gate was built, tried, reverted on user feedback — press-to-talk is instant); settings menu resets on entry; SHORT_CLICKED rows |
 | battery | `e112a1d` | 15 % warning + 5 % cell-protection, on the smoothed gauge |
@@ -171,9 +180,38 @@ themselves.
 | misc | `fa1af1a` `007920c` `f749df5` `828d0b7` `482afcc` `8a64488` `ae43010` `d318efd` | Reply-too-long caption; PSRAM decoder move; debug dir gitignored; repo hygiene |
 
 <details>
-<summary><b>All 71 commit subjects</b></summary>
+<summary><b>All 116 commit subjects</b></summary>
 
 ```
+a0583fe Prepare for sharing: current-art README (on-glass faces + idle GIFs), AGENT-PROTOCOL.md (talk to Hermes, Muse, or any agent), sanitized personal data (empty relay URLs in the tracked profile, generic script paths; sweep clean of hostnames/LAN IPs/e-mails/device IDs)
+8918603 Boot repair: self-heal the lost-credentials state - setup_complete + wifi + no device creds now clears for a fresh pair (the 2026-10-12 unpaired incident; BLE pairing is refused once setup is marked done)
+a380982 tools: art_check.py - evidence-capture palette guard (stage C golem wrong-art incident)
+345ee1b Stage C: per-face idle personas + one signature accent beat per face (shodan scan ring, stone vein glint, golem core thump) + idle_sim/probe_idle host tools + persona/accent tests (suite 207)
+e068263 faces v2 stage D: record the memory pass + the agent-flip race fix (af04f61) + re-flash
+af04f61 chat session: pin each turn backend at turn_start + fail-safe mic-buffer guard
+51a575c avatar: faces v2 stage D - new art live on all three faces (shodan-A1 / stone-B3 / golem-C5) + golem C5 C-side re-fit
+9936356 faces v2 stage B: golem-C5 art recipes (compose+bake+preview-patch+gifs+compare), 9 C5 C-side edits listed
+b9bd11d faces v2 stage B: shodan-A1 + stone-B3 bake recipes (poses, mood bake, preview harness) + golem round-2 sheet recipe
+08dd36c react_motion: pair-sweep gate refinements (plateau-relative settle, run past the mood, allowances)
+4aea9de avatar: cross-mood blend -- live moods cross-fade instead of cutting (muse_blend.h)
+4146d86 avatar: error-state cracks as persistent tears (muse_crack.h) + golem thinking core-spin
+14f9c22 tools: land the art-pipeline toolchain in the repo (clip pipeline v2, mood registry, motion + prop audit harnesses)
+f5b8c2b avatar: T3.2 idle scheduler in all three faces (blink doubles + doze blinks, speed-classed saccades, micro beats, modulated breath)
+ea18e53 fixup: bake_moods.py repo copy gets the AVATAR path fallback (resolves next to the SDK root); regen verified byte-identical for golem and stone
+1da7a32 avatar moods v3: all 52 reactions reworked for 64px legibility (golem + stone)
+eadf69b avatar: T3.1 easing rig in all three faces + drop the halloween clips
+a66c03f avatar video player: fix the never-applied-request deadlock (tick unconditionally in render); tools: gadget_cmd/watcher_speak/fix_video_gate
+937086a avatar: video player + indexed clip registry (construct + CC0 witch/skeleton/zombie), lip-sync with hysteresis+min-hold for shodan/stone
+69d2e34 avatar: land parked golem/stone work - stone plays baked 52-mood props, golem rebaked to 52 (bake_moods.py)
+ca9f534 Muse replies start speaking after the first piece: sentence-chunked TTS fetch
+7f107a8 Remove the relay tasking system (device side): [task:] tags, /tasks poll, injected turns
+a5a8b04 Battery run kept in NVS flash + battery_boots counter (upstream #60, battery part)
+1c096e3 Bench hooks from upstream #163: safe tile switch (ui=settings/ui=face) + demo name (ui.demo)
+920d4c0 Point gadget backup door at the NZXT funnel (Mac-free)
+a64f33e Fail a capped voice turn that got no reply
+735b11a Keep voice turns open while Muse is working
+bd684c0 notifications: clear that makes sense, and long words stop breaking layouts
+6f149f9 docs: the fork's front page -- the work is the README now
 c54ae8c docs: HERMES-FORK.md — what this fork adds, and a README banner
 25669b5 voice: revert the 2 s talk gate — press-to-talk is instant again
 29226a8 gadget UX: talk gate, settings menu reset, notification rows
@@ -229,10 +267,10 @@ e58418e avatar(golem): +25 baked reactions (work/feelings/weather)
 c7960fd Enable CONFIG_PM + tickless idle: auto light-sleep with WiFi retained (the 10x idle-current lever); the code was already PM-aware (console RX wake, battery callbacks, cpu-low locks)
 a2e1b57 Battery: revert quarter-rate idle on user request; recalibrate the meter's 100% anchor to 4.10 V (the charger's relaxed CV termination — a full cell never idled at 4.2)
 fb3007c Battery: smoothed gauge (EMA on %, raw mV), power-save poll 100->250ms, idle face quarter-rate on battery
-882b926 Muse chat bearer fix: the chat session's fetch_vms now asks the app layer for the provisioned access token (refreshed on refusal) instead of the hatch slot's SDK identity token — resolves the post-pairing 401 loop
+882b926 Muse chat bearer fix: the chat session's fetch_vms now asks the app layer for the provisioned access token (refreshed on refusal) instead of the hatch slot's SDK identity token — resolves the post-pairing 401 loop (register/tunnel up, account API refusing the identity-class token as a Bearer)
 13e518a Pairing survives the BLE display stall: watchdog aborts only after a 60 s grace following any BLE activity; the power-off UI button now correctly says the board's power is hardware-owned
 fec08e5 esp32: fix SSID truncation, task-create leaks and other small firmware bugs
-baa1927 Hermes avatar: the Jade Golem (round-6 pick). Picture-based renderer with jade state recolours, breathing chest core, moss shimmer; diegetic weather/prop moods
+baa1927 Hermes avatar: the Jade Golem (round-6 pick). Picture-based renderer with jade state recolours, breathing chest core, moss shimmer; diegetic weather/prop moods (rain trickles the stone, storm bolts above, frost creeps, fireflies); glitch only on boot/error
 5b6ece7 Reading view per agent: last reply kept in one store per agent; long-press shows the active agent's own text
 22ed73f Hermes streamed turns: write the reading view (last_reply) from the streamed reply so a long-press shows the Hermes text, not a stale Muse reply
 2f57cc0 Hermes streaming turns: relay pushes NDJSON (heard/status/tts/reply), gadget plays MP3 chunks as they arrive and shows agent-work captions; old JSON path kept
@@ -245,6 +283,22 @@ f1adb9c Hermes agent: replace the Bloop avatar with the Construct (picture-based
 bd745f4 Keep turn_start identical to upstream: Hermes mode lives in ensure_connected
 0b0bbbb Merge upstream main (15 commits) into hermes-local
 466f14c Waveshare 1.43C board, Google TTS voice, SHODAN/Bloop avatars, Hermes agent mode, reactions
+3229892 fix: keep unrelated chat replies out of device turns
+719210b linux: decode escaped SSIDs from wpa_cli and nmcli
+20574f8 Add the Guition JC3248W535 as a board with the full UI (#28)
+eccdf43 Add Waveshare ESP32-C6-LCD-1.47 display support (#56)
+be99e1b linux: fall back to wpa_supplicant for the active SSID (#80)
+898f846 Don't treat a rejected link.register as registered (#82)
+a63f425 Answer device.discover when the scan runs out of memory (#81)
+f5da932 Fix: Enable arch support
+90bc10c Add Seeed reSpeaker Lite support (#59)
+6e3fef8 Log how each command the Muse runs ends (#84)
+fd8f2bc Add the Espressif ESP32-S3-DevKitC-1 as a board with a status light (#76)
+2e8637d test: add host regression coverage for Muse ADPCM (#86)
+ff35daa muse_chat: allocate command/event queues in PSRAM with fallback (#70)
+eba7df3 Show CJK in captions with a Unifont fallback (#32)
+b7bf5a8 Document how to add a command to the ESP32 firmware (#83)
+fa0b9b7 Add generic ESP32-C6 (no PSRAM) board support (#54)
 ```
 
 </details>
@@ -262,11 +316,13 @@ bd745f4 Keep turn_start identical to upstream: Hermes mode lives in ensure_conne
    (`>wifi.switch=<ssid>`, `>wifi.forget=<ssid>`), seed a relay address
    (`>relay.lan=<ip>`) and more. Everything is in-firmware — no companion app or
    external tool is needed to operate the device.
-3. **Muse credentials** (only if you use the Muse cloud agent): pair once with the Muse
-   app on iOS/Android (`Settings > Devices`, developer mode on, look for `MuseGadget`).
-   You need an SDK token from [gadgets.muse.ai](https://gadgets.muse.ai/settings/sdk-tokens)
-   at build time; without one the firmware still **builds and runs fine**, it just will
-   not pair with Muse (the build logs a warning).
+3. **Muse credentials** (only if you use the Muse cloud agent): the device advertises
+   over Bluetooth as `MuseGadget-…` — pair it from the Muse app on iOS/Android
+   (`Settings > Devices`, developer mode on). **That Bluetooth pairing is where Wi-Fi
+   and the Muse tokens land — it is the no-relay path to a working Muse companion.**
+   A Muse SDK token from [gadgets.muse.ai](https://gadgets.muse.ai/settings/sdk-tokens)
+   is used at build time for pairing; without one the firmware still **builds and runs
+   fine** (the build logs a warning).
 
 ## Connect an agent — Hermes, Muse, or anything else
 
@@ -277,9 +333,10 @@ to a server you point it at, and speaks the reply it gets back. Three transports
 - **Your own relay/agent** — set `CONFIG_MUSE_HERMES_URL` (home address) and
   `CONFIG_MUSE_HERMES_URL_REMOTE` (works from anywhere, e.g. a Tailscale funnel) in your
   board profile / `idf.py menuconfig`. The device then sends turns to that HTTP endpoint
-  and speaks the replies. A reference implementation of the tiny contract — ~300 lines
-  of stdlib Python with pluggable STT/TTS — is `hermes-relay`; the full wire protocol is
-  in [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md). Point it at Hermes, at any
+  and speaks the replies. A reference implementation of the tiny contract — stdlib
+  Python with pluggable STT/TTS, running on macOS, Windows or Linux — ships in
+  [`relay/`](relay) with its own setup README; the full wire protocol is in
+  [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md). Point it at Hermes, at any
   OpenAI-compatible endpoint, or at your own script.
 - **Anything else** — any service that implements the `/turn` contract (POST text or
   audio in, reply out; optional NDJSON streaming with per-sentence TTS chunks) works.
@@ -296,12 +353,15 @@ esp32/components/muse/          the companion itself (this fork's center of work
   muse_diag.c/.h                the NVS black box
   avatar/                       three faces + icon headers (tracked, self-contained)
   boards/board_waveshare_s3_143c.c   the target board
-esp32/tests/                    198 hardware-free host tests
+esp32/tests/                    207 hardware-free host tests
+docs/                           AGENT-PROTOCOL.md (wire contract) + AI-SETUP.md (runbook)
+relay/                          reference agent bridge (macOS / Windows / Linux)
 ```
 
-The reference relay (`hermes-relay`: agent routing, STT/TTS, the notification store)
-is a separate repo and not included here — [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md)
-documents the wire contract so you can write your own.
+The reference relay ([`relay/`](relay): agent routing, STT/TTS, the notification store)
+ships right here with its own setup README for macOS, Windows and Linux; and
+[`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md) documents the wire contract so you
+can write your own instead.
 
 ## Building & testing
 

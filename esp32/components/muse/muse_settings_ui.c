@@ -1439,7 +1439,7 @@ static void on_agent_profile(lv_event_t *e)
     (void)e;
     char alt[MUSE_AGENT_PROFILE_MAX + 1];
     muse_settings_agent_alt(alt);
-    open_text("Alt profile", alt, false, MUSE_AGENT_PROFILE_MAX, "e.g. beepbop",
+    open_text("Alt profile", alt, false, MUSE_AGENT_PROFILE_MAX, "e.g. sidekick",
               on_agent_profile_done, s_agents);
 }
 

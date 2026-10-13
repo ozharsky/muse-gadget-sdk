@@ -5,8 +5,8 @@ All custom work lives on the **`hermes-local`** branch — which is also this re
 branch, so what you see first is the work, not upstream's `main`.
 
 - `main` — untouched mirror of upstream's `main` at the fork point (commit `3b56ccb`).
-- `hermes-local` — everything below. **86 commits ahead of the fork point; 70 beyond
-  current upstream `main`** (upstream has moved 54 commits since the fork).
+- `hermes-local` — everything below. **116 commits of work on top of upstream `main`**
+  (kept untouched as the rebase base).
 - `upstream` remote → `facebookincubator/muse-gadget-sdk` (rebase reference; **never push**).
 - `origin` remote → this repo (`ozharsky/muse-gadget-sdk`).
 
@@ -26,8 +26,8 @@ for **three agent slots**:
 | Slot | Default occupant | Face (avatar) | Transport |
 |---|---|---|---|
 | `MUSE_AGENT_MUSE` | Muse / SHODAN | `shodan` | Muse cloud VM |
-| `MUSE_AGENT_HERMES` | Hermes (default profile) | `stone` (stone god) | Mac relay → Hermes |
-| `MUSE_AGENT_HERMES_ALT` | Any named Hermes profile (e.g. `beepbop`) | `golem` | Mac relay → that profile |
+| `MUSE_AGENT_HERMES` | Hermes (default profile) | `stone` (stone god) | your relay → Hermes |
+| `MUSE_AGENT_HERMES_ALT` | Any named Hermes profile (e.g. `my-alt`) | `golem` | your relay → that profile |
 
 - **Enum settings with NVS migration** — old 0/1 values keep their meaning when the
   third slot appears (`91bb056`).
@@ -45,7 +45,7 @@ for **three agent slots**:
 ### 2. Reverse notification channel (relay → device)
 
 Everything else the gadget does is poll ("I ask, you answer"). This is the opposite
-direction: the Mac relay pushes a short line, the device looks up, chirps, speaks it,
+direction: the relay pushes a short line, the device looks up, chirps, speaks it,
 and offers to open the exact agent that raised it.
 
 - **Relay side** (`hermes-relay`): `notifications.py` store + endpoints
@@ -109,7 +109,7 @@ firmware must survive rather than fix.
 
 - **Restart paths for a board whose PWR switch died**: hold BOOT 20 s → force
   restart; menu "Restart"; settings POWER button; console `>reboot`; and
-  `reset_gadget.py` on the Mac (DTR/RTS pulse via the USB-Serial/JTAG peripheral,
+  a host-side DTR/RTS pulse (`reset_gadget.py`, USB-Serial/JTAG,
   works when the firmware is fully hung) (`4683558`). The watchdog hard ceiling
   (10 min with BLE on) means a frozen screen always self-reboots.
 - **Coredumps to flash** — partition `coredump` @ 0x7E2000 (120 KB, 32-task
@@ -129,7 +129,7 @@ firmware must survive rather than fix.
 ### 5. Connectivity fixes
 
 - **Relay LAN announce + reachability cache** (`35c7523`) — killed the 7-second
-  turns: the relay announces its LAN address in `/tasks` and `/agents`, the gadget
+  turns: the relay announces its LAN address in `/agents`, the gadget
   stores it in NVS and prefers it over the compiled-in URL; the reachability probe
   is cached (1.5 s) and netmask-aware.
 - **Wi-Fi saved-network switching** (`5e7b0be`, `8729991`) — tap = switch (joins
@@ -139,9 +139,10 @@ firmware must survive rather than fix.
 - **Muse chat bearer fix** (`882b926`) — the chat session asks the app layer for
   the provisioned access token instead of reusing the SDK identity-class token
   (the post-pairing 401 loop).
-- **Task bridge repairs** (`0e5ee14`) — idempotency-key collision, stranded
-  `running` cards, false-success completions, OOB read, backoff. Cross-agent task
-  cards (Hermes ↔ Muse) close the loop end to end (`b450bde`, `d49b272`).
+- **Tasking removed (2026-10-10)** — the cross-agent task bridge was removed whole at
+  the owner's call (firmware `7f107a8`: `[task:]` tags, the `/tasks` poll, injected
+  turns; relay: endpoints, `task_bridge.py`). Its poll held the session task and
+  slowed voice turns. Reminders + notifications are the surviving reverse channels.
 
 ### 6. Avatar system
 
@@ -158,7 +159,7 @@ firmware must survive rather than fix.
 
 ### 7. Build & test infrastructure
 
-- **198 host tests** run without hardware: `env -u PYTHONPATH python3 -m unittest
+- **207 host tests** run without hardware: `env -u PYTHONPATH python3 -m unittest
   discover -s tests -p 'test_*.py'` from `esp32/`.
 - **`build_flash.sh`** (in `art-pipeline`, not this repo) — hard-gates the sdkconfig
   secrets before every build, verifies the built binary actually contains them,
@@ -168,6 +169,28 @@ firmware must survive rather than fix.
   `>wifi.switch|forget|add`, `>reboot`, plus fault injection for every guard.
 - **Snapshot QA** — `LV_USE_SNAPSHOT` can be enabled in the build sdkconfig for
   screen captures over serial (`tools/muse/snap.py`); off in shipped builds.
+
+### 8. The 2026-10-12 art + sessions wave
+
+- **Faces v2** — all-new art on all three faces (shodan-A1 / stone-B3 / golem-C5),
+  baked through the shipping renderers and verified on the glass (`51a575c`).
+- **Stage C** — per-face idle personas (blink cadence, saccades, breathing) and one
+  signature accent beat each: the SHODAN scan ring, the stone vein glint, the golem
+  core thump (`345ee1b`). An easing rig (`eadf69b`) and the idle scheduler (`f5b8c2b`)
+  followed, then **moods v3** reworked all 52 reactions for 64-px legibility
+  (`1da7a32`).
+- **On-device video player + indexed clip registry** (`937086a`, `a66c03f`) — clips
+  (construct + CC0 witch/skeleton/zombie) play from the indexed registry, with
+  lip-sync (hysteresis + minimum hold) on shodan/stone.
+- **Sessions** — the turn backend is pinned at turn start (an agent flip can no longer
+  reroute a live turn; `af04f61`), and on the relay each agent slot keeps its own
+  conversation (`session_ids.json`).
+- **Boot-repair self-heal** (`8918603`) — the lost-pairing state (setup marked done,
+  Wi-Fi saved, device credentials gone) now clears itself at boot so the app can
+  always re-pair; no more menu dance.
+- **Sharing** — on-glass README artwork, [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md),
+  [`docs/AI-SETUP.md`](docs/AI-SETUP.md), the bundled [`relay/`](relay), and a personal-
+  data sanitize of the tree (`a0583fe`).
 
 ---
 
@@ -182,11 +205,11 @@ esp32/components/muse/        the companion UI + session (this fork's center of 
   muse_diag.c / .h            the NVS black box
   boards/board_waveshare_s3_143c.c   the target board (touch, panel, PMU)
   avatar/                     three faces + icon headers (tracked since c14a224)
-esp32/tests/                  198 host tests, no hardware needed
+esp32/tests/                  207 host tests, no hardware needed
 ```
 
-The Mac-side relay, print watcher, and art pipeline live in a separate private
-workspace (`~/muse/hermes-relay`, `~/muse/art-pipeline`) — not part of this repo.
+The reference relay now ships in-repo: [`relay/`](relay) (stdlib Python; macOS,
+Windows, Linux). The author's live deployment and art pipeline live outside the repo.
 
 ---
 
@@ -204,6 +227,13 @@ Use the upstream project's own instructions (see upstream `README.md`) — this 
 does not change the toolchain. On the author's machine it's
 `bash ~/muse/art-pipeline/build_flash.sh s3143c <port> [flash]`, which enforces
 the secret gate described above.
+
+## Getting set up
+
+New here — or handing this to your AI? [`docs/AI-SETUP.md`](docs/AI-SETUP.md) is the
+full runbook (build → flash → connect, with the failure table). The relay's own setup
+is in [`relay/README.md`](relay/README.md); the agent wire contract is
+[`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md).
 
 ## Syncing with upstream
 

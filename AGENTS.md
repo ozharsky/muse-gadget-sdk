@@ -39,3 +39,9 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## First-time setup for a human (AI runbook)
+
+Setting this up for someone (build → flash → connect)? Follow
+`docs/AI-SETUP.md` end to end — it is written for you to execute. The
+wire contract for connecting any agent is `docs/AGENT-PROTOCOL.md`.

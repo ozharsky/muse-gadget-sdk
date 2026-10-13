@@ -1,0 +1,8 @@
+{
+  "default": {
+    "label": "Hermes",
+    "voice": "sasshole",
+    "api_key_file": "~/.hermes/config.yaml",
+    "personality_file": null
+  }
+}
