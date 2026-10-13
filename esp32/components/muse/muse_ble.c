@@ -36,6 +36,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "muse_ble";
 
@@ -55,6 +56,7 @@ static volatile uint32_t s_passkey;
 static volatile bool s_secure;
 static char s_name[32];   /* the whole "MuseGadget-XXXXXX", not a prefix of it */
 static char s_last[64] = "ready";
+static SemaphoreHandle_t s_cmd_lock;   /* serial console + BLE both dispatch through run_command */
 
 /* ---- commands ---- */
 
@@ -77,6 +79,13 @@ static void json_str(char *out, size_t len, const char *s)
     out[o] = '\0';
 }
 
+struct status_scratch_t {
+    char host[MUSE_HOST_MAX + 1], vm[MUSE_VM_MAX + 1];
+    char ssid_e[2 * MUSE_SSID_MAX + 1], host_e[2 * MUSE_HOST_MAX + 1], vm_e[2 * MUSE_VM_MAX + 1], last_e[128];
+    char relay_lan[64], relay_remote[MUSE_RELAY_URL_MAX + 1];
+    char relay_lan_e[2 * 64 + 1], relay_remote_e[2 * MUSE_RELAY_URL_MAX + 1];
+};
+
 static int build_status(char *out, size_t len)
 {
     muse_wifi_status_t w;
@@ -84,23 +93,32 @@ static int build_status(char *out, size_t len)
     muse_hatch_status_t h;
     muse_hatch_status(&h);
     muse_power_t p = muse_state_power();
-    char host[MUSE_HOST_MAX + 1], vm[MUSE_VM_MAX + 1];
-    muse_settings_hatch_host(host);
-    muse_settings_hatch_vm(vm);
+    /* The BLE host task's stack is 4 KB; ~1.3 KB of escape scratch lives on the heap. */
+    struct status_scratch_t *s = heap_caps_malloc(sizeof *s, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s) {
+        snprintf(out, len, "{}");
+        return 2;
+    }
+    muse_settings_hatch_host(s->host);
+    muse_settings_hatch_vm(s->vm);
+    muse_settings_relay_lan(s->relay_lan);
+    muse_settings_relay_remote(s->relay_remote);
+    char last_snap[64];
+    if (s_cmd_lock) {
+        xSemaphoreTake(s_cmd_lock, portMAX_DELAY);
+    }
+    strlcpy(last_snap, s_last, sizeof(last_snap));
+    if (s_cmd_lock) {
+        xSemaphoreGive(s_cmd_lock);
+    }
+    json_str(s->relay_lan_e, sizeof(s->relay_lan_e), s->relay_lan);
+    json_str(s->relay_remote_e, sizeof(s->relay_remote_e), s->relay_remote);
+    json_str(s->ssid_e, sizeof(s->ssid_e), w.ssid);
+    json_str(s->host_e, sizeof(s->host_e), s->host);
+    json_str(s->vm_e, sizeof(s->vm_e), s->vm);
+    json_str(s->last_e, sizeof(s->last_e), last_snap);
 
-    char ssid_e[2 * MUSE_SSID_MAX + 1], host_e[2 * MUSE_HOST_MAX + 1], vm_e[2 * MUSE_VM_MAX + 1], last_e[128];
-    char relay_lan[64], relay_remote[MUSE_RELAY_URL_MAX + 1];
-    muse_settings_relay_lan(relay_lan);
-    muse_settings_relay_remote(relay_remote);
-    char relay_lan_e[2 * 64 + 1], relay_remote_e[2 * MUSE_RELAY_URL_MAX + 1];
-    json_str(relay_lan_e, sizeof(relay_lan_e), relay_lan);
-    json_str(relay_remote_e, sizeof(relay_remote_e), relay_remote);
-    json_str(ssid_e, sizeof(ssid_e), w.ssid);
-    json_str(host_e, sizeof(host_e), host);
-    json_str(vm_e, sizeof(vm_e), vm);
-    json_str(last_e, sizeof(last_e), s_last);
-
-    return snprintf(out, len,
+    int n = snprintf(out, len,
                     "{\"name\":\"%s\",\"fw\":\"%s\",\"battery\":%d,"
                     "\"wifi\":{\"on\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d},"
                     "\"hatch\":{\"host\":\"%s\",\"vm\":\"%s\",\"token\":%s,\"state\":\"%s\"},"
@@ -108,13 +126,15 @@ static int build_status(char *out, size_t len)
                     "\"relay\":{\"lan\":\"%s\",\"remote\":\"%s\",\"token\":%s},"
                     "\"volume\":%d,\"speaker\":%s,\"mic_gain\":%d,\"brightness\":%d,\"sleep\":%d,\"last\":\"%s\"}",
                     s_name, esp_app_get_description()->version, p.battery_pct,
-                    muse_settings_wifi_on() ? "true" : "false", wifi_state_name(w.state), ssid_e, w.ip, w.rssi,
-                    host_e, vm_e, muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
+                    muse_settings_wifi_on() ? "true" : "false", wifi_state_name(w.state), s->ssid_e, w.ip, w.rssi,
+                    s->host_e, s->vm_e, muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
                     muse_link_hatch_linked() ? "true" : "false", muse_link_state_name(muse_link_state()),
-                    relay_lan_e, relay_remote_e, muse_settings_relay_token_len() ? "true" : "false",
+                    s->relay_lan_e, s->relay_remote_e, muse_settings_relay_token_len() ? "true" : "false",
                     muse_settings_volume(), muse_settings_speaker_on() ? "true" : "false",
                     muse_settings_mic_gain(), muse_settings_brightness(),
-                    muse_settings_sleep_s(), last_e);
+                    muse_settings_sleep_s(), s->last_e);
+    free(s);
+    return n;
 }
 
 static bool parse_int(const char *v, int lo, int hi, int *out)
@@ -143,6 +163,10 @@ static void run_command(char *cmd)
     int n;
     const char *res = "ok";
     bool do_reboot = false;
+
+    if (s_cmd_lock) {
+        xSemaphoreTake(s_cmd_lock, portMAX_DELAY);   /* serial console and BLE share this state */
+    }
 
     if (!strcmp(cmd, "wifi.ssid")) {
         strlcpy(s_pending_ssid, v, sizeof(s_pending_ssid));
@@ -211,6 +235,10 @@ static void run_command(char *cmd)
         if (om) {
             ble_gatts_notify_custom(s_conn, s_status_handle, om);
         }
+    }
+
+    if (s_cmd_lock) {
+        xSemaphoreGive(s_cmd_lock);
     }
 
     if (do_reboot) {
@@ -310,6 +338,7 @@ void muse_ble_configure_host(void)
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_store_config_init();
+    s_cmd_lock = xSemaphoreCreateMutex();
 }
 
 void muse_ble_set_name(const char *name)

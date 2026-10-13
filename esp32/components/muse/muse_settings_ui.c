@@ -1137,7 +1137,7 @@ static void build_sleep_page(lv_obj_t *tile)
         lv_obj_set_style_text_color(s_sleep_checks[i], lv_color_hex(COLOR_ACCENT), 0);
     }
     button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
-    note(list, "Tap the screen or press either button to wake.");
+    note(list, "Press the button to wake; a screen tap also works while on USB.");
 }
 
 static const char *sleep_name(int secs)
@@ -1595,7 +1595,7 @@ static void build_notif_page(lv_obj_t *tile)
     s_notif_shown_gen = UINT32_MAX;   /* first tick fills it */
     note(list, "Tap a line to talk to that agent; hold it to remove it. Clear empties the "
                "list but keeps reminders that have not gone off yet. Timers you set arrive "
-               "here, as do print results and finished tasks.");
+               "here, as do print results.");
 }
 
 static void tick_notif(void)
@@ -1731,10 +1731,11 @@ static void build_home(lv_obj_t *tile)
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
     row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
     if (muse_settings_relay_configured()) {
-        /* Hermes is a separate transport (the Mac relay); show its link on its own row so a
-         * Muse outage never reads as "Hermes is down". No navigation: there is nothing to
-         * configure here -- the relay address is a build setting. */
-        row(list, LV_SYMBOL_UPLOAD, "Hermes", &s_home_hermes, NULL, NULL);
+        /* Hermes is a separate transport (your own relay); show its link on its own row so a
+         * Muse outage never reads as "Hermes is down". No navigation: the relay address is
+         * set from the setup page or the build, not on the glass. */
+        lv_obj_t *hermes_row = row(list, LV_SYMBOL_UPLOAD, "Hermes", &s_home_hermes, NULL, NULL);
+        lv_obj_set_flag(hermes_row, LV_OBJ_FLAG_CLICKABLE, false);   /* no action: do not fake one */
     }
     row(list, LV_SYMBOL_BLUETOOTH, "Bluetooth", &s_home_ble, on_nav, (void *)&BLE);
     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);

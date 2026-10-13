@@ -106,6 +106,10 @@ static void schedule_reconnect(void) {
         xTimerChangePeriod(s_reconnect_timer,
                            pdMS_TO_TICKS(s_reconnect_backoff_ms), 0);
     }
+    if (s_reconnect_timer == NULL) {
+        ESP_LOGE(TAG, "reconnect timer create failed");
+        return;
+    }
     xTimerStart(s_reconnect_timer, 0);
     ESP_LOGI(TAG, "reconnect scheduled in %dms", s_reconnect_backoff_ms);
 

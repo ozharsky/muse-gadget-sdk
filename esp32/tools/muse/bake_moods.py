@@ -2,8 +2,8 @@
 """bake_moods.py: bake all 52 relay reactions as sparse-diff clips for a face.
 
 Usage (from the muse-gadget-sdk esp32 root):
-    /opt/homebrew/bin/python3 ~/muse/art-pipeline/moods_v2/bake_moods.py golem components/muse/avatar/golem_moods.h
-    /opt/homebrew/bin/python3 ~/muse/art-pipeline/moods_v2/bake_moods.py stone components/muse/avatar/stone_moods.h
+    python3 tools/muse/bake_moods.py golem components/muse/avatar/golem_moods.h
+    python3 tools/muse/bake_moods.py stone components/muse/avatar/stone_moods.h
 
 Format matches the golem's original golem_moods.h (MOODS[], MOOD_FRAME_COUNTS[],
 MOOD_FRAME_PX[], MOOD_FRAME_C[]). Colours are ABSOLUTE indices in the renderer's

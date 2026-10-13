@@ -3,7 +3,7 @@
 The gadget is an agent *client*. It records your voice (or takes console text), POSTs it
 to an HTTP base URL it is configured with, and speaks the reply that comes back. Any
 server implementing the small contract below works. The reference implementation
-(`hermes-relay`, ~300 lines of stdlib Python with pluggable STT/TTS) is a separate repo;
+(the `relay/` folder, stdlib Python with pluggable STT/TTS) ships in this repo;
 nothing in the firmware requires it.
 
 ## Configuration (firmware side)

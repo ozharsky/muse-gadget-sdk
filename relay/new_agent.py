@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Register a Hermes profile as a gadget agent — the one command for "I made a new profile".
 
-    python3 ~/muse/hermes-relay/new_agent.py <profile> [--label NAME] [--voice sasshole|professional|plain]
+    python3 new_agent.py <profile> [--label NAME] [--voice sasshole|professional|plain]
 
 It adds/updates the profile's entry in agents.json (voice defaults to professional, label to
 "Hermes <Profile>"). The profile must already exist (`hermes profile create <name>`), and its

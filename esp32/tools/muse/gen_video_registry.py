@@ -7,7 +7,7 @@ the whole removal -- regenerate, never hand-edit.
 
     python3 gen_video_registry.py [clips_dir] [out_header]
 
-Defaults: ~/muse/muse-gadget-sdk/esp32/components/muse/avatar/clips and
+Defaults: components/muse/avatar/clips and
 bench_videos.h next to it. Entries are sorted by name.
 """
 import os
@@ -15,7 +15,8 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CLIPS = os.path.expanduser("~/muse/muse-gadget-sdk/esp32/components/muse/avatar/clips")
+DEFAULT_CLIPS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                             "components", "muse", "avatar", "clips")
 DEFAULT_OUT = os.path.join(os.path.dirname(DEFAULT_CLIPS), "bench_videos.h")
 
 

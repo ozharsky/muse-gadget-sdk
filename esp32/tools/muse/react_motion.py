@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.expanduser("~/muse/muse-gadget-sdk/esp32")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # <repo>/esp32
 DT = 0.04
 MOVE = 30       # a pixel "changed" when the summed |RGB| delta exceeds this
 SETTLE_THR = 40  # px still different from the settled frame

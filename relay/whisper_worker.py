@@ -4,7 +4,7 @@ Prefers faster-whisper (CTranslate2): the same base.en weights, ~2.5x faster on 
 the openai-whisper torch build (0.5-1.6 s vs 1.4-2.4 s warm). Falls back to openai-whisper
 if faster_whisper is not importable (the old Homebrew interpreter). Recreate the fast venv:
 
-    cd ~/muse/hermes-relay && uv venv venv-stt && uv pip install --python venv-stt/bin/python faster-whisper
+    cd <the relay folder> && uv venv venv-stt && uv pip install --python venv-stt/bin/python faster-whisper
 
 The relay always writes 16 kHz mono PCM16 WAVs, so the worker decodes the bytes itself
 (wave + numpy) and hands the model a float32 array -- decode stays in-process and does not

@@ -18,7 +18,7 @@ the poll until `due` passes, then it appears exactly like any other nudge (chirp
 the agent). No firmware involved. While undelivered it sits in notifications.json; `--cancel`
 lists what is waiting.
 
-The agent argument is a profile name from ~/muse/hermes-relay/agents.json; `default` (or an empty
+The agent argument is a profile name from the relay's agents.json; `default` (or an empty
 string) means the base Hermes. An unknown name is accepted but the device will open the Hermes
 slot instead (the relay refuses to open a profile it cannot route).
 """
@@ -110,7 +110,10 @@ def main():
     text = " ".join(args[1:]).strip()
     if agent in ("hermes",):
         agent = "default"
-    token = open(os.path.join(HERE, "token")).read().strip()
+    try:
+        token = open(os.path.join(HERE, "token")).read().strip()
+    except FileNotFoundError:
+        raise SystemExit("no relay token yet -- start the relay once (it writes ./token)")
     body = {"text": text, "agent": agent, "mood": os.environ.get("NOTIF_MOOD", "")}
     if due:
         body["due"] = due

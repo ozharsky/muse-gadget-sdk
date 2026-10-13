@@ -13,8 +13,8 @@ import time
 import serial
 
 PORT = "/dev/cu.usbmodem1101"
-SNAP = os.path.expanduser("~/muse/muse-gadget-sdk/esp32/tools/muse/snap.py")
-IDF = os.path.expanduser("~/.espressif/python_env/idf6.0_py3.13_env/bin/python")
+SNAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snap.py")
+IDF = os.environ.get("IDF_PY") or os.path.expanduser("~/.espressif/python_env/idf6.0_py3.13_env/bin/python")
 
 
 def snap(out):

@@ -83,16 +83,28 @@ static void load_u8(const char *key, uint8_t *out)
     nvs_get_u8(s_nvs, key, out);
 }
 
-static void save_u8(const char *key, uint8_t v)
+static esp_err_t save_u8(const char *key, uint8_t v)
 {
-    nvs_set_u8(s_nvs, key, v);
-    nvs_commit(s_nvs);
+    esp_err_t err = nvs_set_u8(s_nvs, key, v);
+    if (err == ESP_OK) {
+        err = nvs_commit(s_nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs save '%s' failed: %s", key, esp_err_to_name(err));
+    }
+    return err;
 }
 
-static void save_str(const char *key, const char *v)
+static esp_err_t save_str(const char *key, const char *v)
 {
-    nvs_set_str(s_nvs, key, v);
-    nvs_commit(s_nvs);
+    esp_err_t err = nvs_set_str(s_nvs, key, v);
+    if (err == ESP_OK) {
+        err = nvs_commit(s_nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs save '%s' failed: %s", key, esp_err_to_name(err));
+    }
+    return err;
 }
 
 static void notify(muse_setting_t what)

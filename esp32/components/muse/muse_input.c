@@ -483,6 +483,7 @@ static void low_battery_check(const muse_power_t *p)
             warned_at = pct;
             return;
         }
+        warned_at = pct;   /* latch: a power_off() that returns must not re-loop the caption */
         power_off();                       /* deep sleep; BOOT wakes it */
         return;
     }

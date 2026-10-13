@@ -66,7 +66,7 @@ once, then its heartbeat turns into `setup=done wifi=up ws=up ble=off`. Talk to 
 repo, nothing to install):** The SDK includes a setup page that talks to the device's
 Bluetooth setup service directly: `tools/muse/ble_setup.html`.
 1. On the device: `Settings → Bluetooth → Phone setup` → ON.
-2. On the computer: `cd tools && python3 -m http.server 8000`, then open
+2. On the computer: `cd esp32/tools/muse && python3 -m http.server 8000`, then open
    `http://localhost:8000/ble_setup.html` in Chrome (desktop or Android; on iOS use the
    Bluefy browser — Web Bluetooth needs https/localhost).
 3. Click **Connect**; when the OS asks to pair, type the 6-digit code shown on the

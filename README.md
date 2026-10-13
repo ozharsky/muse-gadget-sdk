@@ -320,7 +320,7 @@ fa0b9b7 Add generic ESP32-C6 (no PSRAM) board support (#54)
    during its BLE pairing, if you use Muse.
    **From a computer instead (browser, no phone):** turn on `Settings → Bluetooth →
    Phone setup` on the device, then on the computer
-   `cd tools && python3 -m http.server 8000` and open
+   `cd esp32/tools/muse && python3 -m http.server 8000` and open
    `http://localhost:8000/ble_setup.html` in Chrome. Connect, enter the code shown on
    the device screen, then fill in Wi-Fi — and, for Muse, the device token — and Save.
    The same page's **Your own agent** section points the gadget at a relay of your own

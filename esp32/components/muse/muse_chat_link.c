@@ -507,8 +507,9 @@ static bool request(int slot, const char *verb, const char *path, bool json, boo
 {
     char req_id[40];
     snprintf(req_id, sizeof(req_id), "muse-%08" PRIx32 "-%08" PRIx32, esp_random(), esp_random());
+    (void)json;   /* every caller posts JSON; the old NULL-name header pair was a latent bug */
     const char *headers[] = { "x-request-id", req_id, "x-app-id", "hatch-web",
-                              json ? "Content-Type" : NULL, "application/json",
+                              "Content-Type", "application/json",
                               "Accept", slot == RX_SUB ? "application/x-ndjson" : "application/json", NULL };
     rx_t *rx = &s_rx[slot];
     xSemaphoreTake(s_rx_lock, portMAX_DELAY);

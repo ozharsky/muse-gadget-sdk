@@ -622,16 +622,19 @@ static void wait_buttons(int timeout_ms)
 static esp_err_t read_power(muse_power_t *out)
 {
     int raw, mv = 0;
+    bool ok = false;
     if (adc_oneshot_read(s_adc, BATT_ADC_CH, &raw) == ESP_OK && s_cali_ok) {
         if (adc_cali_raw_to_voltage(s_cali, raw, &mv) == ESP_OK) {
             mv *= 2;
+            ok = true;
         }
     }
     out->battery_mv = mv;
     /* Rough Li-ion curve for the meter; the vendor reports millivolts only. The 100%
      * anchor sits at 4.10 V: the charger's CV termination relaxes to ~4.06-4.10 V resting,
      * so a full cell idles just under 4.2 V — anchored at 4.2 the meter never reads 100. */
-    out->battery_pct = mv <= 3300 ? 0 : mv >= 4100 ? 100 : (mv - 3300) * 100 / 800;
+    /* A failed read is UNKNOWN (-1), never 0%: the low-battery guard would deep-sleep on it. */
+    out->battery_pct = !ok ? -1 : mv <= 3300 ? 0 : mv >= 4100 ? 100 : (mv - 3300) * 100 / 800;
     out->charging = gpio_get_level(CHARGE_STAT_GPIO) == 0;
     out->usb = usb_serial_jtag_is_connected();
     return ESP_OK;

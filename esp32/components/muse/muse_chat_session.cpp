@@ -3006,7 +3006,7 @@ static bool poll_notification(rel_notif_t *out, bool *reachable)
     if (reachable) {
         *reachable = false;
     }
-    char url[160];
+    char url[MUSE_RELAY_URL_MAX + 48];
     bool remote = false;
     snprintf(url, sizeof(url), "%s/notifications", relay_base_url(&remote));
     const size_t CAP = 8 * 1024;
@@ -3081,7 +3081,7 @@ static void notif_ack(const char *id)
     if (!json) {
         return;
     }
-    char url[160];
+    char url[MUSE_RELAY_URL_MAX + 48];
     bool remote = false;
     snprintf(url, sizeof(url), "%s/notifications/ack", relay_base_url(&remote));
     esp_http_client_config_t cfg = {};
@@ -3107,7 +3107,7 @@ static void notif_ack(const char *id)
 /* GET /notifications/history -> fill the inactive buffer, then publish it. Session task only. */
 static void notif_hist_fetch(void)
 {
-    char url[176];
+    char url[MUSE_RELAY_URL_MAX + 48];
     bool remote = false;
     snprintf(url, sizeof(url), "%s/notifications/history?limit=%d", relay_base_url(&remote), NOTIF_HIST_MAX);
     const size_t CAP = 20 * 1024;
@@ -3211,7 +3211,7 @@ static void notif_hist_cancel(const char *id)
     if (!json) {
         return;
     }
-    char url[176];
+    char url[MUSE_RELAY_URL_MAX + 48];
     bool remote = false;
     snprintf(url, sizeof(url), "%s/notifications/cancel", relay_base_url(&remote));
     esp_http_client_config_t cfg = {};
@@ -3242,7 +3242,7 @@ static void notif_hist_cancel(const char *id)
  * page shows what survived. Session task only. */
 static void notif_hist_clear(void)
 {
-    char url[176];
+    char url[MUSE_RELAY_URL_MAX + 48];
     bool remote = false;
     snprintf(url, sizeof(url), "%s/notifications/clear", relay_base_url(&remote));
     esp_http_client_config_t cfg = {};
@@ -3598,13 +3598,16 @@ extern "C" void muse_hatch_start(void)
     s_turn.texts = static_cast<char *>(psram_alloc(MAX_MSGS * TEXT_MAX));   /* captions just stay untimed without it */
     s_pcm = static_cast<int16_t *>(psram_alloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t)));
     s_pcm16 = static_cast<int16_t *>(psram_alloc((MINIMP3_MAX_SAMPLES_PER_FRAME + 8) * sizeof(int16_t)));
+    bool streams_ok = true;
     for (auto &s : s_streams) {
         s.line = static_cast<char *>(psram_alloc(NDJSON_LINE_MAX));
         s.cap = NDJSON_LINE_MAX;
+        streams_ok = streams_ok && s.line != nullptr;
     }
     s_turn.tts_msg = -1;
     /* Stack in PSRAM: TLS, Noise and the MP3 decoder (~16 KB of scratch) all run here. */
     if (!s_cmds || !s_events || !s_in || !s_out || !s_turn.chunk || !s_turn.mp3 || (VOICE_NOTE && !s_turn.note) || !s_pcm || !s_pcm16 ||
+        !streams_ok ||
         xTaskCreatePinnedToCoreWithCaps(hatch_task, "muse_chat", 48 * 1024, nullptr, 5, nullptr, 0,
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "start failed");
