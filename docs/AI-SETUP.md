@@ -79,6 +79,11 @@ The page is a file in the repo; the device side is all firmware. No phone, no re
    optional) and the relay token — then **Save & restart gadget**. The device reboots
    and routes turns to the relay; no rebuild, no serial. (Newest firmware; older builds
    need the config values at build time.)
+6. Verify the relay section end-to-end over Bluetooth (an AI can run this largely
+   unattended): `esp32/tools/muse/e2e_ble_setup.py` from Terminal.app on a computer near
+   the gadget — the first run asks for Bluetooth permission and shows one pairing sheet
+   (type the code the device displays); the script then sets, checks, reboots and clears
+   the relay values.
 
 **Way B/C — your own agent via the relay:** On the always-on machine:
 1. Copy `relay/` out of the repo and follow `relay/README.md` (Windows: `relay-launch.cmd`;

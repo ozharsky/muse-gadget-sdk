@@ -818,6 +818,34 @@ static bool console_command(char *line, bool whole)
         fflush(stdout);
         return true;
     }
+    if (!strcmp(line, "pair.code")) {
+        /* Bench + headless setup: the pairing passkey the glass is showing, so a remote
+         * operator can enter it on the pairing client. Zero when nothing is pairing. */
+        muse_ble_status_t b;
+        muse_ble_status(&b);
+        printf("@pair.code %06lu secure=%d state=%d name=\"%s\"\n",
+               (unsigned long)b.passkey, (int)b.secure, (int)b.state, b.name);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "wifi.on=", 8)) {
+        /* Bench: the Settings -> Wi-Fi toggle as a console command. Off quiets the
+         * shared 2.4 GHz radio so a BLE pairing on an already-provisioned device gets
+         * the airtime (Wi-Fi reconnects when set back on, or on the next boot). */
+        bool on = line[8] != '0';
+        muse_settings_set_wifi_on(on);
+        printf("@wifi.on %s\n", on ? "on" : "off");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "ble.setup=", 10)) {
+        /* Bench: the same toggle as the aux double-press -- visible to phones/the setup page. */
+        bool on = line[10] != '0';
+        muse_settings_set_ble_on(on);
+        printf("@ble.setup %s\n", on ? "on" : "off");
+        fflush(stdout);
+        return true;
+    }
     if (!strncmp(line, "batt.sim=", 9)) {
         /* Bench: fake the smoothed % the low-battery guard reads. ">batt.sim=14" trips the
          * 15% warning (cue + caption); ">batt.sim=4" trips the 5% auto-sleep; ">batt.sim=-1"
