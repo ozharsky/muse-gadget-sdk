@@ -10,7 +10,7 @@ want. Do not invent credentials, do not skip the checkpoints.
 
 | Way | What it needs | Pick when |
 |---|---|---|
-| **A. Muse cloud only** | Flash + the Muse app on their phone. Wi-Fi and account tokens arrive **over Bluetooth during pairing** (they can also enter Wi-Fi on the device itself: `Settings → Wi-Fi`). | They just want the stock Muse companion. No extra machine, no relay. |
+| **A. Muse cloud only** | Flash + the Muse app on their phone, **or a computer browser** (the SDK's setup page — see §4). Wi-Fi and account tokens arrive **over Bluetooth during pairing** (they can also enter Wi-Fi on the device itself: `Settings → Wi-Fi`). | They just want the stock Muse companion. No extra machine, no relay. |
 | **B. A self-hosted agent** (Hermes, or anything else) | Flash + `relay/` running on an always-on Mac/Windows/Linux box + two config strings baked into the firmware. | They want their *own* agent answering. |
 | **C. Both** | Everything from A and B. | They want the fork's three-agent switching (Muse / their agent / a second agent). |
 
@@ -51,8 +51,9 @@ Verify, in order:
 2. `link.heartbeat` lines every 5 s with `wifi=...` — proves radio + power are sane.
 3. Type `>status` — a JSON line. `setup=advertising` means it is waiting to pair; that is
    the normal fresh state.
-4. Wi-Fi: either let the Muse app deliver it during pairing (way A), or on the device:
-   `Settings → Wi-Fi` → pick the network → type the password on the touch keyboard.
+4. Wi-Fi: either let the Muse app deliver it during pairing (way A), on the device
+   itself (`Settings → Wi-Fi` → pick the network → type the password on the keyboard),
+   or from a computer's browser (the setup page — see §4).
 
 ## 4. Connect the agent
 
@@ -60,6 +61,19 @@ Verify, in order:
 Developer mode → look for `MuseGadget-…` → pair. The app sends Wi-Fi credentials and the
 account tokens **over Bluetooth** as part of this flow; the device reboots by design
 once, then its heartbeat turns into `setup=done wifi=up ws=up ble=off`. Talk to it.
+
+**Way A — from a computer instead of a phone (browser + Bluetooth — ships in the
+repo, nothing to install):** The SDK includes a setup page that talks to the device's
+Bluetooth setup service directly: `tools/muse/ble_setup.html`.
+1. On the device: `Settings → Bluetooth → Phone setup` → ON.
+2. On the computer: `cd tools && python3 -m http.server 8000`, then open
+   `http://localhost:8000/ble_setup.html` in Chrome (desktop or Android; on iOS use the
+   Bluefy browser — Web Bluetooth needs https/localhost).
+3. Click **Connect**; when the OS asks to pair, type the 6-digit code shown on the
+   device's screen.
+4. In the page: **Wi-Fi** (network name + password → Join) and **Muse** (Device token →
+   Save → Test connection; VM ID optional). It also carries volume/mic/brightness/sleep.
+The page is a file in the repo; the device side is all firmware. No phone, no relay.
 
 **Way B/C — your own agent via the relay:** On the always-on machine:
 1. Copy `relay/` out of the repo and follow `relay/README.md` (Windows: `relay-launch.cmd`;
@@ -81,6 +95,7 @@ battery and link state; a first voice turn produces a spoken reply and a caption
 | `CAN'T REACH MUSE`, serial shows `token_len=48 prefix=mgst_` + `fetch_vms: 401` | The device lost its pairing/credentials | `Settings → Muse → Reset pairing`, then re-pair in the app (newer firmware self-heals this at boot) |
 | Relay turns fail, gadget says `CAN'T REACH MUSE` while on a Hermes slot | Firmware cannot reach the relay URL | Check `CONFIG_MUSE_HERMES_URL(_REMOTE)` + token; both machines on the same LAN; firewall open on the relay port |
 | App pairing stalls at "connecting" | Device thinks it is already set up (`error_pairing_unavailable` in serial) | Reset pairing on the device, then pair again |
+| Setup page (`ble_setup.html`) cannot find the device | "Phone setup" not enabled, or the device is already paired | Device: `Settings → Bluetooth → Phone setup` ON; if it is paired, reset pairing first |
 | Flash fails mid-write | Something else holds the serial port | Close monitors/taps, replug, retry — `idf.py -p <port> flash` |
 | No USB port appears | Charge-only cable / driver | Swap cable first; then OS driver notes in Espressif's guide |
 | Face frozen, device reboots later | Historical display freeze class (fixed in this fork; `>diag` names the last restart) | Update to this branch; `>diag` over serial tells the reason |

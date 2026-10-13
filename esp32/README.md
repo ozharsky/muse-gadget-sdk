@@ -149,6 +149,14 @@ connected.
 
 To reset the device and set it up again, hold the button for 5 seconds.
 
+**Or set it up from a computer's browser** — no phone needed: turn on
+`Settings > Bluetooth > Phone setup` on the device (menu button > Phone setup on
+boards without a touchscreen), serve the repo's `tools/` folder
+(`cd tools && python3 -m http.server 8000`), and open
+`http://localhost:8000/ble_setup.html` in Chrome. Connect, type the 6-digit code shown
+on the device, then enter Wi-Fi and — if you use Muse — the device token, and press
+Save. (Web Bluetooth needs https or localhost; on iOS use the Bluefy browser.)
+
 Pairing requires a press of the button on the device, and every setup creates
 a fresh encrypted session. Because these are community devices, pairing has no
 manufacturer verification and can't prevent an active man-in-the-middle

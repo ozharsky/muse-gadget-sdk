@@ -310,6 +310,11 @@ fa0b9b7 Add generic ESP32-C6 (no PSRAM) board support (#54)
 1. **Wi-Fi** — on the device itself: `Settings -> Wi-Fi`, pick your network from the
    scanned list, type the password on the touch keyboard. The Muse app also sets Wi-Fi
    during its BLE pairing, if you use Muse.
+   **From a computer instead (browser, no phone):** turn on `Settings → Bluetooth →
+   Phone setup` on the device, then on the computer
+   `cd tools && python3 -m http.server 8000` and open
+   `http://localhost:8000/ble_setup.html` in Chrome. Connect, enter the code shown on
+   the device screen, then fill in Wi-Fi — and, for Muse, the device token — and Save.
 2. **A computer-accessible console** — over USB serial (115200 baud): `>status` prints
    the full device state (agent, Wi-Fi, battery, link). Other console commands let you
    set the active agent (`>agent=muse|hermes|alt`), switch/forget saved networks
