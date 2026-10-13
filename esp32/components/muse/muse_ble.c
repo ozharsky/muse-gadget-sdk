@@ -32,6 +32,10 @@
 #include "muse_state.h"
 #include "muse_voice.h"
 #include "muse_wifi.h"
+#include "muse_diag.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "muse_ble";
 
@@ -85,6 +89,12 @@ static int build_status(char *out, size_t len)
     muse_settings_hatch_vm(vm);
 
     char ssid_e[2 * MUSE_SSID_MAX + 1], host_e[2 * MUSE_HOST_MAX + 1], vm_e[2 * MUSE_VM_MAX + 1], last_e[128];
+    char relay_lan[64], relay_remote[MUSE_RELAY_URL_MAX + 1];
+    muse_settings_relay_lan(relay_lan);
+    muse_settings_relay_remote(relay_remote);
+    char relay_lan_e[2 * 64 + 1], relay_remote_e[2 * MUSE_RELAY_URL_MAX + 1];
+    json_str(relay_lan_e, sizeof(relay_lan_e), relay_lan);
+    json_str(relay_remote_e, sizeof(relay_remote_e), relay_remote);
     json_str(ssid_e, sizeof(ssid_e), w.ssid);
     json_str(host_e, sizeof(host_e), host);
     json_str(vm_e, sizeof(vm_e), vm);
@@ -95,11 +105,13 @@ static int build_status(char *out, size_t len)
                     "\"wifi\":{\"on\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d},"
                     "\"hatch\":{\"host\":\"%s\",\"vm\":\"%s\",\"token\":%s,\"state\":\"%s\"},"
                     "\"link\":{\"paired\":%s,\"state\":\"%s\"},"
+                    "\"relay\":{\"lan\":\"%s\",\"remote\":\"%s\",\"token\":%s},"
                     "\"volume\":%d,\"speaker\":%s,\"mic_gain\":%d,\"brightness\":%d,\"sleep\":%d,\"last\":\"%s\"}",
                     s_name, esp_app_get_description()->version, p.battery_pct,
                     muse_settings_wifi_on() ? "true" : "false", wifi_state_name(w.state), ssid_e, w.ip, w.rssi,
                     host_e, vm_e, muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
                     muse_link_hatch_linked() ? "true" : "false", muse_link_state_name(muse_link_state()),
+                    relay_lan_e, relay_remote_e, muse_settings_relay_token_len() ? "true" : "false",
                     muse_settings_volume(), muse_settings_speaker_on() ? "true" : "false",
                     muse_settings_mic_gain(), muse_settings_brightness(),
                     muse_settings_sleep_s(), last_e);
@@ -130,6 +142,7 @@ static void run_command(char *cmd)
     }
     int n;
     const char *res = "ok";
+    bool do_reboot = false;
 
     if (!strcmp(cmd, "wifi.ssid")) {
         strlcpy(s_pending_ssid, v, sizeof(s_pending_ssid));
@@ -159,6 +172,17 @@ static void run_command(char *cmd)
         }
     } else if (!strcmp(cmd, "hatch.test")) {
         muse_hatch_test();
+    } else if (!strcmp(cmd, "relay.lan")) {
+        muse_settings_set_relay_lan(v);
+    } else if (!strcmp(cmd, "relay.remote")) {
+        muse_settings_set_relay_remote(v);
+    } else if (!strcmp(cmd, "relay.token") || !strcmp(cmd, "relay.token+")) {
+        if (muse_settings_set_relay_token(v, cmd[11] == '+') != ESP_OK) {
+            res = "error: token too long";
+        }
+    } else if (!strcmp(cmd, "reboot")) {
+        do_reboot = true;
+        res = "rebooting";
     } else if (!strcmp(cmd, "test.loopback")) {
         muse_voice_request_loopback();
     } else if (!strcmp(cmd, "volume") && parse_int(v, 0, 100, &n)) {
@@ -176,7 +200,8 @@ static void run_command(char *cmd)
     }
 
     /* Never echo secrets back. */
-    bool secret = !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11);
+    bool secret = !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11) ||
+                  !strncmp(cmd, "relay.token", 11);
     snprintf(s_last, sizeof(s_last), "%s: %s", cmd, res);
     ESP_LOGI(TAG, "cmd %s%s%s -> %s", cmd, secret ? "" : "=", secret ? "" : v, res);
     muse_state_poke();
@@ -186,6 +211,14 @@ static void run_command(char *cmd)
         if (om) {
             ble_gatts_notify_custom(s_conn, s_status_handle, om);
         }
+    }
+
+    if (do_reboot) {
+        /* The ack went out above; now restart. "ble" names the setup page as the
+         * requester in the black box, like "console" does for the serial >reboot. */
+        muse_diag_note_restart("ble");
+        vTaskDelay(pdMS_TO_TICKS(250));
+        esp_restart();
     }
 }
 
@@ -205,10 +238,17 @@ static int on_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     (void)attr;
     (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        char buf[512];
-        int n = build_status(buf, sizeof(buf));
-        n = n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1;
-        return os_mbuf_append(ctxt->om, buf, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        /* Heap, not stack: the status blob grew past 1 KB with the relay block, and this
+         * callback runs on the BLE host task's small stack. */
+        char *buf = malloc(2048);
+        if (!buf) {
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        int n = build_status(buf, 2048);
+        n = n < 2048 ? n : 2047;
+        int rc = os_mbuf_append(ctxt->om, buf, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        free(buf);
+        return rc;
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         char *cmd = malloc(CMD_MAX + 1);

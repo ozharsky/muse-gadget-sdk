@@ -2923,7 +2923,7 @@ void app_run(void) {
                 if (connected) {
                     ui_set_status("auth_ok");
                     led_status_set_state(LED_STATE_AUTH_OK);
-                } else if (muse_settings_agent_hermes() && CONFIG_MUSE_HERMES_URL[0]) {
+                } else if (muse_settings_agent_hermes() && muse_settings_relay_configured()) {
                     // The Muse VM fetch failed, but the ACTIVE agent is Hermes, whose
                     // transport is the Mac relay and needs no Muse credential. Reporting a
                     // device-level failure here is what made a Muse outage look like

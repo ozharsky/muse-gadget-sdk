@@ -33,6 +33,8 @@
 #define MUSE_HOST_MAX 63
 #define MUSE_VM_MAX 63
 #define MUSE_TOKEN_MAX 1023
+#define MUSE_RELAY_URL_MAX 160      /* relay base URL saved from the setup page (https remote) */
+#define MUSE_RELAY_TOKEN_MAX 256    /* relay X-Gadget-Token secret (local; hatch tokens are bigger) */
 
 #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
 
@@ -115,6 +117,18 @@ esp_err_t muse_settings_set_agent_profile(const char *name);
  * between networks does not strand every turn on the Tailscale funnel. Empty: none known. */
 void muse_settings_relay_lan(char out[64]);
 void muse_settings_set_relay_lan(const char *lan);
+/* The relay's remote (TLS) base URL and its X-Gadget-Token, both settable from the
+ * setup page (`relay.remote` / `relay.token[+]`). Empty = never saved; callers fall back
+ * to CONFIG_MUSE_HERMES_URL_REMOTE / CONFIG_MUSE_HERMES_TOKEN. */
+void muse_settings_relay_remote(char out[MUSE_RELAY_URL_MAX + 1]);
+void muse_settings_set_relay_remote(const char *url);
+void muse_settings_relay_token(char out[MUSE_RELAY_TOKEN_MAX + 1]);
+size_t muse_settings_relay_token_len(void);
+esp_err_t muse_settings_set_relay_token(const char *token, bool append);
+/* True when a relay is configured AT ALL: compiled in, or saved from the setup page.
+ * The runtime replacement for CONFIG_MUSE_HERMES_URL[0] checks, so a device flashed
+ * without a relay can gain the Hermes features by saving one from the browser. */
+bool muse_settings_relay_configured(void);
 /* A network name is remembered first among the saved ones and joined now;
  * an empty ssid forgets every saved network. */
 void muse_settings_set_wifi(const char *ssid, const char *pass);

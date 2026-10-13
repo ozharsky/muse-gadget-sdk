@@ -290,7 +290,7 @@ static esp_err_t write_impl(const int16_t *mono, size_t frames, bool fx)
         const int16_t *src = mono;
 #if CONFIG_MUSE_VOICE_FX
         static int16_t s_fx[MUSE_AUDIO_CHUNK];
-        if (fx && !mute && !(CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes())) {   /* Hermes: plain voice */
+        if (fx && !mute && !(muse_settings_relay_configured() && muse_settings_agent_hermes())) {   /* Hermes: plain voice */
             memcpy(s_fx, mono, n * sizeof(int16_t));
             muse_voice_fx(s_fx, n);
             src = s_fx;

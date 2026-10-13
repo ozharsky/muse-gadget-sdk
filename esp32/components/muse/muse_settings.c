@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
@@ -42,6 +43,8 @@ static struct {
     uint8_t agent;                       /* 0 Muse, 1 Hermes, 2 Hermes ALT */
     char agent_alt_profile[MUSE_AGENT_PROFILE_MAX + 1];   /* the ALT slot's relay profile name */
     char relay_lan[64];                        /* the relay's last announced LAN address */
+    char relay_remote[MUSE_RELAY_URL_MAX + 1];   /* relay base URL from the setup page */
+    char relay_token[MUSE_RELAY_TOKEN_MAX + 1];  /* relay X-Gadget-Token from the setup page */
     char ssid[MUSE_SSID_MAX + 1];
     char pass[MUSE_PASS_MAX + 1];
     char host[MUSE_HOST_MAX + 1];
@@ -159,6 +162,8 @@ esp_err_t muse_settings_init(void)
     }
     load_str("agent_alt", s.agent_alt_profile, sizeof(s.agent_alt_profile));
     load_str("relay_lan", s.relay_lan, sizeof(s.relay_lan));
+    load_str("relay_remote", s.relay_remote, sizeof(s.relay_remote));
+    load_str("relay_token", s.relay_token, sizeof(s.relay_token));
     load_str("ssid", s.ssid, sizeof(s.ssid));
     load_str("pass", s.pass, sizeof(s.pass));
     load_str("host", s.host, sizeof(s.host));
@@ -204,6 +209,66 @@ void muse_settings_set_relay_lan(const char *lan)
     nvs_set_str(s_nvs, "relay_lan", s.relay_lan);
     nvs_commit(s_nvs);
     ESP_LOGI(TAG, "relay lan: '%s'", s.relay_lan);
+}
+
+/* The relay's remote base URL, saved from the setup page (empty = none saved). */
+void muse_settings_relay_remote(char out[MUSE_RELAY_URL_MAX + 1])
+{
+    LOCKED(strlcpy(out, s.relay_remote, MUSE_RELAY_URL_MAX + 1));
+}
+
+void muse_settings_set_relay_remote(const char *url)
+{
+    LOCKED({
+        strlcpy(s.relay_remote, url ? url : "", sizeof(s.relay_remote));
+        save_str("relay_remote", s.relay_remote);
+    });
+    ESP_LOGI(TAG, "relay remote: '%s'", s.relay_remote);
+}
+
+/* The relay token, saved from the setup page; append=true adds a chunk (BLE writes are
+ * sized under the attribute limit). Never logged. */
+void muse_settings_relay_token(char out[MUSE_RELAY_TOKEN_MAX + 1])
+{
+    LOCKED(strlcpy(out, s.relay_token, MUSE_RELAY_TOKEN_MAX + 1));
+}
+
+size_t muse_settings_relay_token_len(void)
+{
+    size_t n;
+    LOCKED(n = strlen(s.relay_token));
+    return n;
+}
+
+esp_err_t muse_settings_set_relay_token(const char *token, bool append)
+{
+    esp_err_t err = ESP_OK;
+    LOCKED({
+        size_t have = append ? strlen(s.relay_token) : 0;
+        size_t add = strlen(token ? token : "");
+        if (have + add > MUSE_RELAY_TOKEN_MAX) {
+            err = ESP_ERR_INVALID_SIZE;
+        } else {
+            memcpy(s.relay_token + have, token, add);
+            s.relay_token[have + add] = '\0';
+            save_str("relay_token", s.relay_token);
+        }
+    });
+    return err;
+}
+
+bool muse_settings_relay_configured(void)
+{
+    bool nvs = false;
+    LOCKED(nvs = s.relay_lan[0] != 0 || s.relay_remote[0] != 0);
+    if (nvs) {
+        return true;
+    }
+#ifdef CONFIG_MUSE_HERMES_URL
+    return CONFIG_MUSE_HERMES_URL[0] != 0;
+#else
+    return false;
+#endif
 }
 
 void muse_settings_agent_alt(char out[MUSE_AGENT_PROFILE_MAX + 1]) {

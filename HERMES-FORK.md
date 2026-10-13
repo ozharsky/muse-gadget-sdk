@@ -236,7 +236,9 @@ is in [`relay/README.md`](relay/README.md); the agent wire contract is
 [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md).
 Setting up from a computer's browser — Wi-Fi + Muse device token over Bluetooth, no
 phone: the SDK ships the page [`tools/muse/ble_setup.html`](esp32/tools/muse/ble_setup.html);
-the recipe is in the runbook.
+the recipe is in the runbook. The page also connects **your own agent** (relay host/URL/token
+→ *Save & restart*); the values persist in NVS and the firmware prefers them over the
+compiled-in defaults.
 
 ## Syncing with upstream
 

@@ -38,7 +38,7 @@ void stock2_pixel_glitch(float amp);
  * Falls back to SHODAN if the relay is unconfigured, exactly as before. */
 static int face_for_agent(void)
 {
-    if (!CONFIG_MUSE_HERMES_URL[0]) {
+    if (!muse_settings_relay_configured()) {
         return 0;
     }
     switch (muse_settings_agent()) {

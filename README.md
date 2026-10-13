@@ -315,6 +315,8 @@ fa0b9b7 Add generic ESP32-C6 (no PSRAM) board support (#54)
    `cd tools && python3 -m http.server 8000` and open
    `http://localhost:8000/ble_setup.html` in Chrome. Connect, enter the code shown on
    the device screen, then fill in Wi-Fi — and, for Muse, the device token — and Save.
+   The same page's **Your own agent** section points the gadget at a relay of your own
+   (home host, remote URL, token) and restarts it — the browser is the entire setup.
 2. **A computer-accessible console** — over USB serial (115200 baud): `>status` prints
    the full device state (agent, Wi-Fi, battery, link). Other console commands let you
    set the active agent (`>agent=muse|hermes|alt`), switch/forget saved networks
@@ -337,7 +339,8 @@ to a server you point it at, and speaks the reply it gets back. Three transports
 - **Muse cloud** — out of the box after app pairing. No config needed.
 - **Your own relay/agent** — set `CONFIG_MUSE_HERMES_URL` (home address) and
   `CONFIG_MUSE_HERMES_URL_REMOTE` (works from anywhere, e.g. a Tailscale funnel) in your
-  board profile / `idf.py menuconfig`. The device then sends turns to that HTTP endpoint
+  board profile / `idf.py menuconfig` — or, on newest firmware, live from the setup page's
+  *Your own agent* section (Save & restart). The device then sends turns to that HTTP endpoint
   and speaks the replies. A reference implementation of the tiny contract — stdlib
   Python with pluggable STT/TTS, running on macOS, Windows or Linux — ships in
   [`relay/`](relay) with its own setup README; the full wire protocol is in

@@ -916,7 +916,7 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
 /* Hermes is the active agent: voice goes to the relay, and there is no Muse link to keep. */
 static bool hermes_mode(void)
 {
-    return CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes();
+    return muse_settings_relay_configured() && muse_settings_agent_hermes();
 }
 
 /* The relay profile query for the active agent: "&profile=<name>" for the ALT Hermes
@@ -1812,7 +1812,7 @@ static EXT_RAM_BSS_ATTR char s_last_reply[2][LAST_REPLY_MAX];
 
 static int last_reply_idx(void)
 {
-    return CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes() ? 1 : 0;
+    return muse_settings_relay_configured() && muse_settings_agent_hermes() ? 1 : 0;
 }
 
 extern "C" const char *muse_hatch_last_reply(void)
@@ -2192,6 +2192,35 @@ static const char *hermes_home_url(void)
     return CONFIG_MUSE_HERMES_URL;
 }
 
+/* The relay's remote (TLS) URL: one saved from the setup page wins over the compiled-in
+ * default, so the browser alone can point the gadget at a relay from anywhere. Falls back
+ * to CONFIG_MUSE_HERMES_URL_REMOTE ("" when neither exists). */
+static const char *hermes_remote_url(void)
+{
+    static char url[MUSE_RELAY_URL_MAX + 1];
+    char saved[MUSE_RELAY_URL_MAX + 1];
+    muse_settings_relay_remote(saved);
+    if (!saved[0]) {
+        return CONFIG_MUSE_HERMES_URL_REMOTE;
+    }
+    if (strcmp(url, saved) != 0) {
+        strlcpy(url, saved, sizeof(url));
+    }
+    return url;
+}
+
+/* The X-Gadget-Token to present: a token saved from the setup page beats the compiled-in
+ * one. Same single-static pattern as hermes_home_url's buffer above. */
+static const char *relay_token(void)
+{
+    static char tok[MUSE_RELAY_TOKEN_MAX + 1];
+    if (muse_settings_relay_token_len()) {
+        muse_settings_relay_token(tok);
+        return tok;
+    }
+    return CONFIG_MUSE_HERMES_TOKEN;
+}
+
 /* True if the home relay's port answers within 1.5 s (a plain TCP connect to "http://a.b.c.d:port").
  *
  * CACHED for a second and a half, because the turn path asks several times per turn and each uncached miss costs the full 1.5 s timeout --
@@ -2392,8 +2421,9 @@ static bool hermes_request_stream(void)
     char url[256];
     snprintf(url, sizeof(url), "%s/turn?stream=1%s", hermes_home_url(), agent_profile_query());
     bool remote = false;
-    if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
-        snprintf(url, sizeof(url), "%s/turn?stream=1%s", CONFIG_MUSE_HERMES_URL_REMOTE, agent_profile_query());
+    const char *rem = hermes_remote_url();
+    if (rem[0] && !hermes_home_reachable()) {
+        snprintf(url, sizeof(url), "%s/turn?stream=1%s", rem, agent_profile_query());
         remote = true;
         ESP_LOGI(TAG, "hermes: home relay unreachable, using the remote address");
     }
@@ -2428,7 +2458,7 @@ static bool hermes_request_stream(void)
         return false;
     }
     esp_http_client_set_header(h, "Content-Type", "application/octet-stream");
-    esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+    esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
     esp_http_client_set_post_field(h, reinterpret_cast<const char *>(s_hbuf), s_turn.pcm_bytes);
     int64_t t0 = now_us();
     esp_err_t err = esp_http_client_open(h, s_turn.pcm_bytes);   /* headers only */
@@ -2835,10 +2865,11 @@ static bool s_notif_auto = true;
  * unreachable. Shared by the notification calls. */
 static const char *relay_base_url(bool *remote)
 {
+    const char *rem = hermes_remote_url();
     *remote = false;
-    if (CONFIG_MUSE_HERMES_URL_REMOTE[0] && !hermes_home_reachable()) {
+    if (rem[0] && !hermes_home_reachable()) {
         *remote = true;
-        return CONFIG_MUSE_HERMES_URL_REMOTE;
+        return rem;
     }
     return hermes_home_url();
 }
@@ -2998,7 +3029,7 @@ static bool poll_notification(rel_notif_t *out, bool *reachable)
         heap_caps_free(resp);
         return false;
     }
-    esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+    esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
     esp_err_t err = esp_http_client_perform(h);
     int status = esp_http_client_get_status_code(h);
     esp_http_client_cleanup(h);
@@ -3063,7 +3094,7 @@ static void notif_ack(const char *id)
     esp_http_client_handle_t h = esp_http_client_init(&cfg);
     if (h) {
         esp_http_client_set_header(h, "Content-Type", "application/json");
-        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
         esp_http_client_set_post_field(h, json, strlen(json));
         (void)esp_http_client_perform(h);
         esp_http_client_cleanup(h);
@@ -3098,7 +3129,7 @@ static void notif_hist_fetch(void)
     esp_http_client_handle_t h = esp_http_client_init(&cfg);
     bool ok = false;
     if (h) {
-        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
         esp_err_t err = esp_http_client_perform(h);
         int status = esp_http_client_get_status_code(h);
         esp_http_client_cleanup(h);
@@ -3194,7 +3225,7 @@ static void notif_hist_cancel(const char *id)
     bool ok = false;
     if (h) {
         esp_http_client_set_header(h, "Content-Type", "application/json");
-        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
         esp_http_client_set_post_field(h, json, strlen(json));
         ok = esp_http_client_perform(h) == ESP_OK && esp_http_client_get_status_code(h) == 200;
         esp_http_client_cleanup(h);
@@ -3225,7 +3256,7 @@ static void notif_hist_clear(void)
     bool ok = false;
     if (h) {
         esp_http_client_set_header(h, "Content-Type", "application/json");
-        esp_http_client_set_header(h, "X-Gadget-Token", CONFIG_MUSE_HERMES_TOKEN);
+        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
         esp_http_client_set_post_field(h, "{}", 2);
         ok = esp_http_client_perform(h) == ESP_OK && esp_http_client_get_status_code(h) == 200;
         esp_http_client_cleanup(h);
@@ -3237,7 +3268,7 @@ static void notif_hist_clear(void)
 /* The inbox's idle work: one fetch or cancel at a time, never during a turn. Session task. */
 static void notif_hist_tick(void)
 {
-    if (!CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
+    if (!muse_settings_relay_configured() || !muse_settings_agent_hermes()) {
         return;
     }
     if (s_turn.phase != P_IDLE || s_resting.load() || now_us() < s_hist_next_us) {
@@ -3268,7 +3299,7 @@ static void notif_hist_tick(void)
 
 extern "C" void muse_hatch_notif_refresh(void)
 {
-    if (CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes() &&
+    if (muse_settings_relay_configured() && muse_settings_agent_hermes() &&
         !s_hist_want && !s_hist_cancel_want) {
         s_hist_want = true;
         if (s_hist_state != MUSE_NOTIF_HIST_OK) {
@@ -3357,7 +3388,7 @@ static void notif_present(const rel_notif_t *n)
 /* Idle poll: only when a poll can act on the result (idle, awake, un-resting, hermes mode). */
 static void notif_tick(void)
 {
-    if (!s_notif_auto || !CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
+    if (!s_notif_auto || !muse_settings_relay_configured() || !muse_settings_agent_hermes()) {
         return;
     }
     int64_t now = now_us();
@@ -3819,7 +3850,7 @@ extern "C" void muse_hatch_hermes_link_note(bool ok)
 /* 0 = no Hermes configured / not the active agent, 1 = reachable, 2 = failed recently. */
 extern "C" int muse_hatch_hermes_link(void)
 {
-    if (!CONFIG_MUSE_HERMES_URL[0] || !muse_settings_agent_hermes()) {
+    if (!muse_settings_relay_configured() || !muse_settings_agent_hermes()) {
         return 0;
     }
     if (s_hermes_link == 2 && s_hermes_ok_us

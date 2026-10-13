@@ -94,6 +94,20 @@
     </section>
 
     <section>
+      <h2>Your own agent <span class="dim">(optional)</span></h2>
+      <p class="dim">Point the gadget at a relay of your own — the repo's <b>relay/</b> folder runs on
+         any always-on Mac/Windows/Linux box and can front Hermes or any other agent you build.</p>
+      <label for="relay-lan">Relay host on your home network <span class="dim">(ip or name, no port)</span></label>
+      <input id="relay-lan" type="text" autocomplete="off" maxlength="63" placeholder="e.g. 192.168.1.20">
+      <label for="relay-url">Relay base URL from anywhere <span class="dim">(optional, https)</span></label>
+      <input id="relay-url" type="text" autocomplete="off" maxlength="160" placeholder="e.g. https://your-box.example.ts.net:8443">
+      <label for="relay-token">Relay token <span class="dim">(leave empty to keep the current one)</span></label>
+      <input id="relay-token" type="password" autocomplete="off" maxlength="256">
+      <button id="relay-save">Save</button>
+      <button id="relay-restart" class="secondary">Save &amp; restart gadget</button>
+    </section>
+
+    <section>
       <h2>Sound &amp; sleep</h2>
       <label>Volume <span id="volume-v"></span></label>
       <input id="volume" type="range" min="0" max="100">
@@ -142,15 +156,18 @@ function send(cmd, value = '') {
 
 async function refresh() {
   const s = JSON.parse(new TextDecoder().decode(await statusChar.readValue()));
-  const w = s.wifi, h = s.hatch;
+  const w = s.wifi, h = s.hatch, r = s.relay || {};
   $('conn').textContent = `${s.name} · fw ${s.fw}`;
   $('status').innerHTML =
     `Wi-Fi: <b>${w.on ? w.state : 'off'}</b>${w.ssid ? ` (${esc(w.ssid)}${w.ip ? `, ${w.ip}` : ''})` : ''}<br>` +
     `Muse: <b>${esc(h.state)}</b> · token ${h.token ? 'set' : 'not set'}<br>` +
+    `Relay: <b>${r.lan || r.remote ? 'set' : 'not set'}</b>${r.token ? ' · token saved' : ''}<br>` +
     (s.battery >= 0 ? `Battery ${s.battery}%` : 'Battery: n/a');
   if (document.activeElement !== $('ssid') && !$('ssid').value) $('ssid').value = w.ssid;
   if (document.activeElement !== $('host')) $('host').value = h.host;
   if (document.activeElement !== $('vm')) $('vm').value = h.vm;
+  if (document.activeElement !== $('relay-lan') && r.lan) $('relay-lan').value = r.lan;
+  if (document.activeElement !== $('relay-url') && r.remote) $('relay-url').value = r.remote;
   setRange('volume', s.volume, v => `${v}%`);
   $('speaker').checked = s.speaker;
   setRange('mic', s.mic_gain, v => `${v} dB`);
@@ -221,6 +238,23 @@ $('hatch-save').onclick = async () => {
   $('token').value = '';
 };
 $('hatch-test').onclick = () => send('hatch.test');
+
+async function relaySave() {
+  send('relay.lan', $('relay-lan').value.trim());
+  send('relay.remote', $('relay-url').value.trim());
+  const token = $('relay-token').value.trim();
+  for (let i = 0; i < token.length; i += TOKEN_CHUNK) {
+    send(i ? 'relay.token+' : 'relay.token', token.slice(i, i + TOKEN_CHUNK));
+  }
+  await queue;
+  $('relay-token').value = '';
+}
+$('relay-save').onclick = () => relaySave();
+$('relay-restart').onclick = async () => {
+  await relaySave();
+  send('reboot');
+  log('Relay saved — the gadget restarts; reconnect in ~15 s', 'ok');
+};
 
 for (const [id, cmd, fmt] of [['volume', 'volume', v => `${v}%`], ['mic', 'mic_gain', v => `${v} dB`],
                               ['bright', 'brightness', v => `${v}%`]]) {

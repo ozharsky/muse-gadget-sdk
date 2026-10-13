@@ -1608,7 +1608,7 @@ static void tick_notif(void)
 #else
     muse_notif_hist_t st = muse_hatch_notif_hist_state();
     int count = muse_hatch_notif_hist_count();
-    if (!CONFIG_MUSE_HERMES_URL[0]) {
+    if (!muse_settings_relay_configured()) {
         set_text(s_notif_status, "Hermes link not set up");
     } else if (!muse_settings_agent_hermes()) {
         set_text(s_notif_status, "Switch to a Hermes agent to see these");
@@ -1636,7 +1636,7 @@ static void tick_notif(void)
     if (s_notif_clear_lbl && !s_notif_clear_armed_us && st == MUSE_NOTIF_HIST_OK) {
         set_text(s_notif_clear_lbl, LV_SYMBOL_TRASH "  Clear");
     }
-    if (CONFIG_MUSE_HERMES_URL[0] && muse_settings_agent_hermes() && st != MUSE_NOTIF_HIST_WAIT) {
+    if (muse_settings_relay_configured() && muse_settings_agent_hermes() && st != MUSE_NOTIF_HIST_WAIT) {
         static int64_t s_ask_us;
         int64_t gap = st == MUSE_NOTIF_HIST_FAIL ? 6000000 : 1200000;   /* slow down when down */
         if (esp_timer_get_time() - s_ask_us > gap) {
@@ -1724,13 +1724,13 @@ static void build_home(lv_obj_t *tile)
     lv_obj_t *list;
     s_home = page(tile, "SETTINGS", false, &list);
     s_home_list = list;
-    if (CONFIG_MUSE_HERMES_URL[0]) {
+    if (muse_settings_relay_configured()) {
         row(list, LV_SYMBOL_SHUFFLE, "Agents", &s_home_agent, on_nav, (void *)&AGENTS);
         row(list, LV_SYMBOL_BELL, "Notifications", &s_home_notif, on_nav, (void *)&NOTIF);
     }
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
     row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
-    if (CONFIG_MUSE_HERMES_URL[0]) {
+    if (muse_settings_relay_configured()) {
         /* Hermes is a separate transport (the Mac relay); show its link on its own row so a
          * Muse outage never reads as "Hermes is down". No navigation: there is nothing to
          * configure here -- the relay address is a build setting. */

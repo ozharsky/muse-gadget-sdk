@@ -74,6 +74,11 @@ Bluetooth setup service directly: `tools/muse/ble_setup.html`.
 4. In the page: **Wi-Fi** (network name + password → Join) and **Muse** (Device token →
    Save → Test connection; VM ID optional). It also carries volume/mic/brightness/sleep.
 The page is a file in the repo; the device side is all firmware. No phone, no relay.
+5. If they chose way B/C, use the same page's **Your own agent** section to point the
+   gadget at their relay: Relay host (home network), Relay base URL (from anywhere,
+   optional) and the relay token — then **Save & restart gadget**. The device reboots
+   and routes turns to the relay; no rebuild, no serial. (Newest firmware; older builds
+   need the config values at build time.)
 
 **Way B/C — your own agent via the relay:** On the always-on machine:
 1. Copy `relay/` out of the repo and follow `relay/README.md` (Windows: `relay-launch.cmd`;
@@ -82,6 +87,8 @@ The page is a file in the repo; the device side is all firmware. No phone, no re
    board profile (`CONFIG_MUSE_HERMES_URL`, and `_REMOTE` too if the machine is reachable
    from outside, e.g. a Tailscale funnel; `CONFIG_MUSE_HERMES_TOKEN`), rebuild, reflash.
    Or seed the address live over serial: `>relay.lan=<machine-ip>`.
+   On the newest firmware, skip the rebuild entirely: set all of it in the setup page's
+   **Your own agent** section and press **Save & restart gadget** (see §4).
 3. On the gadget: `>agent=hermes`, then talk. The relay's console should print
    `heard: …` and a reply within seconds.
 

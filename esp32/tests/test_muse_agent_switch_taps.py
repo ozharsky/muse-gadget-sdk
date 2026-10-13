@@ -49,8 +49,10 @@ typedef uint32_t TickType_t;
 static TickType_t g_now;
 static TickType_t xTaskGetTickCount(void) { return g_now; }
 
-/* The guard reads the first byte: a non-empty string keeps the gesture enabled. */
+/* The relay-configured guard is a settings call now (compiled-in OR saved from the
+ * setup page). The stand-in keeps the gesture enabled, the old non-empty-string contract. */
 #define CONFIG_MUSE_HERMES_URL "http://relay.test"
+static bool muse_settings_relay_configured(void) { return true; }
 
 /* A stand-in for the settings agent slot: idx + the ALT profile name. */
 #define MUSE_AGENT_MUSE 0

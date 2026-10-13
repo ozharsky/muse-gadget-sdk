@@ -53,7 +53,8 @@ class AgentIndependenceContractTest(unittest.TestCase):
         body = source[source.index("extern \"C\" int muse_hatch_hermes_link(void)"):]
         body = body[: body.index("}")]
         # Not configured, or Hermes is not the active agent -> "no signal", not a failure.
-        self.assertIn("CONFIG_MUSE_HERMES_URL[0]", body)
+        # "Configured" is now runtime (compiled-in OR saved from the setup page).
+        self.assertIn("muse_settings_relay_configured()", body)
         self.assertIn("muse_settings_agent_hermes()", body)
 
     def test_boot_does_not_fail_the_device_for_a_muse_only_fault_on_hermes(self) -> None:
@@ -63,7 +64,7 @@ class AgentIndependenceContractTest(unittest.TestCase):
         start = source.index('ui_set_status("hermes_only")')
         guard = source[max(0, start - 1200):start]
         self.assertIn("muse_settings_agent_hermes()", guard)
-        self.assertIn("CONFIG_MUSE_HERMES_URL[0]", guard)
+        self.assertIn("muse_settings_relay_configured()", guard)
 
     def test_settings_show_each_link_on_its_own_row(self) -> None:
         source = SETTINGS_UI.read_text()

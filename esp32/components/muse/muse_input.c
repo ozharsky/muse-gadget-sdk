@@ -285,7 +285,7 @@ static void count_tap(bool pressed)
         down = now;
         return;
     }
-    if (!CONFIG_MUSE_HERMES_URL[0] || now - down > pdMS_TO_TICKS(300)) {
+    if (!muse_settings_relay_configured() || now - down > pdMS_TO_TICKS(300)) {
         taps = 0;
         return;
     }
@@ -752,7 +752,7 @@ static void set_face(const char *name)
 static bool console_command(char *line, bool whole)
 {
     if (!strcmp(line, "status")) {
-        size_t cap = 1024;   /* long SSID, host and VM names escaped: past 512 */
+        size_t cap = 2048;   /* escaped SSID/host/VM/relay strings outgrew 1 KB */
         char *json = heap_caps_malloc(cap, MUSE_BIG_CAPS);
         if (json) {
             muse_ble_status_json(json, cap);
@@ -963,6 +963,24 @@ static bool bench_ui_command(const char *line)
         char lan[64];
         muse_settings_relay_lan(lan);
         printf("@relay.lan '%s'\n", lan);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "relay.remote=", 13)) {
+        /* Bench + setup page: set/see the relay's remote (TLS) base URL. Empty clears it. */
+        muse_settings_set_relay_remote(line + 13);
+        char r[MUSE_RELAY_URL_MAX + 1];
+        muse_settings_relay_remote(r);
+        printf("@relay.remote '%s'\n", r);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "relay.token=", 12) || !strncmp(line, "relay.token+=", 13)) {
+        /* Bench + setup page: (re)set or append the relay token. Never echoes it back. */
+        bool app = line[11] == '+';   /* "relay.token+": the + sits at index 11, the value at 13 */
+        esp_err_t e = muse_settings_set_relay_token(line + (app ? 13 : 12), app);
+        printf("@relay.token %s (%u of %u bytes used)\n", e == ESP_OK ? "set" : "error: too long",
+               (unsigned)muse_settings_relay_token_len(), (unsigned)MUSE_RELAY_TOKEN_MAX);
         fflush(stdout);
         return true;
     }
