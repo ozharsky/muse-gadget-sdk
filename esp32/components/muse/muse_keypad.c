@@ -47,7 +47,7 @@ static const char *const LABELS[MODE_COUNT][12] = {
     { ".,?!", "@#$%", "&*+=", "-_/\\", "()[]", "{}<>", "'\"`", ":;|", "^~", "space", "0", LV_SYMBOL_BACKSPACE },
 };
 
-static const char *const UPPER_LABELS[9] = { ".-_@", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ" };
+static char s_upper_labels[9][6];   /* LABELS[LETTERS] uppercased on demand (one source of truth) */
 
 /* The mode key names the mode it switches to. */
 static const char *const NEXT_MODE[MODE_COUNT] = { "123", "#+=", "abc" };
@@ -90,7 +90,17 @@ static void update_map(void)
 {
     int i = 0;
     for (int k = 0; k < 12; k++) {
-        s_map[i++] = s_mode == LETTERS && s_upper && k < 9 ? UPPER_LABELS[k] : LABELS[s_mode][k];
+        const char *lbl = LABELS[s_mode][k];
+        if (s_mode == LETTERS && s_upper && k < 9) {
+            if (!s_upper_labels[k][0]) {
+                strlcpy(s_upper_labels[k], lbl, sizeof(s_upper_labels[k]));
+                for (char *q = s_upper_labels[k]; *q; q++) {
+                    *q = (char)toupper((unsigned char)*q);
+                }
+            }
+            lbl = s_upper_labels[k];
+        }
+        s_map[i++] = lbl;
         if (k % 3 == 2) {
             s_map[i++] = "\n";
         }

@@ -46,6 +46,7 @@
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
 #include "muse_state.h"
+#include "muse_input.h"
 #include "muse_text.h"
 #include "muse_wifi.h"
 #if CONFIG_MUSE_WATCHER_CAMERA
@@ -2257,8 +2258,11 @@ bool muse_ui_image_draw(int x, int y, int w, int h, const uint16_t *pixels)
             xSemaphoreGive(s_image_mutex);
             return false;
         }
-        /* Now, not when it's shown: asleep, the display may be paused (muse_input.c). */
+        /* Now, not when it's shown: asleep, the display may be paused (muse_input.c).
+         * The pause only lifts via the input task, so the wake needs its poke too --
+         * same pair as the notification wake (a state flip alone leaves the screen dark). */
         muse_state_set_asleep(false);
+        muse_input_poke();
     }
     const uint8_t *src = (const uint8_t *)pixels;
     for (int row = 0; row < h; row++) {

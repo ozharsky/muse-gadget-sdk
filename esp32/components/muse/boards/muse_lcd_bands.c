@@ -226,6 +226,10 @@ static void lcd_flush_wait(lv_display_t *disp)
              s_chunks_out, s_notify_pending ? "owed" : "delivered");
     portENTER_CRITICAL_SAFE(&s_lock);
     s_notify_pending = false;   /* written off; a late notify cannot double-deliver */
+    /* Known (rare, cosmetic): pieces of this written-off band can still be in flight. If the
+     * next band starts before the last one completes, that completion decrements the NEW
+     * band's count (line ~353) and LVGL may draw one piece early -- subtle tearing, never a
+     * hang (the guards above stay intact). Fix = tag completions with a band generation. */
     portEXIT_CRITICAL_SAFE(&s_lock);
     muse_diag_lcd_t st = {
         .chunks_out = s_chunks_out,
@@ -350,7 +354,7 @@ static void send_bands(void *arg)
         /* LVGL sends no more until this band is done, so nothing is still
          * counting down. */
         portENTER_CRITICAL_SAFE(&s_lock);
-        s_chunks_out = (b.y2 - b.y1 + rows - 1) / rows;
+        s_chunks_out = (b.y2 - b.y1 + rows - 1) / rows;   /* see lcd_flush_wait: written-off bands can still decrement this */
         portEXIT_CRITICAL_SAFE(&s_lock);
         for (int y = b.y1; y < b.y2; y += rows) {
             int h = b.y2 - y < rows ? b.y2 - y : rows;

@@ -15,6 +15,7 @@
  */
 
 #include "muse_audio.h"
+#include "esp_attr.h"   /* EXT_RAM_BSS_ATTR: scratch belongs in PSRAM */
 #include "muse_voice_fx.h"
 
 #include <math.h>
@@ -342,7 +343,7 @@ float muse_audio_level(const int16_t *mono, size_t frames)
 void muse_audio_chirp(int rising)
 {
     enum { MS = 90, N = MUSE_AUDIO_RATE * MS / 1000 };
-    static int16_t buf[N];
+    static EXT_RAM_BSS_ATTR int16_t buf[N];   /* 2.8 KB: PSRAM, not internal RAM */
     float f0 = rising ? 620.0f : 980.0f;
     float f1 = rising ? 1180.0f : 560.0f;
     float phase = 0;
