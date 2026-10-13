@@ -3,7 +3,7 @@
     run from the shodan pack dir; uses the SAME base/seed/LoRA as gen_poses.py.
 """
 import os, sys, time
-sys.path.insert(0, "/Users/olegzharsky/Comfy UI/muse-comfyui-skill/scripts")
+sys.path.insert(0, os.environ.get("COMFY_SKILL_DIR", "muse-comfyui-skill/scripts"))
 import qwen_gadget as q
 
 KEEP = ("Edit this pixel art portrait. Keep everything exactly as it is: the tall pale silver android face with its smooth bald head and grey shading, the big dark green-grey eye sockets, "

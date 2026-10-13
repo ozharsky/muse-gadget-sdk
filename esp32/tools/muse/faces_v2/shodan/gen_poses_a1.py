@@ -1,6 +1,6 @@
 """Generate the SHODAN face-pose library with Qwen-Image 2.1 (edit + Consistency LoRA), seed 11, via the tunnel on :8189."""
 import os, sys, time, json
-sys.path.insert(0, "/Users/olegzharsky/Comfy UI/muse-comfyui-skill/scripts")
+sys.path.insert(0, os.environ.get("COMFY_SKILL_DIR", "muse-comfyui-skill/scripts"))
 import qwen_gadget as q
 KEEP = ("Edit this pixel art portrait. Keep everything exactly as it is: the tall pale silver android face with its smooth bald head and grey shading, the big dark green-grey eye sockets, "
         "the bright green stripe running down the centre of the forehead, the green circuit traces on the near-black background, the black background and the framing. "

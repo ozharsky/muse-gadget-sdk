@@ -16,7 +16,7 @@ attached to the card as zips.
 ## Re-running
 
 Everything runs on the Mac. Qwen pose edit needs ComfyUI reachable
-(`COMFY_HOST=https://nzxt.tailcb1d23.ts.net`); Gemini needs `GEMINI_API_KEY`.
+(`COMFY_HOST=<your ComfyUI base URL>); Gemini needs `GEMINI_API_KEY`.
 
 - shodan: `bash …/stage_b/shodan_build.sh` (bakes `make_shodan_poses_a1.py`, then
   states/moods sheets + pose grid through the real renderer).

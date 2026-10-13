@@ -4,7 +4,7 @@ Stage B copy of hermes-anim/gen_poses.py, re-pointed at the approved B3 art (bas
 the 6x nearest upscale of the approved 64 snap) and the B3 features.
 """
 import os, sys, time
-sys.path.insert(0, "/Users/olegzharsky/Comfy UI/muse-comfyui-skill/scripts")
+sys.path.insert(0, os.environ.get("COMFY_SKILL_DIR", "muse-comfyui-skill/scripts"))
 import qwen_gadget as q
 
 KEEP = ("Edit this pixel art portrait. Keep everything exactly as it is: the near-black obsidian face with its branching gold kintsugi crack veins, "

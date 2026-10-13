@@ -16,7 +16,7 @@ limitations under the License.
 
 # 🔒 Hermes fork — a three-agent Muse gadget
 
-**This repo is a private fork of [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk),
+**This repo is a fork of [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk),
 developed on the `hermes-local` branch (the default branch here).** Upstream
 turns the Waveshare ESP32-S3 1.43″ round AMOLED board into a voice companion for
 the Muse cloud agent; this fork turns the same hardware into a **switchable
@@ -25,14 +25,19 @@ out on its own when things happen, and survives the display freezes the stock
 firmware panics on.
 
 <p align="center">
-  <img src=".github/images/fork/face.png" width="250" alt="The Hermes face: stone-god avatar, ONLINE status, PWR 100%">
+  <img src=".github/images/fork/face-shodan.png" width="200" alt="SHODAN — the Muse agent face, captured on the glass">
+  <img src=".github/images/fork/face-stone.png" width="200" alt="The stone god — the Hermes (default profile) face, captured on the glass">
+  <img src=".github/images/fork/face-golem.png" width="200" alt="The jade golem — the Hermes ALT face, captured on the glass">
+</p>
+
+<p align="center">
   <img src=".github/images/fork/settings.png" width="250" alt="Settings: Agents, Notifications with unread count, Wi-Fi, Muse, Hermes">
   <img src=".github/images/fork/inbox.png" width="250" alt="Notifications inbox: agent-tagged rows, a live reminder counting down, tap to open / hold to remove">
 </p>
 
-<p align="center"><i>The Hermes face (stone god) mid-caption · Settings with the Agents row and a
-live Notifications count · the on-device inbox — agent-tagged rows, amber
-<code>in 1h</code> is a reminder the agent set by voice</i></p>
+<p align="center"><i>The three faces — SHODAN (Muse), the stone god (Hermes), the jade golem (ALT) — all
+captured on the actual 466×466 panel · Settings with the Agents row and a live Notifications
+count · the on-device inbox, where amber <code>in 1h</code> is a reminder the agent set by voice</i></p>
 
 ---
 
@@ -126,9 +131,18 @@ Three hand-built pixel faces with baked mood frames, per-agent reactions, readin
 mode per agent, and a **palette-read discipline** that eliminated the
 random-panic class (every framebuffer read-back is bounds-guarded against dynamic
 indices). Connection colors are a canonical palette (ok green / working amber /
-fault red). 198 hardware-free host tests keep input gestures, session logic and
+fault red). 207 hardware-free host tests keep input gestures, session logic and
 caption wrapping honest; a UART snapshot hook (`tools/muse/snap.py`) captures the
 real screen for UI review.
+
+<p align="center">
+  <img src=".github/images/fork/anim-shodan.gif" width="200" alt="SHODAN idle loop">
+  <img src=".github/images/fork/anim-stone.gif" width="200" alt="Stone god idle loop">
+  <img src=".github/images/fork/anim-golem.gif" width="200" alt="Jade golem idle loop">
+</p>
+
+<p align="center"><i>Resting-behaviour loops rendered through the shipping renderers — per-face blink
+cadence, saccades, breathing and the signature accent beats (Stage C)</i></p>
 
 ---
 
@@ -237,6 +251,40 @@ bd745f4 Keep turn_start identical to upstream: Hermes mode lives in ensure_conne
 
 ---
 
+## Setting up the device (no app required to build)
+
+1. **Wi-Fi** — on the device itself: `Settings -> Wi-Fi`, pick your network from the
+   scanned list, type the password on the touch keyboard. The Muse app also sets Wi-Fi
+   during its BLE pairing, if you use Muse.
+2. **A computer-accessible console** — over USB serial (115200 baud): `>status` prints
+   the full device state (agent, Wi-Fi, battery, link). Other console commands let you
+   set the active agent (`>agent=muse|hermes|alt`), switch/forget saved networks
+   (`>wifi.switch=<ssid>`, `>wifi.forget=<ssid>`), seed a relay address
+   (`>relay.lan=<ip>`) and more. Everything is in-firmware — no companion app or
+   external tool is needed to operate the device.
+3. **Muse credentials** (only if you use the Muse cloud agent): pair once with the Muse
+   app on iOS/Android (`Settings > Devices`, developer mode on, look for `MuseGadget`).
+   You need an SDK token from [gadgets.muse.ai](https://gadgets.muse.ai/settings/sdk-tokens)
+   at build time; without one the firmware still **builds and runs fine**, it just will
+   not pair with Muse (the build logs a warning).
+
+## Connect an agent — Hermes, Muse, or anything else
+
+The firmware itself is an agent *client*, not an agent: it records your voice, sends it
+to a server you point it at, and speaks the reply it gets back. Three transports exist:
+
+- **Muse cloud** — out of the box after app pairing. No config needed.
+- **Your own relay/agent** — set `CONFIG_MUSE_HERMES_URL` (home address) and
+  `CONFIG_MUSE_HERMES_URL_REMOTE` (works from anywhere, e.g. a Tailscale funnel) in your
+  board profile / `idf.py menuconfig`. The device then sends turns to that HTTP endpoint
+  and speaks the replies. A reference implementation of the tiny contract — ~300 lines
+  of stdlib Python with pluggable STT/TTS — is `hermes-relay`; the full wire protocol is
+  in [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md). Point it at Hermes, at any
+  OpenAI-compatible endpoint, or at your own script.
+- **Anything else** — any service that implements the `/turn` contract (POST text or
+  audio in, reply out; optional NDJSON streaming with per-sentence TTS chunks) works.
+  The contract is documented, small, and transport-agnostic.
+
 ## Repo layout
 
 ```
@@ -251,8 +299,9 @@ esp32/components/muse/          the companion itself (this fork's center of work
 esp32/tests/                    198 hardware-free host tests
 ```
 
-The Mac-side relay (`hermes-relay`: agent routing, TTS, the notification store,
-the print watcher) is a separate private repo — see its own README.
+The reference relay (`hermes-relay`: agent routing, STT/TTS, the notification store)
+is a separate repo and not included here — [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md)
+documents the wire contract so you can write your own.
 
 ## Building & testing
 
@@ -272,6 +321,14 @@ the ELF+bin for coredump decoding.
 `build-*/sdkconfig` files and are re-applied at build time; test fixtures use
 visibly fake placeholder tokens. `esp32/debug/` and local graph caches are
 gitignored.
+
+**No personal data either** (2026-10-13 sweep): the tracked board profile ships with
+empty relay URLs, every personal path was removed from the authoring scripts (env vars
+with generic defaults), and the repo is checked clean of hostnames, LAN addresses,
+e-mails and device identifiers. **Security shape:** the device is a client — it listens
+on nothing, keeps credentials in NVS, validates TLS with the bundled root certs, and its
+debug console is reachable only over physical USB serial. Your agent server is the trust
+boundary: put a token on it (the reference relay does) if you expose it beyond your LAN.
 
 ## Syncing with upstream
 

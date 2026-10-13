@@ -1,6 +1,6 @@
 # HERMES-FORK — the `hermes-local` branch
 
-This is a **private fork** of [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk).
+This is a **fork** of [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk).
 All custom work lives on the **`hermes-local`** branch — which is also this repo's default
 branch, so what you see first is the work, not upstream's `main`.
 

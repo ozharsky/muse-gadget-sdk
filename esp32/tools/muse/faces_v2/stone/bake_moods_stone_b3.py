@@ -32,7 +32,7 @@ import numpy as np
 TAU = 2.0 * math.pi
 FRAME_MS = 167
 HERE = os.path.dirname(os.path.abspath(__file__))
-AVATAR = "/Users/olegzharsky/muse/art-pipeline/faces_v2/stage_b/stone"   # stage_b B3 build
+AVATAR = os.environ.get("AVATAR_DIR", "faces_v2/stage_b/stone")   # stage_b B3 build
 
 # durations match REACTIONS[] in the firmware (seconds); the C side loops each clip over its duration
 DURS = {
