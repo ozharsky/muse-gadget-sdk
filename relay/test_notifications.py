@@ -34,7 +34,7 @@ class NotifyIdentity(unittest.TestCase):
         who = notifications.resolve_agent("sidekick")
         self.assertEqual(who["agent"], "sidekick")
         self.assertFalse(who["is_default"], "a real profile must open the ALT slot, not default")
-        self.assertEqual(who["label"], "SIDEKICK")
+        self.assertEqual(who["label"], "Sidekick")
 
     def test_unknown_profile_falls_back_to_default_never_an_unroutable_name(self):
         who = notifications.resolve_agent("no_such_profile_xyz")
