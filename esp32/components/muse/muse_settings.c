@@ -334,40 +334,50 @@ size_t muse_settings_hatch_token_len(void)
     return n;
 }
 
-void muse_settings_set_volume(int pct)
+esp_err_t muse_settings_set_volume(int pct)
 {
     s.volume = clampi(pct, 0, 100);
-    save_u8("volume", s.volume);
+    esp_err_t err = save_u8("volume", s.volume);
     notify(MUSE_SETTING_VOLUME);
+    return err;
 }
 
-void muse_settings_set_speaker_on(bool on)
+esp_err_t muse_settings_set_speaker_on(bool on)
 {
     s.speaker_on = on;
-    save_u8("speaker", on);
+    esp_err_t err = save_u8("speaker", on);
     notify(MUSE_SETTING_SPEAKER);
+    return err;
 }
 
-void muse_settings_set_mic_gain(int db)
+esp_err_t muse_settings_set_mic_gain(int db)
 {
     s.mic_gain = clampi(db, 0, MUSE_MIC_GAIN_MAX);
-    save_u8("mic_gain", s.mic_gain);
+    esp_err_t err = save_u8("mic_gain", s.mic_gain);
     notify(MUSE_SETTING_MIC_GAIN);
+    return err;
 }
 
-void muse_settings_set_brightness(int pct)
+esp_err_t muse_settings_set_brightness(int pct)
 {
     s.brightness = clampi(pct, 10, 100);
-    save_u8("bright", s.brightness);
+    esp_err_t err = save_u8("bright", s.brightness);
     notify(MUSE_SETTING_BRIGHTNESS);
+    return err;
 }
 
-void muse_settings_set_sleep_s(int secs)
+esp_err_t muse_settings_set_sleep_s(int secs)
 {
     s.sleep_s = clampi(secs, 0, 3600);
-    nvs_set_u16(s_nvs, "sleep_s", s.sleep_s);
-    nvs_commit(s_nvs);
+    esp_err_t err = nvs_set_u16(s_nvs, "sleep_s", s.sleep_s);
+    if (err == ESP_OK) {
+        err = nvs_commit(s_nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs save 'sleep_s' failed: %s", esp_err_to_name(err));
+    }
     notify(MUSE_SETTING_SLEEP);
+    return err;
 }
 
 void muse_settings_set_wifi_on(bool on)
@@ -446,22 +456,26 @@ void muse_settings_set_wifi(const char *ssid, const char *pass)
     notify(MUSE_SETTING_WIFI);
 }
 
-void muse_settings_set_hatch_host(const char *host)
+esp_err_t muse_settings_set_hatch_host(const char *host)
 {
+    esp_err_t err = ESP_OK;
     LOCKED({
         strlcpy(s.host, host && host[0] ? host : DEFAULT_HOST, sizeof(s.host));
-        save_str("host", s.host);
+        err = save_str("host", s.host);
     });
     notify(MUSE_SETTING_HATCH);
+    return err;
 }
 
-void muse_settings_set_hatch_vm(const char *vm)
+esp_err_t muse_settings_set_hatch_vm(const char *vm)
 {
+    esp_err_t err = ESP_OK;
     LOCKED({
         strlcpy(s.vm, vm ? vm : "", sizeof(s.vm));
-        save_str("vm", s.vm);
+        err = save_str("vm", s.vm);
     });
     notify(MUSE_SETTING_HATCH);
+    return err;
 }
 
 esp_err_t muse_settings_set_hatch_token(const char *token, bool append)

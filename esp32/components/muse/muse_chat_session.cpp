@@ -1713,7 +1713,7 @@ static size_t b64_decode_inplace(char *s, size_t n)
 /* Fetches speech for text and queues its MP3 for decode(). False leaves nothing queued. */
 static bool fetch_tts(const char *text, bool last = true, bool first = true)
 {
-    const size_t CAP = 900 * 1024;
+    const size_t CAP = 192 * 1024;   /* one 90-char piece is ~66 KB of JSON; 900 KB was the whole-message era */
     char *body = static_cast<char *>(psram_alloc(TEXT_MAX * 2 + 256));
     char *resp = static_cast<char *>(psram_alloc(CAP));
     bool ok = false;
@@ -3392,8 +3392,9 @@ static void notif_tick(void)
         return;
     }
     int64_t now = now_us();
-    /* Poll while ASLEEP too -- that is the point: a nudge should wake the screen itself. The
-     * power cost is bounded (a poll only every 15 s, and only when a poll could act). */
+    /* Poll while asleep-but-not-resting (USB power, or within the rest grace): a nudge can
+     * still wake the screen. On battery the rest gate below holds the poll off by design --
+     * the radio costs more than the nudge is worth there; it lands on the next wake. */
     if (s_notif_pending && now > s_notif_until) {
         s_notif_pending = false;   /* never tapped: stop blocking; a face tap is a pet again */
         ESP_LOGI(TAG, "notif: %s went stale (untapped)", s_notif_label);

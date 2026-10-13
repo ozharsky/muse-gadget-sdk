@@ -438,7 +438,7 @@ void muse_battery_note_power(const muse_power_t *p, bool on_battery)
         stop();
     }
     if (s_running) {
-        s_pct_now = p->battery_pct;
+        s_pct_now = p->battery_pct;   /* RAW on purpose: charging detection reads the raw jump (test_drain pins this) */
         s_mv_now = p->battery_mv;
         if (esp_timer_get_time() - s_saved_us >= SAVE_MS * 1000LL) {
             persist(true);

@@ -529,7 +529,9 @@ static void send_sleep(void *sleep)
 /* SLPIN/SLPOUT: the SPD2010 stops driving the panel and scanning for touch. */
 static void panel_sleep(bool sleep)
 {
-    muse_lcd_bands_run(send_sleep, &sleep);
+    static bool held;   /* static: the send task runs the call after we return */
+    held = sleep;
+    muse_lcd_bands_run(send_sleep, &held);
     vTaskDelay(pdMS_TO_TICKS(120));   /* settle before the next command */
 }
 

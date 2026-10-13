@@ -74,11 +74,11 @@ size_t muse_settings_hatch_token_len(void);
 
 #define MUSE_AGENT_PROFILE_MAX 32   /* a Hermes profile name (agents.json key) */
 
-void muse_settings_set_volume(int pct);
-void muse_settings_set_speaker_on(bool on);
-void muse_settings_set_mic_gain(int db);
-void muse_settings_set_brightness(int pct);
-void muse_settings_set_sleep_s(int secs);
+esp_err_t muse_settings_set_volume(int pct);
+esp_err_t muse_settings_set_speaker_on(bool on);
+esp_err_t muse_settings_set_mic_gain(int db);
+esp_err_t muse_settings_set_brightness(int pct);
+esp_err_t muse_settings_set_sleep_s(int secs);
 void muse_settings_set_wifi_on(bool on);
 void muse_settings_set_ble_on(bool on);
 /* Which agent answers. Muse is the Meta cloud; the two Hermes slots are the Mac relay
@@ -132,7 +132,7 @@ bool muse_settings_relay_configured(void);
 /* A network name is remembered first among the saved ones and joined now;
  * an empty ssid forgets every saved network. */
 void muse_settings_set_wifi(const char *ssid, const char *pass);
-void muse_settings_set_hatch_host(const char *host);
-void muse_settings_set_hatch_vm(const char *vm);
+esp_err_t muse_settings_set_hatch_host(const char *host);
+esp_err_t muse_settings_set_hatch_vm(const char *vm);
 /* append=true adds to the stored token (for chunked BLE writes). */
 esp_err_t muse_settings_set_hatch_token(const char *token, bool append);

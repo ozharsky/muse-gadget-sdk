@@ -76,7 +76,6 @@ static lv_display_t *s_disp;
 static esp_lcd_panel_handle_t s_panel;
 static QueueHandle_t s_bands;            /* room for LVGL's band and a call */
 static SemaphoreHandle_t s_call_lock;
-static SemaphoreHandle_t s_call_done;
 static SemaphoreHandle_t s_chunk_free;   /* internal buffers not on the wire */
 static uint8_t *s_chunk[2];
 static size_t s_chunk_bytes;
@@ -334,16 +333,16 @@ static void send_bands(void *arg)
     for (;;) {
         xQueueReceive(s_bands, &b, portMAX_DELAY);
         if (!b.data) {
-            /* The call travels in the band, not in a global: a caller that gave up
-             * waiting (bounded RUN_WAIT_MS) must not have its call replaced by the
-             * next one, nor crash the sender with a NULL. It talks to the panel
-             * directly, so the driver-stall guard must cover it too. */
+            /* The call travels in the band, not in a global. Callers return as soon
+             * as it is queued and pass static storage for call_arg (see
+             * muse_lcd_bands_run), so the pointer stays valid however late the send
+             * task gets here. It talks to the panel directly, so the driver-stall
+             * guard must cover it too. */
             if (b.call) {
                 s_driver_ms = now_ms();
                 b.call(b.call_arg);
                 s_driver_ms = 0;
             }
-            xSemaphoreGive(s_call_done);
             continue;
         }
         size_t row = (size_t)(b.x2 - b.x1) * 2;
@@ -396,11 +395,10 @@ lv_display_t *muse_lcd_bands_register(esp_lv_adapter_display_config_t cfg, int l
     }
     s_bands = xQueueCreate(2, sizeof(band_t));
     s_call_lock = xSemaphoreCreateMutex();
-    s_call_done = xSemaphoreCreateBinary();
     s_chunk_free = xSemaphoreCreateCounting(2, 2);
     s_chunk[0] = heap_caps_malloc(chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     s_chunk[1] = heap_caps_malloc(chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!s_bands || !s_call_lock || !s_call_done || !s_chunk_free || !s_chunk[0] || !s_chunk[1] ||
+    if (!s_bands || !s_call_lock || !s_chunk_free || !s_chunk[0] || !s_chunk[1] ||
         xTaskCreatePinnedToCore(send_bands, "lcd_send", 2560, NULL, MUSE_UI_PRIORITY + 1, NULL, MUSE_UI_CORE) != pdPASS) {
         return NULL;
     }
@@ -438,28 +436,16 @@ void muse_lcd_bands_run(void (*fn)(void *arg), void *arg)
         fn(arg);
         return;
     }
+    /* Fire and forget: the call is queued and runs in the send task, in order.
+     * `arg` must point at STATIC storage -- these users (brightness/sleep) are
+     * small scalars; a stack address dies before the send task gets there. */
     if (xSemaphoreTake(s_call_lock, pdMS_TO_TICKS(RUN_WAIT_MS)) != pdTRUE) {
         ESP_LOGE(TAG, "panel call busy for %d ms: skipped", RUN_WAIT_MS);
         return;
     }
-    /* Drop a completion left behind by a previous caller whose wait timed out:
-     * it would otherwise satisfy THIS wait before this call has run. Flush
-     * BEFORE queueing, so our own call's completion can never be stolen (the
-     * call still runs if a stale signal was the only one -- these users are
-     * fire-and-forget brightness/sleep). */
-    while (xSemaphoreTake(s_call_done, 0) == pdTRUE) {
-    }
     const band_t call = { .call = fn, .call_arg = arg };
     if (xQueueSend(s_bands, &call, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGE(TAG, "panel call queue full (send task stalled): skipped");
-        xSemaphoreGive(s_call_lock);
-        return;
-    }
-    if (xSemaphoreTake(s_call_done, pdMS_TO_TICKS(RUN_WAIT_MS)) != pdTRUE) {
-        /* The call still runs when the send task gets there; not waiting further
-         * keeps a stalled send task from freezing this caller too. The call
-         * travels IN the band, so the next caller's cannot replace it. */
-        ESP_LOGE(TAG, "panel call did not run within %d ms", RUN_WAIT_MS);
     }
     xSemaphoreGive(s_call_lock);
 }

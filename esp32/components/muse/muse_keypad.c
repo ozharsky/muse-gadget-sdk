@@ -62,6 +62,7 @@ static int s_pending = -1;   /* the key whose character can still change */
 static int s_step;
 static uint32_t s_pressed_ms;
 static bool s_held;          /* this press already typed its digit */
+static int s_held_key = -1;  /* which key typed it: only ITS release is gated */
 
 /* The button matrix's id for a key: past the round screen's first spacer. */
 static int key_button(int key)
@@ -179,12 +180,14 @@ static void on_key(lv_event_t *e)
     if (code == LV_EVENT_PRESSED) {
         s_pressed_ms = lv_tick_get();
         s_held = false;
+        s_held_key = -1;
         return;
     }
     if (code == LV_EVENT_PRESSING) {
         char digit = held_digit(key);
         if (digit && !s_held && lv_tick_elaps(s_pressed_ms) >= HOLD_MS) {
             s_held = true;
+            s_held_key = key;
             commit();
             add_char(digit);
         }
@@ -193,8 +196,8 @@ static void on_key(lv_event_t *e)
 
     /* LV_EVENT_VALUE_CHANGED: keys fire on release, backspace on press and while held. */
     key = button_key(*(const uint32_t *)lv_event_get_param(e));
-    if (key < 0 || s_held) {
-        return;
+    if (key < 0 || (s_held && key == s_held_key)) {
+        return;   /* only the held key's own release is swallowed */
     }
     switch (key) {
     case KEY_BACKSPACE:

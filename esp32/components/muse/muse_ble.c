@@ -187,9 +187,13 @@ static void run_command(char *cmd)
             muse_settings_set_wifi("", "");   /* every saved network */
         }
     } else if (!strcmp(cmd, "hatch.host")) {
-        muse_settings_set_hatch_host(v);
+        if (muse_settings_set_hatch_host(v) != ESP_OK) {
+            res = "error: nvs save failed";
+        }
     } else if (!strcmp(cmd, "hatch.vm")) {
-        muse_settings_set_hatch_vm(v);
+        if (muse_settings_set_hatch_vm(v) != ESP_OK) {
+            res = "error: nvs save failed";
+        }
     } else if (!strcmp(cmd, "hatch.token") || !strcmp(cmd, "hatch.token+")) {
         if (muse_settings_set_hatch_token(v, cmd[11] == '+') != ESP_OK) {
             res = "error: token too long";
@@ -210,15 +214,25 @@ static void run_command(char *cmd)
     } else if (!strcmp(cmd, "test.loopback")) {
         muse_voice_request_loopback();
     } else if (!strcmp(cmd, "volume") && parse_int(v, 0, 100, &n)) {
-        muse_settings_set_volume(n);
+        if (muse_settings_set_volume(n) != ESP_OK) {
+            res = "error: nvs save failed";
+        }
     } else if (!strcmp(cmd, "speaker") && parse_int(v, 0, 1, &n)) {
-        muse_settings_set_speaker_on(n);
+        if (muse_settings_set_speaker_on(n) != ESP_OK) {
+            res = "error: nvs save failed";
+        }
     } else if (!strcmp(cmd, "mic_gain") && parse_int(v, 0, MUSE_MIC_GAIN_MAX, &n)) {
-        muse_settings_set_mic_gain(n);
+        if (muse_settings_set_mic_gain(n) != ESP_OK) {
+            res = "error: nvs save failed";
+        }
     } else if (!strcmp(cmd, "brightness") && parse_int(v, 10, 100, &n)) {
-        muse_settings_set_brightness(n);
+        if (muse_settings_set_brightness(n) != ESP_OK) {
+            res = "error: nvs save failed";
+        }
     } else if (!strcmp(cmd, "sleep") && parse_int(v, 0, 3600, &n)) {
-        muse_settings_set_sleep_s(n);
+        if (muse_settings_set_sleep_s(n) != ESP_OK) {
+            res = "error: nvs save failed";
+        }
     } else {
         res = "error: unknown command or bad value";
     }

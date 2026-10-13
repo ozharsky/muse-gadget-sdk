@@ -1536,6 +1536,7 @@ static void update_chrome(float now)
         }
         int shown = page * 2 + subpage;
         if (shown != s_shown_page) {
+            if (page) read_hide();   /* reading view lives on lv_layer_top: never over Settings */
             for (int i = 0; i < 2; i++) {
                 lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
                 lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);

@@ -51,6 +51,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_timer.h"
 #include "esp_check.h"
 #include "esp_codec_dev_defaults.h"
 #include "es8311_codec.h"
@@ -381,7 +382,8 @@ static void send_brightness(void *level)
 
 static void set_brightness(int pct)
 {
-    uint8_t level = (uint8_t)(pct * 255 / 100);
+    static uint8_t level;   /* static: the send task runs the call after we return */
+    level = (uint8_t)(pct * 255 / 100);
     muse_lcd_bands_run(send_brightness, &level);
 }
 
@@ -392,7 +394,9 @@ static void send_sleep(void *sleep)
 
 static void panel_sleep(bool sleep)
 {
-    muse_lcd_bands_run(send_sleep, &sleep);   /* SLPIN/SLPOUT; GRAM is kept */
+    static bool held;   /* static: the send task runs the call after we return */
+    held = sleep;
+    muse_lcd_bands_run(send_sleep, &held);   /* SLPIN/SLPOUT; GRAM is kept */
     vTaskDelay(pdMS_TO_TICKS(120));
 }
 
@@ -628,6 +632,11 @@ static esp_err_t read_power(muse_power_t *out)
             mv *= 2;
             ok = true;
         }
+    }
+    static int64_t fail_log_us;
+    if (!ok && esp_timer_get_time() - fail_log_us > 60 * 1000000LL) {
+        fail_log_us = esp_timer_get_time();
+        ESP_LOGW(TAG, "battery read failed: raw=%d cali=%d", raw, (int)s_cali_ok);
     }
     out->battery_mv = mv;
     /* Rough Li-ion curve for the meter; the vendor reports millivolts only. The 100%
