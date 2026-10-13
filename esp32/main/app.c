@@ -2765,6 +2765,17 @@ void app_run(void) {
                 ESP_LOGE(TAG, "setup deletion could not be verified");
             }
             setup_complete = false;
+        } else if (setup_complete && have_wifi && !provisioned && WIFI_WITHOUT_PAIRING) {
+            // Device credentials vanished while the setup marker and Wi-Fi survived
+            // (an interrupted pair, or a server-side unpair after a crash window).
+            // BLE pairing is refused once setup is marked done, so without this the
+            // device could never re-pair from the app (2026-10-12 incident). Boot
+            // clean instead, exactly like the menu's Reset pairing.
+            ESP_LOGW(TAG, "setup done but no device credentials; clearing for a fresh pair");
+            if (!config_clear_setup()) {
+                ESP_LOGE(TAG, "setup deletion could not be verified");
+            }
+            setup_complete = false;
         }
     }
 
