@@ -78,7 +78,7 @@ class TtsArtifactTests(unittest.TestCase):
         self.assertFalse(relay.is_tts_artifact("The screenshot saved as cat.png earlier."))
 
     def test_path_fragment_dropped(self):
-        self.assertTrue(relay.is_tts_artifact("sure, it went to /Users/you/Downloads/x.png"))
+        self.assertTrue(relay.is_tts_artifact("sure, it went to /Users/oleg/Downloads/x.png"))
 
     def test_media_tag_dropped(self):
         self.assertTrue(relay.is_tts_artifact("done MEDIA:/tmp/photo.jpg"))
@@ -394,6 +394,8 @@ class ProfileHttpTurnTests(unittest.TestCase):
         self.assertEqual(route["voice"], "sasshole")
 
     def test_profile_turn_uses_the_p_path_and_voice(self):
+        if "sidekick" not in agents.load():
+            self.skipTest("example profile sidekick not in agents.json")
         self._turn("?text=hi&profile=sidekick")
         route = self.fake.calls[-1]
         self.assertEqual(route["name"], "sidekick")

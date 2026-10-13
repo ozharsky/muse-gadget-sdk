@@ -4,5 +4,11 @@
     "voice": "sasshole",
     "api_key_file": "~/.hermes/config.yaml",
     "personality_file": null
+  },
+  "sidekick": {
+    "label": "Sidekick",
+    "voice": "plain",
+    "api_key_file": "~/.hermes/config.yaml",
+    "personality_file": null
   }
 }

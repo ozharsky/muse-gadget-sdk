@@ -8,7 +8,7 @@ offers to open the exact agent that raised it.
 A notification is::
 
     {"id": "...", "ts": 169.., "agent": "sidekick", "is_default": false,
-     "label": "BEEPBOP", "mood": "alert", "text": "The build finished.", "read": false}
+     "label": "SIDEKICK", "mood": "alert", "text": "The build finished.", "read": false}
 
 An optional ``due`` (unix ts) turns one into a REMINDER: :func:`pending` hides it until the
 clock passes, so "tea in 8 minutes" needs no firmware change at all -- the device's poll

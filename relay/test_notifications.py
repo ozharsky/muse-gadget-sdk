@@ -29,10 +29,12 @@ class NotifyIdentity(unittest.TestCase):
             self.assertTrue(who["is_default"], "empty/default must open the Hermes slot")
 
     def test_a_known_profile_resolves_to_the_alt_slot_with_its_name(self):
+        if not (agents.resolve("sidekick").get("usable") if hasattr(agents, "resolve") else True):
+            self.skipTest("edit agents.json for this machine first (example profile: sidekick)")
         who = notifications.resolve_agent("sidekick")
         self.assertEqual(who["agent"], "sidekick")
         self.assertFalse(who["is_default"], "a real profile must open the ALT slot, not default")
-        self.assertEqual(who["label"], "BEEPBOP")
+        self.assertEqual(who["label"], "SIDEKICK")
 
     def test_unknown_profile_falls_back_to_default_never_an_unroutable_name(self):
         who = notifications.resolve_agent("no_such_profile_xyz")
@@ -51,6 +53,8 @@ class NotifyStore(unittest.TestCase):
         notifications.STORE = self._orig
 
     def test_add_round_trips_identity_and_acks_once(self):
+        if not (agents.resolve("sidekick").get("usable") if hasattr(agents, "resolve") else True):
+            self.skipTest("edit agents.json for this machine first (example profile: sidekick)")
         it = notifications.add("build finished", agent="sidekick", mood="alert")
         self.assertEqual(it["agent"], "sidekick")
         self.assertFalse(it["is_default"])
@@ -173,6 +177,8 @@ class RelayEndpoints(unittest.TestCase):
             return json.loads(r.read())
 
     def test_create_then_serve_then_ack(self):
+        if not (agents.resolve("sidekick").get("usable") if hasattr(agents, "resolve") else True):
+            self.skipTest("edit agents.json for this machine first (example profile: sidekick)")
         notifications.clear()
         out = self._req("/notifications", "POST",
                         {"text": "the print finished", "agent": "sidekick", "mood": "alert"})
