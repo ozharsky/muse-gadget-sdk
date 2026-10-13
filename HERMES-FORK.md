@@ -5,7 +5,7 @@ All custom work lives on the **`hermes-local`** branch — which is also this re
 branch, so what you see first is the work, not upstream's `main`.
 
 - `main` — untouched mirror of upstream's `main` at the fork point (commit `3b56ccb`).
-- `hermes-local` — everything below. **116 commits of work on top of upstream `main`**
+- `hermes-local` — everything below. **123 commits of work on top of upstream `main`**
   (kept untouched as the rebase base).
 - `upstream` remote → `facebookincubator/muse-gadget-sdk` (rebase reference; **never push**).
 - `origin` remote → this repo (`ozharsky/muse-gadget-sdk`).
@@ -191,6 +191,17 @@ firmware must survive rather than fix.
 - **Sharing** — on-glass README artwork, [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md),
   [`docs/AI-SETUP.md`](docs/AI-SETUP.md), the bundled [`relay/`](relay), and a personal-
   data sanitize of the tree (`a0583fe`).
+
+### 9. The setup page connects any agent (2026-10-12 evening)
+
+The browser setup page (`tools/muse/ble_setup.html`) gained a **Your own agent** section:
+relay host, remote URL and token, written over the same Bluetooth link as Wi-Fi + Muse
+tokens (and scriptable over the serial console). The values persist in NVS and the firmware
+*prefers them over the compiled-in defaults*; every "is a relay configured?" gate is now
+runtime, so a device flashed **without** a relay gains the whole Hermes feature tree after
+the page saves and *Save & restart* reboots it. Verified end-to-end over real radio:
+pair -> set/chunk/verify -> reboot -> values survive -> clear; the harness ships as
+`esp32/tools/muse/e2e_ble_setup.py`. Headless helpers: `>pair.code`, `>ble.setup=`, `>wifi.on=`.
 
 ---
 

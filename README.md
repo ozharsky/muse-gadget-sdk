@@ -153,12 +153,13 @@ cadence, saccades, breathing and the signature accent beats (Stage C)</i></p>
 
 ## Changelog (the `hermes-local` branch)
 
-116 commits over upstream `main` — newest first. Full detail lives in the commits
+123 commits over upstream `main` — newest first. Full detail lives in the commits
 themselves.
 
 | Area | Commits | What |
 |---|---|---|
-| sharing | `a0583fe` `8918603` | On-glass README artwork + idle GIFs, `docs/AGENT-PROTOCOL.md` + `docs/AI-SETUP.md`, the bundled `relay/`, personal-data sanitize; boot-repair self-heal for the lost-pairing state |
+| setup | `8952e2c` `b3c2922` `93acda3` | The setup page's browser flow documented; **any agent** connectable from the page: relay host/URL/token over BLE + serial (NVS-backed, relay gates all runtime), *Your own agent* + Save & restart; `e2e_ble_setup.py` full-radio E2E; headless console helpers `>pair.code` `>ble.setup=` `>wifi.on=` |
+| sharing | `a0583fe` `8918603` `19a5bed` `b8dfb13` `9d7db67` `5ce1023` | On-glass README artwork + idle GIFs, `docs/AGENT-PROTOCOL.md` + `docs/AI-SETUP.md`, the bundled `relay/` (suite green out of the box), personal-data sanitize; boot-repair self-heal for the lost-pairing state |
 | art program | `51a575c` `345ee1b` `eadf69b` `f5b8c2b` `1da7a32` `937086a` `14f9c22` | Faces v2 on all three faces (A1/B3/C5), per-face idle personas + signature accent beats, easing rig, idle scheduler, moods v3 (all 52 reactions reworked), the on-device video player + indexed clip registry, `art-pipeline` toolchain landed in-repo |
 | sessions | `af04f61` `ca9f534` | Turn backend pinned at start (the agent-flip race); Muse replies speak after the first TTS piece |
 | tasking | `7f107a8` | The relay tasking system removed end to end (owner's call) |
@@ -180,9 +181,16 @@ themselves.
 | misc | `fa1af1a` `007920c` `f749df5` `828d0b7` `482afcc` `8a64488` `ae43010` `d318efd` | Reply-too-long caption; PSRAM decoder move; debug dir gitignored; repo hygiene |
 
 <details>
-<summary><b>All 116 commit subjects</b></summary>
+<summary><b>All 123 commit subjects</b></summary>
 
 ```
+93acda3 tools: e2e_ble_setup.py — full BLE E2E of the relay setup surface (pairing-code gated, reboot disconnect handled); runbook pointer
+b3c2922 setup page connects ANY agent: relay host/URL/token settable over BLE+serial (NVS-backed, runtime gates replace build-time checks), page section + Save & restart, docs truthful
+8952e2c docs: feature the SDK browser setup page (tools/muse/ble_setup.html) — computer setup path, no phone/relay
+5ce1023 relay bundle: scrub the last test-fixture name
+9d7db67 relay bundle: label expectation matches the shipped example (76/76 green out of the box)
+b8dfb13 relay bundle: ship a working example ALT profile (sidekick) + portability guards; suite green out of the box
+19a5bed Sharing round 2: docs truth pass (relay topology, tasking removed, live counts + regenerated changelog), the BLE no-relay setup path, bundled relay/ (macOS/Windows/Linux) + docs/AI-SETUP.md runbook; last personal example strings genericized
 a0583fe Prepare for sharing: current-art README (on-glass faces + idle GIFs), AGENT-PROTOCOL.md (talk to Hermes, Muse, or any agent), sanitized personal data (empty relay URLs in the tracked profile, generic script paths; sweep clean of hostnames/LAN IPs/e-mails/device IDs)
 8918603 Boot repair: self-heal the lost-credentials state - setup_complete + wifi + no device creds now clears for a fresh pair (the 2026-10-12 unpaired incident; BLE pairing is refused once setup is marked done)
 a380982 tools: art_check.py - evidence-capture palette guard (stage C golem wrong-art incident)
