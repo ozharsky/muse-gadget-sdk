@@ -1039,9 +1039,9 @@ static bool ensure_connected(void)
         }
         int status;
         if (connect_once(err, sizeof(err), &status)) {
-            char detail[48] = "Connected to ";
-            strlcat(detail, s_vm.vm_name[0] ? s_vm.vm_name : s_vm.vm_id, sizeof(detail));
-            muse_hatch_report(MUSE_HATCH_REACHABLE, detail);
+            /* The settings page shows the VM in its VM ID row. */
+            muse_hatch_report_vm(s_vm.vm_id);
+            muse_hatch_report(MUSE_HATCH_REACHABLE, "");
             s_heal.fails = 0;
             s_heal.down_since_us = 0;
             s_heal_count = 0;

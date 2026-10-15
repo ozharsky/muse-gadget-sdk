@@ -100,9 +100,10 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
 static char s_join_ssid[MUSE_SSID_MAX + 1];
 
 /* Hatch page. */
-static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token;
+static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token, *s_hatch_sdk_token;
 static lv_obj_t *s_link_status, *s_link_reset_lbl;
 static int64_t s_link_reset_armed_us;
+static int64_t s_sdk_token_bad_us;   /* when an invalid SDK token was entered */
 
 /* Bluetooth page. */
 static lv_obj_t *s_ble_sw, *s_ble_status;
@@ -291,10 +292,11 @@ static lv_obj_t *card(lv_obj_t *list, bool clickable)
  * only ellipsizes when the label has a FIXED height -- with auto height it silently wraps
  * instead, so a long value ("Free Internet 2.4") broke onto two lines mid-number and a
  * long SSID overgrew its row. The clamp makes them ellipsize, which is what DOTS intends. */
+/* Without cb, the row only shows its value. */
 static lv_obj_t *row(lv_obj_t *list, const char *icon, const char *text, lv_obj_t **value_out,
                      lv_event_cb_t cb, void *user)
 {
-    lv_obj_t *c = card(list, true);
+    lv_obj_t *c = card(list, cb != NULL);
     if (icon) {
         label(c, &lv_font_montserrat_20, COLOR_ACCENT, icon);
     }
@@ -309,7 +311,9 @@ static lv_obj_t *row(lv_obj_t *list, const char *icon, const char *text, lv_obj_
         lv_obj_set_height(v, lv_font_get_line_height(&lv_font_montserrat_16));
         *value_out = v;
     }
-    lv_obj_add_event_cb(c, cb, LV_EVENT_SHORT_CLICKED, user);
+    if (cb) {
+        lv_obj_add_event_cb(c, cb, LV_EVENT_SHORT_CLICKED, user);
+    }
     return c;
 }
 
@@ -889,6 +893,21 @@ static void on_hatch_token_done(const char *text)
     }
 }
 
+/* A valid token is stored and the device restarts to use it. */
+static void on_hatch_sdk_token_done(const char *text)
+{
+    if (text[0] && !muse_link_sdk_token_set(text)) {
+        s_sdk_token_bad_us = esp_timer_get_time();
+    }
+}
+
+static void on_hatch_sdk_token(lv_event_t *e)
+{
+    (void)e;
+    open_text("SDK token", "", true, 48 /* mgst_ and 43 more */, "Empty keeps the current one; a new one restarts",
+              on_hatch_sdk_token_done, s_hatch);
+}
+
 static void on_hatch_host(lv_event_t *e)
 {
     (void)e;
@@ -942,9 +961,11 @@ static void build_hatch_page(lv_obj_t *tile)
     row(list, NULL, "Server", &s_hatch_host, on_hatch_host, NULL);
     row(list, NULL, "VM ID", &s_hatch_vm, on_hatch_vm, NULL);
     row(list, NULL, "Device token", &s_hatch_token, on_hatch_token, NULL);
+    row(list, NULL, "SDK token", &s_hatch_sdk_token, on_hatch_sdk_token, NULL);
     button(list, "Test connection", COLOR_ACCENT, on_hatch_test, NULL);
     note(list, "Pair with the Muse app to use your account; a device token here overrides it, and a long one is "
-               "easier to send over Bluetooth. The VM ID picks one of your VMs. "
+               "easier to send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from "
+               "gadgets.muse.ai; one set here replaces the firmware's. "
                "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
 }
 
@@ -962,7 +983,11 @@ static void tick_hatch(void)
     muse_hatch_status_t h;
     muse_hatch_status(&h);
     char buf[96];
-    snprintf(buf, sizeof(buf), "%s\n%s", muse_hatch_state_name(h.state), h.detail);
+    if (h.detail[0]) {
+        snprintf(buf, sizeof(buf), "%s\n%s", muse_hatch_state_name(h.state), h.detail);
+    } else {
+        strlcpy(buf, muse_hatch_state_name(h.state), sizeof(buf));
+    }
     set_text(s_hatch_status, buf);
     lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
                                                              h.state == MUSE_HATCH_UNREACHABLE ? COLOR_DANGER : COLOR_DIM), 0);
@@ -971,10 +996,23 @@ static void tick_hatch(void)
     muse_settings_hatch_host(host);
     muse_settings_hatch_vm(vm);
     set_text(s_hatch_host, host);
-    set_text(s_hatch_vm, vm[0] ? vm : "Not set");
-    size_t n = muse_settings_hatch_token_len();
-    snprintf(buf, sizeof(buf), n ? "Set (%u chars)" : "Not set", (unsigned)n);
-    set_text(s_hatch_token, buf);
+    /* One set here, else the one it connected to. */
+    set_text(s_hatch_vm, vm[0] ? vm : h.vm_id[0] ? h.vm_id : "Not set");
+    /* The device token is a credential, so none of it shows. Pairing stores one
+     * (muse_link_hatch_linked); one typed in here overrides it. */
+    set_text(s_hatch_token, muse_settings_hatch_token_len() ? "Set here" :
+                            muse_link_hatch_linked() ? "Set" : "Not set");
+    /* The hint gadgets.muse.ai shows. */
+    const char *sdk = muse_link_sdk_token();
+    if (sdk) {
+        snprintf(buf, sizeof(buf), "%.12s...", sdk);
+    }
+    if (s_sdk_token_bad_us && esp_timer_get_time() - s_sdk_token_bad_us < 5000000) {
+        set_text(s_hatch_sdk_token, "Not a token");
+    } else {
+        s_sdk_token_bad_us = 0;
+        set_text(s_hatch_sdk_token, sdk ? buf : "Not set");
+    }
 }
 
 /* ---------- Bluetooth ---------- */
