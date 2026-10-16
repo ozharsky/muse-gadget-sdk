@@ -67,7 +67,8 @@ class LinkNoiseTunnelTest(unittest.TestCase):
                                   if line.startswith(("#define CTRL_STREAM_ID",
                                                       "#define CTRL_BODY_CHUNK_MAX",
                                                       "#define OUT_SVC_SCRATCH",
-                                                      "#define OUT_ENV_SCRATCH")))
+                                                      "#define OUT_ENV_SCRATCH",
+                                                      "#define WS_HEADROOM")))
             ws_start = control.index("#if CONFIG_SPIRAM\n#define WS_BUF_SIZE")
             ws_end = control.index("#endif", ws_start) + len("#endif")
             constants += "\n" + control[ws_start:ws_end]
@@ -116,6 +117,9 @@ class LinkNoiseTunnelTest(unittest.TestCase):
 
     def test_backpressure_ownership_fairness_and_failure(self):
         self.run_harness("tunnel")
+
+    def test_in_place_batches_keep_their_room_and_order(self) -> None:
+        self.run_harness("inplace")
 
     def test_control_prefix_stream_and_no_whole_payload_copy(self):
         self.run_harness("stream")

@@ -46,6 +46,16 @@ typedef struct {
 /* PTT events are posted to `queue` (items are muse_input_event_t). */
 esp_err_t muse_input_start(QueueHandle_t queue);
 
+/*
+ * Console '>' lines go to hook first, without the '>'; it returns false for a
+ * line that isn't its own. The app sets the SDK token this way
+ * (main/sdk_token_console.h). Set it before muse_input_start().
+ */
+void muse_input_set_console_hook(bool (*hook)(const char *line));
+
+/* LVGL microphone press/release edges; handled by the existing input task. */
+void muse_input_touch_talk(bool pressed);
+
 /* Plays the goodbye animation and powers off (from the input task). */
 /* Wakes the input task out of a long wait_buttons()/delay so update_power() re-evaluates now.
  * Needed whenever another task changes sleep state (e.g. a notification waking the screen):
