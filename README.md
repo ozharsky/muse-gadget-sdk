@@ -337,7 +337,8 @@ fa0b9b7 Add generic ESP32-C6 (no PSRAM) board support (#54)
    and the Muse tokens land — it is the no-relay path to a working Muse companion.**
    A Muse SDK token from [gadgets.muse.ai](https://gadgets.muse.ai/settings/sdk-tokens)
    is used at build time for pairing; without one the firmware still **builds and runs
-   fine** (the build logs a warning).
+   fine** (the build logs a warning). A token can also be set **after flashing**:
+   `>sdk_token=mgst_…` over the serial console stores it in NVS and restarts.
 
 ## Connect an agent — Hermes, Muse, or anything else
 

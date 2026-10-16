@@ -24,6 +24,9 @@ want. Do not invent credentials, do not skip the checkpoints.
 - A **USB data cable** and the **Waveshare ESP32-S3 1.43″ round AMOLED** board.
 - If they chose A/C: a free **Muse SDK token** from https://gadgets.muse.ai/settings/sdk-tokens
   (Account → SDK tokens). The build also succeeds without it — you just cannot pair.
+No token at build time? Set one after flashing: `>sdk_token=mgst_…` on the serial console stores
+it in NVS, acks and restarts — the stored token is preferred over the build one. It is
+serial-only on purpose (nobody nearby can change a gadget's token over Bluetooth).
 
 ## 2. Clone and build
 
