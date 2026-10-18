@@ -35,6 +35,7 @@ components/muse/avatar/*
 !components/muse/avatar/muse_pixel_keller.c
 !components/muse/avatar/muse_pixel_bloop.c
 !components/muse/avatar/muse_pixel_switch.c
+!components/muse/avatar/muse_rig.h
 !components/muse/avatar/shodan_poses.h
 !components/muse/avatar/sprite_data.h
 !components/muse/avatar/sprite_golem.h
