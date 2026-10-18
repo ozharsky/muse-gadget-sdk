@@ -382,7 +382,10 @@ can write your own instead.
 
 ## Building & testing
 
-Toolchain and board instructions are upstream's (unchanged). Host tests:
+Toolchain and board instructions are upstream's, with one addition: **apply the two
+IDF v6.0.1 SPI bus-lock fixes before building** (they are the screen-freeze root
+cause on this board; the patches ship in `esp32/tools/idf-patches/`, run
+`bash esp32/tools/apply_idf_patches.sh`). Host tests:
 
 ```bash
 cd esp32 && env -u PYTHONPATH python3 -m unittest discover -s tests -p 'test_*.py'
