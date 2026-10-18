@@ -160,7 +160,8 @@ firmware must survive rather than fix.
 ### 7. Build & test infrastructure
 
 - **212 host tests** run without hardware: `env -u PYTHONPATH python3 -m unittest
-  discover -s tests -p 'test_*.py'` from `esp32/`.
+  discover -s tests -p 'test_*.py'` from `esp32/` (a bare clone needs one configure first to
+  fetch `managed_components/`).
 - **`build_flash.sh`** (in `art-pipeline`, not this repo) — hard-gates the sdkconfig
   secrets before every build, verifies the built binary actually contains them,
   and archives the ELF+bin per flash for coredump decoding.

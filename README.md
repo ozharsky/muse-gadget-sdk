@@ -391,6 +391,9 @@ cause on this board; the patches ship in `esp32/tools/idf-patches/`, run
 cd esp32 && env -u PYTHONPATH python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
+First time in a fresh clone, run one configure before the tests (`idf.py reconfigure` or any
+build): it fetches `esp32/managed_components/`, which several test classes compile against.
+
 On the author's machine a wrapper (`build_flash.sh`) hard-gates the device
 secrets before every build, verifies them inside the built binary, and archives
 the ELF+bin for coredump decoding.
