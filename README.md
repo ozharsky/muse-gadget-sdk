@@ -16,6 +16,8 @@ limitations under the License.
 
 # 🔒 Hermes fork — a three-agent Muse gadget
 
+[![ci](https://github.com/ozharsky/muse-gadget-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/ozharsky/muse-gadget-sdk/actions/workflows/ci.yml)
+
 **This repo is a fork of [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk),
 developed on the `hermes-local` branch (the default branch here).** Upstream
 turns the Waveshare ESP32-S3 1.43″ round AMOLED board into a voice companion for
