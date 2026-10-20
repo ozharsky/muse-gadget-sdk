@@ -817,6 +817,25 @@ class H(BaseHTTPRequestHandler):
         tts_inflight = 0         # sentences popped by a worker, not yet in tts_out
         tts_lock = threading.Lock()
 
+        SPOKEN_MAX = 240   # chars actually spoken per turn; the rest of the reply stays on screen
+        spoken_chars = 0
+        cap_logged = False
+
+        def queue_sentence(sent):
+            """Queue a sentence for speech while the spoken budget lasts (Chums-style brevity):
+            past SPOKEN_MAX the reply keeps streaming as text but stops being spoken."""
+            nonlocal spoken_chars, tts_next_idx, cap_logged
+            with tts_lock:
+                if spoken_chars + len(sent) > SPOKEN_MAX:
+                    if not cap_logged:
+                        cap_logged = True
+                        print("[tts-cap] spoken budget (%d chars) reached; rest stays text" % SPOKEN_MAX,
+                              file=sys.stderr, flush=True)
+                    return
+                tts_queue.append((tts_next_idx, sent))
+                tts_next_idx += 1
+                spoken_chars += len(sent)
+
         def tts_pump_out():
             """Send finished chunks in QUEUE order: synthesis overlaps, playback order holds.
              Exits only when the stream is done AND every queued or in-flight chunk has been
@@ -917,9 +936,7 @@ class H(BaseHTTPRequestHandler):
                 if sent:
                     if os.environ.get("RELAY_DEBUG"):
                         print("[tts-queue] %r" % sent[:120], file=sys.stderr, flush=True)
-                    with tts_lock:
-                        tts_queue.append((tts_next_idx, sent))
-                        tts_next_idx += 1
+                    queue_sentence(sent)
                 sent_cursor = m.end()
             # queue every complete sentence beyond the cursor for TTS
             # (a tag split across deltas leaves an unterminated '[' or a bare 'MEDIA:'/'http'
@@ -943,9 +960,7 @@ class H(BaseHTTPRequestHandler):
                 if sent:
                     if os.environ.get("RELAY_DEBUG"):
                         print("[tts-queue] %r" % sent[:120], file=sys.stderr, flush=True)
-                    with tts_lock:
-                        tts_queue.append((tts_next_idx, sent))
-                        tts_next_idx += 1
+                    queue_sentence(sent)
                 sent_cursor = m.end()
 
         try:

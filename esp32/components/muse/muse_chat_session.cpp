@@ -281,6 +281,7 @@ static int64_t s_marks[M_COUNT];
 static char s_reply_shown[EV_TEXT];   /* the pre-speech caption last sent */
 
 static void mark(mark_t m);
+static int64_t s_think_poke_us;   /* last 'working' mood re-fire */
 static bool open_note(void);
 static void log_marks(void);
 static int16_t *s_pcm;       /* MINIMP3_MAX_SAMPLES_PER_FRAME */
@@ -3428,6 +3429,25 @@ extern "C" bool muse_notif_open_pending(void)
     return true;
 }
 
+/* The face acts out "working" from the moment a turn waits for its reply until the
+ * reply's own [react] mood owns it (first audio). The blend system re-fires the same mood
+ * every 1.2 s, so it reads as one sustained state rather than a one-shot reaction.
+ * "scan" is supported by every face (muse_pixel, golem, stone); no new art. */
+static void think_tick(void)
+{
+    if (s_turn.phase != P_WAIT_FINAL && s_turn.phase != P_WAIT_REPLY) {
+        return;
+    }
+    if (s_marks[M_AUDIO]) {
+        return;   /* speech started: the reply's mood is in charge now */
+    }
+    int64_t now = now_us();
+    if (now - s_think_poke_us >= 1200000) {
+        s_think_poke_us = now;
+        muse_ui_react("scan");
+    }
+}
+
 static void hatch_task(void *arg)
 {
     (void)arg;
@@ -3445,6 +3465,7 @@ static void hatch_task(void *arg)
                 handle(cmd);
             }
         }
+        think_tick();   /* the working face, both backends */
         notif_tick();
         notif_hist_tick();   /* the inbox's fetch/cancel, when the settings page asked */
         if (hermes_mode()) {

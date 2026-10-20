@@ -165,6 +165,10 @@ firmware must survive rather than fix.
 - **`build_flash.sh`** (in `art-pipeline`, not this repo) — hard-gates the sdkconfig
   secrets before every build, verifies the built binary actually contains them,
   and archives the ELF+bin per flash for coredump decoding.
+- **`esp32/tools/muse/doctor.py`** — one read-only command: relay reachability + token,
+  the pinned TTS root against Google's live chain (catches a rotated pin before a silent
+  reply does), and the device over USB (`@status` fields, volume, battery). Prints the fix
+  for each failure; exit code 1 if anything fails.
 - **Bench commands over serial** (`>...`): `>status`, `>diag`, `>power`, `>tap`,
   `>notifs`, `>notif.cancel=<id>`, `>lcd.swallow|dropnotify|wedge`, `>batt.sim`,
   `>wifi.switch|forget|add`, `>reboot`, plus fault injection for every guard.

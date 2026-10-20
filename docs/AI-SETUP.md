@@ -122,4 +122,6 @@ battery and link state; a first voice turn produces a spoken reply and a caption
   `build-*/sdkconfig` or the relay's `token` file.
 - After big code changes, refresh the context graph if the repo uses graft: `graft build`.
 - When something fails, prefer the serial console (`>status`, `>diag`, `>power`) over
-  guessing; the firmware reports its own state.
+  guessing; the firmware reports its own state. One command checks the whole chain:
+  `esp32/tools/muse/doctor.py` -- relay reachability, the TTS certificate pin against
+  Google's live chain, and the device over USB; each failure prints its fix.
