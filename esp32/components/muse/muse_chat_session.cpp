@@ -805,7 +805,12 @@ static bool resolve_vm(char *err, size_t err_cap)
         return false;
     }
     muse_settings_hatch_token(token);
-    int rc = muse_hatch_api_find_vm(token, want, &s_vm);
+    /* The hatch slot may hold an identity-class token (the pairing's SDK token, "mgst_").
+     * api.muse.ai refuses that as a Bearer -- by design -- so asking with it only produced
+     * a 401 that fed the app's auth-failure machinery (and, once, a false unpair). Skip
+     * straight to the app layer's real access token. */
+    bool identity_class = strncmp(token, "mgst_", 5) == 0;
+    int rc = identity_class ? MUSE_HATCH_API_AUTH : muse_hatch_api_find_vm(token, want, &s_vm);
     if (rc == 0) {
         ESP_LOGI(TAG, "VM %s (%s)", s_vm.vm_id, s_vm.vm_name);
         free(token);
@@ -815,6 +820,9 @@ static bool resolve_vm(char *err, size_t err_cap)
      * account API refuses as a Bearer. The pairing ALSO delivered the real access token —
      * the app layer stores + refreshes it: ask there once before giving up. */
     if (rc == MUSE_HATCH_API_AUTH) {
+        if (identity_class) {
+            ESP_LOGI(TAG, "hatch slot holds an SDK token; asking the app layer for the bearer");
+        }
         char *bearer = static_cast<char *>(malloc(MUSE_TOKEN_MAX + 1));
         if (bearer) {
             int n = muse_link_vm_bearer(bearer, MUSE_TOKEN_MAX + 1);
