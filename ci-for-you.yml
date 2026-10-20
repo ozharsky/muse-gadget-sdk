@@ -1,0 +1,33 @@
+name: ci
+
+# Fresh-clone gate: the exact failure an outside installer hit was a clean checkout
+# that could not build (a gitignored header). This runs the host suite and a real
+# 143C build on every push, from a clean checkout, so that class cannot ship again.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fresh-clone-build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (fetches managed components) and run host tests
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd esp32
+          idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-waveshare-s3-143c" set-target esp32s3
+          python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Build the 1.43C firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd esp32
+          idf.py build
+          ls -la build/muse-gadget.bin
