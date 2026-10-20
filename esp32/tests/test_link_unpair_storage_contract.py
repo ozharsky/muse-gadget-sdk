@@ -180,9 +180,15 @@ class LinkUnpairStorageContractTest(unittest.TestCase):
             "atomic_exchange_explicit(&s_setup_reset_pending, false"
         )
         reset_call = app_run.index(
-            'reset_setup_from_control("deferred setup reset")'
+            'pairing_reset_keep_wifi("deferred pairing reset")'
         )
         self.assertLess(deferred, reset_call)
+        # A revoked Muse credential must NOT wipe Wi-Fi (2026-10-19): the
+        # deferred path clears pairing only, never the whole setup.
+        keep = _function_body(self.app, "static void pairing_reset_keep_wifi(")
+        self.assertIn("config_clear_pairing()", keep)
+        self.assertNotIn("setup_wipe_to_clean", keep)
+        self.assertIn("restart_after_setup_reset()", keep)
 
     def test_failed_unpair_worker_keeps_gate_reserved_until_restart(self) -> None:
         cc = shlex.split(os.environ.get("CC", "cc"))
