@@ -2391,11 +2391,12 @@ static void handle_ask(cJSON *ask)
     s_ask_pick = -1;
     char prompt[240];
     snprintf(prompt, sizeof(prompt), "ALLOW THIS?\n%.150s", text ? text : "");
-    ESP_LOGI(TAG, "ask %s: %s", id, text ? text : "");
     if (!muse_ui_choose(prompt, opts, s_ask_n, (int)((tsec + 5) * 1000), ask_done_cb, nullptr)) {
         ESP_LOGW(TAG, "ask %s: no UI for the card", id);
         return;
     }
+    /* Logged AFTER the dialog exists: the bench hook matches this line and answers at once. */
+    ESP_LOGI(TAG, "ask %s: %s", id, text ? text : "");
     int idx = -1;
     if (s_ask_sem && xSemaphoreTake(s_ask_sem, pdMS_TO_TICKS((int)((tsec + 6) * 1000))) == pdTRUE) {
         idx = s_ask_pick;

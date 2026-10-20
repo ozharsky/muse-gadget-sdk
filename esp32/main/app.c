@@ -1449,6 +1449,30 @@ static bool reset_setup_with_gate_held(const char *source) {
     return true;
 }
 
+static void restart_after_setup_reset(void);
+
+/* A rejected Muse credential is NOT a factory reset (2026-10-19): clear the pairing and
+ * the cloud tokens but KEEP the Wi-Fi credentials. A server-side token hiccup used to wipe
+ * the network too ("Reset pairing forgets Wi-Fi..."), which cost a full re-provision --
+ * and it took the Hermes/relay path down with it even though that path only needs Wi-Fi.
+ * The device comes back unpaired+advertising WITH its network, so the app re-pair is the
+ * only step, and relay turns keep working throughout. */
+static void pairing_reset_keep_wifi(const char *source) {
+    if (!operation_gate_take(portMAX_DELAY, source)) {
+        ESP_LOGE(TAG, "%s: no operation gate", source);
+        return;
+    }
+    ESP_LOGW(TAG, "%s - clearing pairing, keeping WiFi", source);
+    setup_stage_set("reset");
+    handle_token_revoked_unlocked(source);
+    if (!config_clear_pairing()) {
+        ESP_LOGE(TAG, "%s: pairing deletion could not be verified", source);
+    }
+    finish_setup_reset_with_gate_held();
+    // Keep the gate reserved until reboot, like the full reset.
+    restart_after_setup_reset();
+}
+
 static void on_unpair(void) {
     if (!operation_gate_take(0, "BLE unpair")) {
         ble_server_send_status("error_operation_in_progress");
@@ -2967,7 +2991,7 @@ void app_run(void) {
     while (1) {
         if (atomic_exchange_explicit(&s_setup_reset_pending, false,
                                      memory_order_acq_rel)) {
-            reset_setup_from_control("deferred setup reset");
+            pairing_reset_keep_wifi("deferred pairing reset");
         }
 
 #if CONFIG_MUSE_ENABLED

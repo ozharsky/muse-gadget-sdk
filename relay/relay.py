@@ -71,9 +71,14 @@ PERSONA_PROFESSIONAL = ("Personality: a concise, no-nonsense professional assist
 # The persona block has NO leading space when it is empty ("plain" voice) so the rules never
 # start with a stray blank; the sasshole/professional personas carry their own trailing space.
 SYSTEM_RULES = ("Answer in one to three short spoken sentences. No markdown, lists, emoji or URLs. Never mention memory status or system notices. "
-          "SAFETY RULE: never start an action that would sit waiting for interactive human approval (changing configs or settings, "
-          "installing, destructive or system-wide commands) -- there is no human at a screen to approve it and the turn hangs forever. "
-          "If asked for something like that, briefly say what you WOULD do instead of doing it. "
+          "DANGEROUS ACTIONS: destructive or system-wide commands, installs and settings changes raise "
+          "an approval card on the gadget's screen; the user taps allow or deny. Attempt them when they are "
+          "what the request needs -- "
+          "if the card is denied or times out, say so in one line and continue. "
+          "Before running a DESTRUCTIVE or system-wide command on this machine, ask the user first: "
+          "POST the command to http://127.0.0.1:8788/approvals as JSON {\"command\":\"<the exact shell command>\",\"reason\":\"<one short clause>\"} "
+          "and look at \"approved\". Only if it is true, run it; if false, do not run it and say it was not approved. "
+          
           "You MAY use your tools freely -- this is a real assistant, not a dumb speaker -- but a voice turn is "
           "only useful while it is quick: prefer the smallest number of steps that truly answers, and skip steps "
           "that are only for show. If a task will clearly take minutes, say so and stop -- the user will ask again."
@@ -100,6 +105,12 @@ SYSTEM = system_prompt("sasshole")   # default persona; per-profile turns use ro
 # Voice turns die at 85 s; the gadget itself waits 100. Real agentic work (screenshots,
 # edits) can legitimately grind 1-3 minutes server-side -- a follow-up turn picks up the finished result.
 HERMES_TIMEOUT = 85
+ASK_TIMEOUT = 45          # seconds the gadget gets to answer an approval before we DENY
+
+_ASKS = {}                 # id -> {"event": threading.Event, "choice": str|None}
+_ACTIVE_PUSH = None           # push() of the turn in flight (asks ride its stream)
+_ACTIVE_LOCK = threading.Lock()
+_ASKS_LOCK = threading.Lock()
 MODEL = os.environ.get("HERMES_MODEL", "deepseek-v4.1-flash")   # Ollama Cloud; glm-5.3 leaked MEDIA: paths into speech (relay strip-race fixed 2026-10-05, see streaming.md) — v4.1 stays the tested voice persona
 EFFORT = os.environ.get("HERMES_EFFORT", "medium")               # how hard it thinks: lower is faster
 PROVIDER = os.environ.get("HERMES_PROVIDER", "ollama-cloud")   # Hermes ignores a bare model name unless a provider is given
@@ -332,7 +343,7 @@ def prepare_image(src):
         return data
 
 
-def hermes_call_stream_full(text, session_id, on_status, on_text, route=None):
+def hermes_call_stream_full(text, session_id, on_status, on_text, route=None, on_approval=None):
     """One Hermes turn over SSE. on_status(str) gets tool-progress labels ("" to clear),
     on_text(str) gets content deltas as they stream. Returns ({"usage": ...}, session id).
 
@@ -369,7 +380,21 @@ def hermes_call_stream_full(text, session_id, on_status, on_text, route=None):
                 d = json.loads(payload)
             except Exception:
                 continue
-            if ev_name == "hermes.tool.progress":
+            if ev_name == "approval.request":
+                choice = on_approval(d) if on_approval else "deny"
+                base = url.rsplit("/v1/", 1)[0]
+                try:
+                    req2 = urllib.request.Request(
+                        base + "/v1/runs/" + str(d.get("run_id") or "") + "/approval",
+                        json.dumps({"choice": choice}).encode(),
+                        {"Content-Type": "application/json",
+                         "Authorization": "Bearer " + (route.get("api_key") or HERMES_KEY)})
+                    with urllib.request.urlopen(req2, timeout=10) as r2:
+                        print("[approval] run %s -> %s" % (d.get("run_id"), choice),
+                              file=sys.stderr, flush=True)
+                except Exception as e:
+                    print("[approval] resolve failed:", e, file=sys.stderr, flush=True)
+            elif ev_name == "hermes.tool.progress":
                 st = d.get("status", "")
                 label = (d.get("label") or d.get("tool") or "").strip()
                 if st == "running" and label:
@@ -752,6 +777,80 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path.startswith("/notifications"):
             return self._do_notification(u)
+        if u.path == "/approvals" and (self._authed() or self.client_address[0] in ("127.0.0.1", "::1")):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                body = {}
+            cmd = str(body.get("command") or "").strip()
+            why = str(body.get("reason") or "").strip()
+            if not cmd:
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            with _ACTIVE_LOCK:
+                push = _ACTIVE_PUSH
+            if push is None:
+                payload = json.dumps({"approved": False, "choice": "deny",
+                                      "reason": "the gadget is not in a turn"}).encode()
+                self.send_response(409)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            aid = secrets.token_hex(4)
+            slot = {"event": threading.Event(), "choice": None}
+            with _ASKS_LOCK:
+                _ASKS[aid] = slot
+            text_ask = cmd if not why else (why + ": " + cmd)
+            push({"ask": {"id": aid, "kind": "approval", "text": text_ask[:300],
+                          "choices": ["once", "deny"], "timeout": ASK_TIMEOUT}})
+            print("[ask] %s agent-initiated: %r" % (aid, text_ask[:120]), file=sys.stderr, flush=True)
+            answered = slot["event"].wait(ASK_TIMEOUT)
+            with _ASKS_LOCK:
+                _ASKS.pop(aid, None)
+            approved = bool(answered and slot["choice"] in ("once", "session", "always"))
+            print("[ask] %s -> %s" % (aid, "approved" if approved else "denied"), file=sys.stderr, flush=True)
+            payload = json.dumps({"approved": approved,
+                                  "choice": slot["choice"] or "deny"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if u.path.startswith("/approvals/"):
+            if not self._authed():
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                body = {}
+            choice = str(body.get("choice", "")).strip().lower()
+            aid = u.path.rsplit("/", 1)[-1]
+            with _ASKS_LOCK:
+                slot = _ASKS.get(aid)
+            ok = bool(slot) and choice in ("once", "session", "always", "deny")
+            if ok:
+                slot["choice"] = choice
+                slot["event"].set()
+            print("[ask] verdict %s: %r -> %s" % (aid, choice, "ok" if ok else "rejected"),
+                  file=sys.stderr, flush=True)
+            payload = json.dumps({"ok": ok, "choice": choice}).encode()
+            self.send_response(200 if ok else 409)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if u.path != "/turn" or not self._authed():
             return self.reply(401, {"error": "unauthorized"})
         want_stream = "stream" in urllib.parse.parse_qs(u.query)
@@ -804,6 +903,32 @@ class H(BaseHTTPRequestHandler):
                 print("[stream +%5.1fs] %s" % (time.time() - t1, json.dumps(obj)[:80]), file=sys.stderr, flush=True)
 
         push({"heard": text})
+
+        global _ACTIVE_PUSH
+        with _ACTIVE_LOCK:
+            _ACTIVE_PUSH = push
+
+        def on_approval(ev):
+            """A dangerous command parked the run: put the card on the gadget and wait.
+            No answer inside ASK_TIMEOUT -> "deny" (safe default), and the agent reports it."""
+            aid = secrets.token_hex(4)
+            cmd = str(ev.get("command") or ev.get("description") or "").strip()[:300]
+            choices = [c for c in (ev.get("choices") or ["once", "deny"])
+                       if c in ("once", "session", "always", "deny")]
+            slot = {"event": threading.Event(), "choice": None}
+            with _ASKS_LOCK:
+                _ASKS[aid] = slot
+            push({"ask": {"id": aid, "kind": "approval", "text": cmd,
+                          "choices": choices, "timeout": ASK_TIMEOUT}})
+            print("[ask] %s approval: %r (%s)" % (aid, cmd[:100], ",".join(choices)),
+                  file=sys.stderr, flush=True)
+            answered = slot["event"].wait(ASK_TIMEOUT)
+            with _ASKS_LOCK:
+                _ASKS.pop(aid, None)
+            if not answered:
+                print("[ask] %s timed out -> deny" % aid, file=sys.stderr, flush=True)
+                return "deny"
+            return slot["choice"] or "deny"
         sid = load_sid(route)
         tts_queue = []           # (index, sentence) waiting to be synthesized
         tts_done = False
@@ -966,7 +1091,8 @@ class H(BaseHTTPRequestHandler):
         try:
             for attempt in range(3):
                 try:
-                    rj, new_sid = hermes_call_stream_full(text, sid, on_status, on_text, route)
+                    rj, new_sid = hermes_call_stream_full(text, sid, on_status, on_text, route,
+                                                          on_approval=on_approval)
                     break
                 except urllib.error.HTTPError as e:
                     if e.code != 429 or attempt == 2:
@@ -998,6 +1124,8 @@ class H(BaseHTTPRequestHandler):
         for w in workers:
             w.join(timeout=30)
         pump.join(timeout=15)
+        with _ACTIVE_LOCK:
+            _ACTIVE_PUSH = None
         msg = re.sub(r"\[react[^\]]*\]\s*", "", msg)   # any leaked meta-react bracket is never spoken
         out, mood = _reply_lines(msg)
         if stream_mood and not mood:

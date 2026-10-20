@@ -306,7 +306,7 @@ class VoiceTests(unittest.TestCase):
     """system_prompt() swaps ONLY the persona line: the gadget rules are identical in every
     voice, and the sasshole voice is the historical system prompt verbatim."""
 
-    RULES_MARKERS = ("one to three short spoken sentences", "[react:", "Moods:", "[image:", "SAFETY RULE", "No markdown")
+    RULES_MARKERS = ("one to three short spoken sentences", "[react:", "Moods:", "[image:", "DANGEROUS ACTIONS", "/approvals", "No markdown")
 
     def test_sasshole_is_the_historical_prompt_verbatim(self):
         self.assertEqual(relay.system_prompt("sasshole"), relay.SYSTEM)
