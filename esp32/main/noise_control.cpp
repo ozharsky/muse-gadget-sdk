@@ -72,6 +72,13 @@ static char s_noise_host[256] = NOISE_DEFAULT_HOST;
 #else
 #define SHOW_AGENT_NAME 0
 #endif
+// Extra daemon requests (noise_ctrl_req_*): Muse's chat, and display.draw_file
+// reading an image from the VM.
+#if CONFIG_MUSE_ENABLED || CONFIG_HOMEHUB_DISPLAY_COMMANDS
+#define NOISE_REQUESTS 1
+#else
+#define NOISE_REQUESTS 0
+#endif
 
 #define RECONNECT_MIN_MS          1000
 #define RECONNECT_MAX_MS          15000
@@ -103,6 +110,8 @@ static char s_noise_host[256] = NOISE_DEFAULT_HOST;
 // board's buffers ends the session (it can't be skipped: Noise's nonces and the ordered framer
 // would desync); the request in flight ends with NOISE_CTRL_REQ_TOO_LARGE, and the session
 // reconnects so the turn says "reply too long" instead of "lost connection".
+// display.draw_file asks for image ranges that fit these frames, so the VM's
+// files come in a few more requests rather than with 104 KB more PSRAM.
 #define SVC_FRAME_SCRATCH (SMALL_CONTROL_SESSION ? 17 * 1024 : 12288)
 
 // The ADV cannot allocate the session with the larger inbound buffers and the
@@ -987,8 +996,9 @@ static bool tunnel_send_body_inplace(void *vctx, uint8_t *buf, size_t headroom,
 
 // ---- Extra daemon requests (noise_ctrl_req_*) --------------------------------
 
-// Only Muse opens these; Link-only gateways get the empty stubs below.
-#if CONFIG_MUSE_ENABLED
+// Only Muse and display.draw_file open these; other Link-only gateways get the
+// empty stubs below.
+#if NOISE_REQUESTS
 
 // Stream ids from here up belong to these requests; lower ids are Link's own.
 #define REQ_STREAM_BASE 16
@@ -1190,7 +1200,7 @@ static void req_init(void) {
 static void req_init(void) {}
 static void req_end_all(void) {}
 static bool req_on_frame(const DecodedServiceFrame &) { return false; }
-#endif  // CONFIG_MUSE_ENABLED
+#endif  // NOISE_REQUESTS
 
 // ---- Agent identity ----------------------------------------------------------
 
@@ -1287,6 +1297,24 @@ static cJSON *string_param(const char *description) {
     }
     return param;
 }
+
+#if CONFIG_HOMEHUB_DISPLAY_COMMANDS
+// The optional `row` of display.draw_url and display.draw_file.
+static cJSON *row_params(void) {
+    cJSON *optional = cJSON_CreateObject();
+    cJSON *top_param = cJSON_CreateObject();
+    cJSON_AddStringToObject(top_param, "type", "integer");
+    cJSON_AddStringToObject(top_param, "description",
+#if CONFIG_HOMEHUB_LED_BACKEND_MUSE
+                            "Row to draw the top of the image at; by default a JPEG "
+                            "is centred down the screen and raw data starts at 0.");
+#else
+                            "Row to draw the top of the image at; default 0.");
+#endif
+    cJSON_AddItemToObject(optional, "row", top_param);
+    return optional;
+}
+#endif
 
 static void add_command(cJSON *commands, const char *name,
                         const char *description,
@@ -1410,22 +1438,27 @@ static char *build_register_json(void) {
         cJSON *url_required = cJSON_CreateObject();
         cJSON_AddItemToObject(url_required, "url",
                               string_param("http:// or https:// URL of the image."));
-        cJSON *url_optional = cJSON_CreateObject();
-        cJSON *top_param = cJSON_CreateObject();
-        cJSON_AddStringToObject(top_param, "type", "integer");
-        cJSON_AddStringToObject(top_param, "description",
-#if CONFIG_HOMEHUB_LED_BACKEND_MUSE
-                                "Row to draw the top of the image at; by default a JPEG "
-                                "is centred down the screen and raw data starts at 0.");
-#else
-                                "Row to draw the top of the image at; default 0.");
-#endif
-        cJSON_AddItemToObject(url_optional, "row", top_param);
-        add_command(commands, "display.draw_url", desc, url_required, url_optional);
+        add_command(commands, "display.draw_url", desc, url_required, row_params());
         // The six-colour e-paper may first finish a status screen refresh,
         // then takes as long again for the image.
         cJSON_AddNumberToObject(
             cJSON_GetObjectItem(commands, "display.draw_url"), "timeout_ms",
+            bits == 4 ? 120000 : 60000);
+        cJSON *path_required = cJSON_CreateObject();
+        cJSON_AddItemToObject(path_required, "path",
+                              string_param("Path of the image file on this VM, relative, "
+                                           "as the VM's file API takes it, e.g. "
+                                           "workspace/picture.jpg."));
+        add_command(commands, "display.draw_file",
+                    "Draw an image file from this VM on the screen. The same as "
+                    "display.draw_url, with the same image formats and screen, "
+                    "but takes a path on the VM instead of a URL: the device "
+                    "reads the file over its connection to the VM, so the file "
+                    "need not be on the internet. Replies when the image is "
+                    "drawn.",
+                    path_required, row_params());
+        cJSON_AddNumberToObject(
+            cJSON_GetObjectItem(commands, "display.draw_file"), "timeout_ms",
             bits == 4 ? 120000 : 60000);
 #if CONFIG_HOMEHUB_LED_BACKEND_MUSE
         {
@@ -2012,7 +2045,7 @@ static session_result_t run_session(stack_monitor_t *stack) {
     if (!rx_buf) rx_buf = static_cast<uint8_t *>(malloc(WS_RX_BUF_SIZE));
 
     // Crypto/framing scratch. PSRAM-preferred (with a heap fallback) so the
-    // 12 KB buffers don't land in internal SRAM — anything under
+    // buffers don't land in internal SRAM — anything under
     // CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL would otherwise be served from the
     // scarce internal pool that WiFi/TLS/lwIP also need.
     svc_scratch = static_cast<uint8_t *>(
@@ -2174,7 +2207,7 @@ static session_result_t run_session(stack_monitor_t *stack) {
                 auto &frame = inbound.frame;
                 bool is_tunnel = (frame.stream_id == TUNNEL_STREAM_ID);
                 if (req_on_frame(frame)) {
-                    // One of Muse's extra requests.
+                    // One of the extra requests (Muse, display.draw_file).
                 } else if (frame.stream_id == IDENTITY_STREAM_ID) {
                     identity_on_frame(identity, frame);
                 } else if (frame.kind == ServiceFrameKind::BodyChunk) {
@@ -2298,7 +2331,7 @@ static session_result_t run_session(stack_monitor_t *stack) {
             }
         }
 
-#if CONFIG_MUSE_ENABLED
+#if NOISE_REQUESTS
         {
             bool sent = false;
             if (!req_pump_tx(tls, session, svc_scratch, env_scratch, ws_buf, &sent)) {
@@ -2543,7 +2576,7 @@ extern "C" void noise_ctrl_send_command_result(
     queue_result(session_generation, request_id, result);
 }
 
-#if CONFIG_MUSE_ENABLED
+#if NOISE_REQUESTS
 extern "C" int64_t noise_ctrl_req_open(const char *verb, const char *path,
                                        const char *const *headers, bool end_body,
                                        noise_ctrl_req_cb cb, void *ctx) {
@@ -2606,4 +2639,12 @@ extern "C" void noise_ctrl_req_cancel(int64_t id) {
     req_op op = {req_op_kind::Cancel, false, id, nullptr, 0, nullptr, nullptr};
     req_put(op, pdMS_TO_TICKS(100));
 }
-#endif  // CONFIG_MUSE_ENABLED
+
+// What a reply frame leaves for its body in SVC_FRAME_SCRATCH, after the
+// framing and the response head (status and headers).
+#define REQ_FRAME_OVERHEAD 2048
+
+extern "C" size_t noise_ctrl_req_max_body(void) {
+    return SVC_FRAME_SCRATCH - REQ_FRAME_OVERHEAD;
+}
+#endif  // NOISE_REQUESTS
