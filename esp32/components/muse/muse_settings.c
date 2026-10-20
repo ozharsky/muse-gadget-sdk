@@ -217,7 +217,29 @@ void muse_settings_relay_lan(char out[64])
 
 void muse_settings_set_relay_lan(const char *lan)
 {
-    LOCKED(strlcpy(s.relay_lan, lan ? lan : "", sizeof(s.relay_lan)));
+    /* A bare host only: the URL is composed as http://<lan>:8788/turn. A pasted
+     * URL ("http://10.0.0.69:8788") used to be stored verbatim and produced
+     * http://http://10.0.0.69:8788:8788 -- every turn failed with a misleading
+     * OOM. Normalise, and reject anything that still is not a host. */
+    char norm[64] = "";
+    if (lan && *lan) {
+        const char *p = lan;
+        if (!strncmp(p, "http://", 7)) {
+            p += 7;
+        } else if (!strncmp(p, "https://", 8)) {
+            p += 8;
+        }
+        strlcpy(norm, p, sizeof(norm));
+        size_t n = strlen(norm);
+        while (n && (norm[n - 1] == '/' || norm[n - 1] == ' ')) {
+            norm[--n] = '\0';
+        }
+        if (strchr(norm, '/') || strchr(norm, ':') || strchr(norm, ' ')) {
+            ESP_LOGW(TAG, "relay lan '%s' is not a bare host; rejected", lan);
+            norm[0] = '\0';
+        }
+    }
+    LOCKED(strlcpy(s.relay_lan, norm, sizeof(s.relay_lan)));
     nvs_set_str(s_nvs, "relay_lan", s.relay_lan);
     nvs_commit(s_nvs);
     ESP_LOGI(TAG, "relay lan: '%s'", s.relay_lan);

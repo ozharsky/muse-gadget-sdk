@@ -565,6 +565,13 @@ static void on_choice_click(lv_event_t *e)
     choice_finish((int)(intptr_t)lv_event_get_user_data(e));
 }
 
+/* A question is open: the input task must not auto-sleep out from under it (an approval
+ * card asleep on the glass is an unanswerable card). */
+bool muse_ui_choice_open(void)
+{
+    return s_ready && s_choice.box != NULL;
+}
+
 /* Bench/ops: answer the open question programmatically, as if its button was tapped. */
 bool muse_ui_choice_answer(int idx)
 {

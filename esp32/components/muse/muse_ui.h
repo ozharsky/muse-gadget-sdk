@@ -65,6 +65,7 @@ bool muse_ui_choose(const char *prompt, const char *const *options, int n, int t
                     void *user);
 /* Answer the open choose dialog programmatically (bench / approvals). */
 bool muse_ui_choice_answer(int idx);
+bool muse_ui_choice_open(void);
 
 /* Bench testing, from any task: streams the screen over USB serial. */
 void muse_ui_request_snapshot(void);

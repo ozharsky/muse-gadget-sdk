@@ -408,6 +408,10 @@ static void check_sleep(void)
         set_asleep(false, "pairing");
         return;
     }
+    if (muse_ui_choice_open()) {
+        set_asleep(false, "question");
+        return;   /* a modal question owns the screen until answered */
+    }
     int after = muse_settings_sleep_s();
     float mode_t;
     if (after && !muse_state_asleep() && muse_state_mode(&mode_t) == MUSE_MODE_IDLE

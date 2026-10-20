@@ -2304,6 +2304,8 @@ static const char *relay_base_url(bool *remote);
 extern "C" bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms,
                                void (*done)(int, void *), void *user);
 extern "C" bool muse_ui_choice_answer(int idx);
+extern "C" void muse_input_poke(void);
+extern "C" void muse_state_set_asleep(bool asleep);
 
 /* ---- Gadget approvals: the relay pushes {"ask":{...}} into the turn stream and waits for
  * this card's tap (POST /approvals/<id>). The relay denies on its own timeout, so a card
@@ -2353,8 +2355,17 @@ static void approval_post(const char *id, const char *choice)
     char body[48];
     int n = snprintf(body, sizeof(body), "{\"choice\":\"%s\"}", choice);
     esp_http_client_set_post_field(h, body, n);
+    /* One retry: a funnel hiccup must not silently drop the user's tap (the relay
+     * then denies and the card was a lie). */
     esp_err_t err = esp_http_client_perform(h);
     int status = esp_http_client_get_status_code(h);
+    if (err != ESP_OK || status < 200 || status >= 300) {
+        ESP_LOGW(TAG, "ask %s: verdict post failed (%s %d), retrying once", id, esp_err_to_name(err), status);
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_http_client_set_post_field(h, body, n);
+        err = esp_http_client_perform(h);
+        status = esp_http_client_get_status_code(h);
+    }
     esp_http_client_cleanup(h);
     ESP_LOGI(TAG, "ask %s -> %s (%s %d)", id, choice, esp_err_to_name(err), status);
 }
@@ -2399,6 +2410,10 @@ static void handle_ask(cJSON *ask)
     s_ask_pick = -1;
     char prompt[240];
     snprintf(prompt, sizeof(prompt), "ALLOW THIS?\n%.150s", text ? text : "");
+    /* The UI task PAUSES while asleep: wake first or the card never draws (and the
+     * console stops reading, so a bench answer would wait for the wake). */
+    muse_state_set_asleep(false);
+    muse_input_poke();
     if (!muse_ui_choose(prompt, opts, s_ask_n, (int)((tsec + 5) * 1000), ask_done_cb, nullptr)) {
         ESP_LOGW(TAG, "ask %s: no UI for the card", id);
         return;
@@ -2558,6 +2573,11 @@ static bool hermes_request_stream(void)
         snprintf(url, sizeof(url), "%s/turn?stream=1%s", rem, agent_profile_query());
         remote = true;
         ESP_LOGI(TAG, "hermes: home relay unreachable, using the remote address");
+    }
+    if (strstr(url + 8, "://") || !strstr(url, "://")) {
+        ESP_LOGE(TAG, "hermes: bad relay address (%s)", url);
+        turn_fail("BAD RELAY ADDRESS");
+        return false;
     }
     char *line = static_cast<char *>(psram_alloc(160 * 1024));   /* a long sentence's b64 MP3 can be ~60-100K */
     if (!line) {
