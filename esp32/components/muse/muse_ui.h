@@ -63,6 +63,8 @@ void muse_ui_agent_switch(bool hermes);
 typedef void (*muse_ui_choice_cb)(int index, void *user);
 bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms, muse_ui_choice_cb done,
                     void *user);
+/* Answer the open choose dialog programmatically (bench / approvals). */
+bool muse_ui_choice_answer(int idx);
 
 /* Bench testing, from any task: streams the screen over USB serial. */
 void muse_ui_request_snapshot(void);

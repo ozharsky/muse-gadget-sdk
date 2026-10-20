@@ -84,6 +84,7 @@ void muse_ui_bench_demo(bool enabled);
 #endif
 void muse_ui_show_notifications(void);
 void muse_ui_face_tap(void);
+bool muse_chat_ask_answer(const char *choice);
 void muse_ui_face_long(void);
 
 static void draw_done(const draw_result_t *r, void *user)
@@ -1174,6 +1175,17 @@ static bool bench_ui_command(const char *line)
          * for the real path with an agent). Opens nothing -- there is no relay id behind it. */
         muse_state_set_caption("%s", line + 6);
         muse_state_poke();
+        return true;
+    }
+    if (!strncmp(line, "ask=", 4)) {
+        /* Bench: answer the open approval card without a finger (>ask=once|always|deny). */
+        const char *c = line + 4;
+        if (!strcmp(c, "allow")) {
+            c = "once";
+        }
+        bool ok = muse_chat_ask_answer(c);
+        printf("@ask %s %s\n", c, ok ? "answered" : "none");
+        fflush(stdout);
         return true;
     }
     if (!strcmp(line, "tap") || !strncmp(line, "tap=", 4)) {

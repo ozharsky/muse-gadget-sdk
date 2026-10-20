@@ -62,6 +62,7 @@
 #include "freertos/queue.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "lwip/sockets.h"
 #include "esp_netif.h"
 
@@ -2287,10 +2288,147 @@ static void hermes_react_show(void)
     }
 }
 
+/* ---- Gadget approvals: the relay pushes {"ask":{...}} into the turn stream and waits for
+ * this card's tap (POST /approvals/<id>). The relay denies on its own timeout, so a card
+ * nobody answers is a "no". ---- */
+
+static const char *relay_base_url(bool *remote);
+extern "C" bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms,
+                               void (*done)(int, void *), void *user);
+extern "C" bool muse_ui_choice_answer(int idx);
+
+/* ---- Gadget approvals: the relay pushes {"ask":{...}} into the turn stream and waits for
+ * this card's tap (POST /approvals/<id>). The relay denies on its own timeout, so a card
+ * nobody answers is a "no". ---- */
+
+static SemaphoreHandle_t s_ask_sem;
+static volatile int s_ask_pick;
+static char s_ask_id[16];
+static char s_ask_choice[4][8];
+static int s_ask_n;
+
+static void ask_done_cb(int idx, void *user)
+{
+    (void)user;
+    s_ask_pick = idx;
+    if (s_ask_sem) {
+        xSemaphoreGive(s_ask_sem);
+    }
+}
+
+static const char *ask_label(const char *c)
+{
+    if (!strcmp(c, "once")) return "ALLOW ONCE";
+    if (!strcmp(c, "session")) return "ALLOW SESSION";
+    if (!strcmp(c, "always")) return "ALLOW ALWAYS";
+    return "DENY";
+}
+
+static void approval_post(const char *id, const char *choice)
+{
+    char url[MUSE_RELAY_URL_MAX + 48];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/approvals/%s", relay_base_url(&remote), id);
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 8000;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) {
+        return;
+    }
+    esp_http_client_set_header(h, "Content-Type", "application/json");
+    esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
+    char body[48];
+    int n = snprintf(body, sizeof(body), "{\"choice\":\"%s\"}", choice);
+    esp_http_client_set_post_field(h, body, n);
+    esp_err_t err = esp_http_client_perform(h);
+    int status = esp_http_client_get_status_code(h);
+    esp_http_client_cleanup(h);
+    ESP_LOGI(TAG, "ask %s -> %s (%s %d)", id, choice, esp_err_to_name(err), status);
+}
+
+static void handle_ask(cJSON *ask)
+{
+    const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(ask, "id"));
+    const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(ask, "text"));
+    double tsec = 45;
+    cJSON *tj = cJSON_GetObjectItem(ask, "timeout");
+    if (cJSON_IsNumber(tj)) {
+        tsec = tj->valuedouble;
+    }
+    if (tsec < 8) tsec = 8;
+    if (tsec > 120) tsec = 120;
+    if (!id || !id[0]) {
+        return;
+    }
+    const char *opts[4];
+    s_ask_n = 0;
+    cJSON *it = nullptr;
+    cJSON_ArrayForEach(it, cJSON_GetObjectItem(ask, "choices")) {
+        const char *c = cJSON_GetStringValue(it);
+        if (!c || s_ask_n >= 4) {
+            continue;
+        }
+        strlcpy(s_ask_choice[s_ask_n], c, sizeof(s_ask_choice[s_ask_n]));
+        opts[s_ask_n] = ask_label(s_ask_choice[s_ask_n]);
+        s_ask_n++;
+    }
+    if (s_ask_n < 2) {
+        strlcpy(s_ask_choice[0], "once", 8);
+        opts[0] = "ALLOW";
+        strlcpy(s_ask_choice[1], "deny", 8);
+        opts[1] = "DENY";
+        s_ask_n = 2;
+    }
+    strlcpy(s_ask_id, id, sizeof(s_ask_id));
+    if (!s_ask_sem) {
+        s_ask_sem = xSemaphoreCreateBinary();
+    }
+    s_ask_pick = -1;
+    char prompt[240];
+    snprintf(prompt, sizeof(prompt), "ALLOW THIS?\n%.150s", text ? text : "");
+    ESP_LOGI(TAG, "ask %s: %s", id, text ? text : "");
+    if (!muse_ui_choose(prompt, opts, s_ask_n, (int)((tsec + 5) * 1000), ask_done_cb, nullptr)) {
+        ESP_LOGW(TAG, "ask %s: no UI for the card", id);
+        return;
+    }
+    int idx = -1;
+    if (s_ask_sem && xSemaphoreTake(s_ask_sem, pdMS_TO_TICKS((int)((tsec + 6) * 1000))) == pdTRUE) {
+        idx = s_ask_pick;
+    }
+    if (idx < 0 || idx >= s_ask_n) {
+        ESP_LOGI(TAG, "ask %s: no tap (relay denies)", id);
+        return;
+    }
+    approval_post(s_ask_id, s_ask_choice[idx]);
+}
+
+/* Bench: answer the open approval card as if tapped ("once"/"always"/"deny"/...). */
+extern "C" bool muse_chat_ask_answer(const char *choice)
+{
+    int idx = -1;
+    for (int i = 0; i < s_ask_n; i++) {
+        if (!strcmp(s_ask_choice[i], choice)) {
+            idx = i;
+            break;
+        }
+    }
+    return idx >= 0 && muse_ui_choice_answer(idx);
+}
+
 /* NDJSON line -> one action. Lines: heard / status / tts (+ the final reply/react/image line). */
 static void hermes_line(cJSON *j)
 {
     if (s_turn.gen != s_gen.load()) {
+        return;
+    }
+    cJSON *askj = cJSON_GetObjectItem(j, "ask");
+    if (cJSON_IsObject(askj)) {
+        handle_ask(askj);
         return;
     }
     const char *heard = cJSON_GetStringValue(cJSON_GetObjectItem(j, "heard"));

@@ -565,6 +565,18 @@ static void on_choice_click(lv_event_t *e)
     choice_finish((int)(intptr_t)lv_event_get_user_data(e));
 }
 
+/* Bench/ops: answer the open question programmatically, as if its button was tapped. */
+bool muse_ui_choice_answer(int idx)
+{
+    if (!s_ready || !s_choice.box) {
+        return false;
+    }
+    muse_board->display_lock(-1);
+    choice_finish(idx);
+    muse_board->display_unlock();
+    return true;
+}
+
 bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms, muse_ui_choice_cb done,
                     void *user)
 {
