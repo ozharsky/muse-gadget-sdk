@@ -102,6 +102,14 @@ static void id_from_url(const char *url, char *out, size_t cap)
 int muse_hatch_api_find_vm(const char *device_token, const char *want_vm, muse_hatch_vm_t *out)
 {
     memset(out, 0, sizeof(*out));
+    /* An EMPTY token here used to go out as a header-less request and come back a 401,
+     * which the app-side caller read as "the token was rejected" and pushed down the
+     * refresh->unpair path. No token is a transient state (boot, just-unpaired), never
+     * an auth failure. */
+    if (!device_token || !*device_token) {
+        ESP_LOGW(TAG, "find_vm: no device token yet; deferring");
+        return MUSE_HATCH_API_FAILED;
+    }
     size_t auth_len = strlen(device_token) + 8;
     char *auth = malloc(auth_len);
     resp_t r = { .buf = heap_caps_malloc(MAX_RESPONSE, MALLOC_CAP_SPIRAM) };

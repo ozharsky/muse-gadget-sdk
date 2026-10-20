@@ -143,6 +143,28 @@ static int64_t s_last_periodic_token_refresh_us = 0;
 static bool s_sdk_token_report_attempted = false;
 static int64_t s_vm_auth_refresh_interval_us = VM_AUTH_REFRESH_RETRY_INTERVAL_US;
 static uint8_t s_vm_auth_refusals = 0;
+/* A single refused refresh is not proof the device was revoked: server-side hiccups and
+ * half-sent requests both produce one. Require two refusals at least 2 minutes apart --
+ * a success in between clears the count. (2026-10-19: one refusal wiped a working pairing
+ * and, before the keep-WiFi fix, the network with it.) */
+static uint8_t s_revoke_strikes = 0;
+static int64_t s_revoke_first_us = 0;
+
+static bool revocation_confirmed(void) {
+    int64_t now = esp_timer_get_time();
+    if (s_revoke_strikes == 0) {
+        s_revoke_strikes = 1;
+        s_revoke_first_us = now;
+        ESP_LOGW(TAG, "credential refused once; retrying before unpairing");
+        return false;
+    }
+    if (now - s_revoke_first_us < 120 * 1000000LL) {
+        ESP_LOGW(TAG, "credential refused again after %llds; still treating it as transient",
+                 (long long)((now - s_revoke_first_us) / 1000000));
+        return false;
+    }
+    return true;
+}
 // Uptime of the last refusal counted, so the edge and the fetch path reporting the same
 // bad credential within a second do not climb the backoff ladder twice as fast.
 static int64_t s_last_vm_auth_refusal_us = 0;
@@ -939,6 +961,7 @@ static bool ensure_access_token_ready_with_gate_held(
         ok = store_token_pair_unlocked(tokens.access_token, tokens.refresh_token);
         vm_device_tokens_free(&tokens);
         ESP_LOGI(TAG, "device token refresh stored (method=%d)", (int)method);
+        s_revoke_strikes = 0;   /* a working refresh clears the strike */
         goto done;
     }
     vm_device_tokens_free(&tokens);
@@ -960,7 +983,7 @@ done:
     free(access);
     free(refresh);
     auth_lock_give();
-    if (revoked) {
+    if (revoked && revocation_confirmed()) {
         defer_token_revocation_reset();
     }
     return ok;
