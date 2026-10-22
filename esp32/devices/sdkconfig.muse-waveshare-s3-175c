@@ -65,3 +65,17 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 # actually slept, and how long each power lock kept the chip awake.
 CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
 CONFIG_PM_PROFILING=y
+
+# Same art and voice tunings as the 1.43C (both panels are 466 px); the
+# pre-flash secrets gate (check_sdkconfig.py) refuses a build missing any.
+CONFIG_MUSE_AVATAR_CELL_PX=6
+CONFIG_MUSE_AVATAR_X_OFFSET=3
+CONFIG_MUSE_AVATAR_Y_OFFSET=2
+CONFIG_MUSE_VOICE_FX=y
+CONFIG_MUSE_TTS_RATE_PCT=114
+CONFIG_MUSE_TTS_PITCH_PCT=70
+
+# The relay's LAN address, same door as the 1.43C; the backup
+# (NZXT funnel) and everything else are runtime settings.
+CONFIG_MUSE_HERMES_URL="http://192.168.0.160:8788"
+CONFIG_MUSE_HERMES_URL_REMOTE="https://nzxt.tailcb1d23.ts.net:8443"
