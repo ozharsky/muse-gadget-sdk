@@ -146,6 +146,8 @@ static bool s_ready;
 static lv_timer_t *s_frame_timer;
 static volatile int s_frame_ms_want;   /* from any task; applied by frame_tick */
 static int s_frame_ms_applied;
+static volatile int s_face_dx, s_face_dy;   /* parallax request (cells) */
+static int s_face_dx_applied, s_face_dy_applied;
 static volatile int64_t s_last_frame_us;   /* when the UI task last ran a frame: see stall_check */
 
 static float s_level;
@@ -654,6 +656,14 @@ void muse_ui_set_frame_ms(int ms)
     if (ms >= 10 && ms <= 200) {
         s_frame_ms_want = ms;
     }
+}
+
+void muse_ui_set_face_off(int dx, int dy)
+{
+    if (dx > 3) dx = 3; else if (dx < -3) dx = -3;
+    if (dy > 3) dy = 3; else if (dy < -3) dy = -3;
+    s_face_dx = dx;
+    s_face_dy = dy;
 }
 
 bool muse_ui_react(const char *name)
@@ -2066,6 +2076,14 @@ static void frame_tick(lv_timer_t *timer)
         lv_timer_set_period(timer, want);
         s_frame_ms_applied = want;
         ESP_LOGI(TAG, "face cadence %d ms (%d fps)", want, 1000 / want);
+    }
+    if (s_face_dx != s_face_dx_applied || s_face_dy != s_face_dy_applied) {
+        s_face_dx_applied = s_face_dx;
+        s_face_dy_applied = s_face_dy;
+        if (s_canvas) {
+            lv_obj_set_style_translate_x(s_canvas, s_face_dx_applied * 2, 0);
+            lv_obj_set_style_translate_y(s_canvas, s_face_dy_applied * 2, 0);
+        }
     }
     s_last_frame_us = esp_timer_get_time();
     if (s_choice.box && (int32_t)(lv_tick_get() - s_choice.until) > 0) {

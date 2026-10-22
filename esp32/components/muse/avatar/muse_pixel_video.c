@@ -19,6 +19,7 @@
 extern int64_t esp_timer_get_time(void);   /* host harness provides the clock */
 #endif
 #include "muse_pixel.h"
+#include "muse_assets.h"
 #include "muse_pixel_video.h"
 #include "bench_videos.h"
 
@@ -43,6 +44,10 @@ static int s_req_loops;
 
 /* Player state (LVGL task only). */
 static const bench_video_t *s_clip;     /* NULL = faces own the canvas */
+static muse_asset_t s_asset;            /* the partition clip being played */
+static bool s_asset_active;
+static muse_asset_t s_req_asset;        /* pending request (console task owns s_req) */
+static bool s_req_is_asset;
 static int s_loops_left;                /* -1 = play forever */
 static int64_t s_start_us;
 static int s_frame_last;
@@ -86,9 +91,14 @@ bool muse_pixel_video(const char *name)
     }
     const bench_video_t *v = find(name);
     if (!v) {
-        return false;
+        if (!muse_assets_open(name, &s_req_asset)) {
+            return false;
+        }
+        s_req_is_asset = true;
+    } else {
+        s_req_is_asset = false;
+        s_req_clip = v;
     }
-    s_req_clip = v;
     s_req_loops = -1;
     s_req = 1;
     return true;
@@ -101,9 +111,14 @@ bool muse_pixel_video_play(const char *name, int loops)
     }
     const bench_video_t *v = find(name);
     if (!v) {
-        return false;
+        if (!muse_assets_open(name, &s_req_asset)) {
+            return false;
+        }
+        s_req_is_asset = true;
+    } else {
+        s_req_is_asset = false;
+        s_req_clip = v;
     }
-    s_req_clip = v;
     s_req_loops = loops;
     s_req = 1;
     return true;
@@ -111,7 +126,7 @@ bool muse_pixel_video_play(const char *name, int loops)
 
 bool muse_pixel_video_active(void)
 {
-    return s_clip != NULL;
+    return s_clip != NULL || s_asset_active;
 }
 
 static void apply_pending(void)
@@ -123,12 +138,28 @@ static void apply_pending(void)
     s_req = 0;
     if (r == 2) {
         s_clip = NULL;
+        s_asset_active = false;
+        return;
+    }
+    if (s_req_is_asset) {
+        s_asset = s_req_asset;
+        s_clip = NULL;
+        s_asset_active = true;
+        s_loops_left = s_req_loops;
+        s_start_us = esp_timer_get_time();
+        s_frame_last = -1;
+        s_pal_n = s_asset.npal < 32 ? s_asset.npal : 32;
+        for (int i = 0; i < s_pal_n; i++) {
+            s_pal[i] = s_asset.pal[i];
+            s_pal_dim[i] = dim565(s_asset.pal[i]);
+        }
         return;
     }
     const bench_video_t *v = s_req_clip;
     if (!v) {
         return;
     }
+    s_asset_active = false;
     s_clip = v;
     s_loops_left = s_req_loops;
     s_start_us = esp_timer_get_time();
@@ -168,22 +199,30 @@ void muse_pixel_video_render(void)
 {
     apply_pending();
     const bench_video_t *v = s_clip;
-    if (!v) {
+    if (!v && !s_asset_active) {
         return;
     }
+    const int fps = s_asset_active ? s_asset.fps : v->fps;
+    const int count = s_asset_active ? s_asset.frames : v->count;
     int64_t us = esp_timer_get_time() - s_start_us;
     /* Frame clock from MICROSECONDS, not truncated ms: ms-truncation biases every frame
      * late by up to 1 ms which, at 12 fps, turns into an occasional repeat or skip
      * (the harness caught frame 2 skipped at exact step boundaries). */
-    int64_t fidx = us * (int64_t)v->fps / 1000000;
-    if (s_loops_left >= 0 && fidx >= (int64_t)v->count * s_loops_left) {
+    int64_t fidx = us * (int64_t)fps / 1000000;
+    if (s_loops_left >= 0 && fidx >= (int64_t)count * s_loops_left) {
         s_clip = NULL;                                  /* a reaction clip finished */
+        s_asset_active = false;
         return;
     }
-    int fi = (int)(fidx % v->count);
+    int fi = (int)(fidx % count);
     if (fi != s_frame_last) {
         s_frame_last = fi;
-        decode_frame(v, fi);
+        if (s_asset_active) {
+            s_decodes++;
+            muse_assets_frame(&s_asset, fi, s_fb, (int)sizeof(s_fb));
+        } else {
+            decode_frame(v, fi);
+        }
     }
 }
 

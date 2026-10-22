@@ -291,4 +291,11 @@ menu "Muse"
             playing, and shake it for a reaction. Only the Waveshare 1.75 and 1.75C
             carry the QMI8658 on the BSP I2C bus; other boards leave this off.
 
+    config MUSE_JPEG_BENCH
+        bool "JPEG decode benchmark (dev)"
+        default n
+        help
+            Embeds three test images and adds >jpeg.bench, which reports decode times
+            at 232/300/466 px. Links esp_new_jpeg (the only user of it today).
+
 endmenu

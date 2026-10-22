@@ -82,3 +82,7 @@ CONFIG_MUSE_HERMES_URL_REMOTE="https://nzxt.tailcb1d23.ts.net:8443"
 
 # Motion gestures: tilt to wake, flip to stop a reply, shake to react.
 CONFIG_MUSE_IMU=y
+
+# Dev bench: >jpeg.bench (video-tier feasibility).
+CONFIG_MUSE_JPEG_BENCH=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_32mb.csv"

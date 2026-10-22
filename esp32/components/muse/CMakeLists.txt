@@ -32,6 +32,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_audio.c"
         "muse_voice_fx.c"
         "muse_pmu.c"
+        "muse_assets.c"
         "muse_imu.c"
         "muse_imu_math.c"
         "muse_input.c"
@@ -49,6 +50,10 @@ if(CONFIG_MUSE_ENABLED)
     list(APPEND embed "transition.pcm")   # the agent-switch sound (muse_voice.c)
     list(APPEND embed "notif.pcm")        # the notification chime (muse_voice.c)
     list(APPEND embed "battery.pcm")      # the low-battery cue (muse_voice.c)
+    if(CONFIG_MUSE_JPEG_BENCH)
+        list(APPEND srcs "muse_jpeg_bench.c")
+        list(APPEND embed "bench232.jpg" "bench300.jpg" "bench466.jpg")   # >jpeg.bench
+    endif()
     if(CONFIG_MUSE_HATCH)
         list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
         list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
@@ -128,7 +133,7 @@ set(muse_priv_requires
     bt esp-tls mbedtls esp_app_format esp_http_client
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
-    esp_driver_pcnt esp_hw_support)
+    esp_driver_pcnt esp_hw_support spi_flash)
 list(APPEND muse_priv_requires camera)
 
 idf_component_register(

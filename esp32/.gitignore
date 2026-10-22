@@ -64,3 +64,4 @@ __pycache__/
 .gradle/
 .idea/
 local.properties
+assets.bin

@@ -65,6 +65,12 @@ bool muse_ui_react(const char *name);
  */
 void muse_ui_set_frame_ms(int ms);
 
+/*
+ * Nudges the face against the bezel, in 2 px steps (clamped to +-3). Any task
+ * may call it; the LVGL task applies it. 0,0 is the rest pose.
+ */
+void muse_ui_set_face_off(int dx, int dy);
+
 /* A short full-screen animation when the agent is switched: rings sweep round, the new agent's name lights up. */
 void muse_ui_agent_switch(bool hermes);
 typedef void (*muse_ui_choice_cb)(int index, void *user);

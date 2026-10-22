@@ -57,6 +57,10 @@
     CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
 #define MUSE_HAS_LCD_BANDS 1
 #include "boards/muse_lcd_bands.h"   /* >lcd.swallow fault injection */
+#include "muse_assets.h"
+#if CONFIG_MUSE_JPEG_BENCH
+#include "muse_jpeg_bench.h"
+#endif
 #endif
 
 /* Bench hook: "draw=URL" draws an image the way Muse's display.draw_url command does
@@ -615,6 +619,17 @@ static void input_task(void *arg)
             if ((imu & MUSE_IMU_FLIP) && !muse_state_asleep()) {
                 muse_voice_request_stop();
             }
+            /* Parallax: the face leans against the bezel as the device tilts
+             * (gravity in the screen plane, in 2 px steps). */
+            if (!muse_state_asleep()) {
+                int16_t mg[3];
+                if (muse_imu_read(mg) == ESP_OK) {
+                    int dx = mg[0] / 300, dy = -mg[1] / 300;
+                    if (dx > 3) dx = 3; else if (dx < -3) dx = -3;
+                    if (dy > 3) dy = 3; else if (dy < -3) dy = -3;
+                    muse_ui_set_face_off(dx, dy);
+                }
+            }
         }
 #endif
 
@@ -902,6 +917,26 @@ static bool console_command(char *line, bool whole)
         printf("@batt.sim %d%s\n", low_bench_pct,
                low_bench_pct < 0 ? " (real gauge)" : "");
         fflush(stdout);
+        return true;
+    }
+#if CONFIG_MUSE_JPEG_BENCH
+    if (!strcmp(line, "assets")) {
+        muse_assets_report();
+        return true;
+    }
+    if (!strcmp(line, "jpeg.bench")) {
+        muse_jpeg_bench();
+        return true;
+    }
+#endif
+    if (!strncmp(line, "parallax=", 9)) {
+        int dx = 0, dy = 0;
+        if (sscanf(line + 9, "%d,%d", &dx, &dy) == 2) {
+            muse_ui_set_face_off(dx, dy);
+            printf("@parallax %d,%d\n", dx, dy);
+        } else {
+            printf("@parallax needs x,y\n");
+        }
         return true;
     }
     if (!strncmp(line, "fps=", 4)) {
