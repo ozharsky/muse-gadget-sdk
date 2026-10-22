@@ -143,6 +143,9 @@ static uint16_t *s_image_buf;
 static lv_area_t s_image_area;
 static bool s_image_dirty;
 static bool s_ready;
+static lv_timer_t *s_frame_timer;
+static volatile int s_frame_ms_want;   /* from any task; applied by frame_tick */
+static int s_frame_ms_applied;
 static volatile int64_t s_last_frame_us;   /* when the UI task last ran a frame: see stall_check */
 
 static float s_level;
@@ -645,6 +648,13 @@ bool muse_ui_choose(const char *prompt, const char *const *options, int n, int t
 
 /* Muse's avatar.react command: the avatar's own file supplies the moods, if it has any. */
 extern bool muse_pixel_react(const char *name) __attribute__((weak));
+
+void muse_ui_set_frame_ms(int ms)
+{
+    if (ms >= 10 && ms <= 200) {
+        s_frame_ms_want = ms;
+    }
+}
 
 bool muse_ui_react(const char *name)
 {
@@ -2051,6 +2061,12 @@ void muse_ui_bench_demo(bool enabled)
 
 static void frame_tick(lv_timer_t *timer)
 {
+    int want = s_frame_ms_want;
+    if (want && want != s_frame_ms_applied) {
+        lv_timer_set_period(timer, want);
+        s_frame_ms_applied = want;
+        ESP_LOGI(TAG, "face cadence %d ms (%d fps)", want, 1000 / want);
+    }
     s_last_frame_us = esp_timer_get_time();
     if (s_choice.box && (int32_t)(lv_tick_get() - s_choice.until) > 0) {
         choice_finish(-1);
@@ -2184,7 +2200,8 @@ esp_err_t muse_ui_start(void)
         muse_menu_build(lv_screen_active(), s_w, s_h);
     }
     build_overlays();
-    lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
+    s_frame_timer = lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
+    s_frame_ms_applied = muse_board->frame_ms;
     s_ready = true;
     {
         static esp_timer_handle_t s_stall_timer;

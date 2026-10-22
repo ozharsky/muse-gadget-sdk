@@ -657,6 +657,21 @@ static void input_task(void *arg)
                 muse_state_set_power(&p);
                 muse_battery_note_power(&p, muse_state_on_battery());
                 low_battery_check(&p);
+                /* Face cadence follows the power source: the panel has the
+                 * headroom for 40 fps on USB; on the cell, 25 fps. Only the
+                 * board's own base period is ever sped up, so a board compiled
+                 * slower (1.43C: 40 ms) never changes. */
+                {
+                    static int last_ms;
+                    int want = muse_board->frame_ms;
+                    if (muse_state_on_battery() && want < 40) {
+                        want = 40;
+                    }
+                    if (want != last_ms) {
+                        last_ms = want;
+                        muse_ui_set_frame_ms(want);
+                    }
+                }
             }
         }
 
@@ -887,6 +902,12 @@ static bool console_command(char *line, bool whole)
         printf("@batt.sim %d%s\n", low_bench_pct,
                low_bench_pct < 0 ? " (real gauge)" : "");
         fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "fps=", 4)) {
+        int ms = atoi(line + 4);
+        muse_ui_set_frame_ms(ms);
+        printf("@fps %d ms requested (%d fps when applied)\n", ms, ms > 0 ? 1000 / ms : 0);
         return true;
     }
     if (!strncmp(line, "flush.bench", 11)) {

@@ -58,6 +58,13 @@ void muse_ui_camera_hint(bool visible);
  */
 bool muse_ui_react(const char *name);
 
+/*
+ * Face animation period, in ms (25 = 40 fps). Safe from any task: it only sets
+ * a request that the LVGL task applies on its next frame. The input task sets
+ * it from the power source (40 fps on USB, 25 on battery).
+ */
+void muse_ui_set_frame_ms(int ms);
+
 /* A short full-screen animation when the agent is switched: rings sweep round, the new agent's name lights up. */
 void muse_ui_agent_switch(bool hermes);
 typedef void (*muse_ui_choice_cb)(int index, void *user);
