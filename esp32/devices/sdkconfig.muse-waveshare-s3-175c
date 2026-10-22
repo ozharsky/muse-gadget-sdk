@@ -79,3 +79,6 @@ CONFIG_MUSE_TTS_PITCH_PCT=70
 # (NZXT funnel) and everything else are runtime settings.
 CONFIG_MUSE_HERMES_URL="http://192.168.0.160:8788"
 CONFIG_MUSE_HERMES_URL_REMOTE="https://nzxt.tailcb1d23.ts.net:8443"
+
+# Motion gestures: tilt to wake, flip to stop a reply, shake to react.
+CONFIG_MUSE_IMU=y

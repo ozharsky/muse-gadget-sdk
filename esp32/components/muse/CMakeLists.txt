@@ -32,6 +32,8 @@ if(CONFIG_MUSE_ENABLED)
         "muse_audio.c"
         "muse_voice_fx.c"
         "muse_pmu.c"
+        "muse_imu.c"
+        "muse_imu_math.c"
         "muse_input.c"
         "muse_menu.c"
         "muse_voice.c"

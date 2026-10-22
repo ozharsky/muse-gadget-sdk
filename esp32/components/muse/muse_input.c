@@ -37,6 +37,7 @@
 #include "muse_board.h"
 #include "muse_chat.h"
 #include "muse_console.h"
+#include "muse_imu.h"
 #include "muse_link.h"
 #include "muse_mem.h"
 #include "muse_menu.h"
@@ -595,6 +596,28 @@ static void input_task(void *arg)
             aux_key(aux_down, false);
         }
 
+#if CONFIG_MUSE_IMU
+        /* Motion gestures: a lift wakes the screen, a flip silences a reply that is
+         * playing, a shake gets a look. Polled here so the input task owns the state
+         * changes (waking outside it leaves the display paused). */
+        {
+            unsigned imu = muse_imu_poll(esp_timer_get_time(), muse_state_asleep());
+            if (imu & MUSE_IMU_TILT) {
+                if (muse_state_asleep()) {
+                    set_asleep(false, "tilt");
+                } else {
+                    muse_ui_react("alert");
+                }
+            }
+            if ((imu & MUSE_IMU_SHAKE) && !muse_state_asleep()) {
+                muse_ui_react("confused");
+            }
+            if ((imu & MUSE_IMU_FLIP) && !muse_state_asleep()) {
+                muse_voice_request_stop();
+            }
+        }
+#endif
+
         if (s_power_off_requested) {
             s_power_off_requested = false;
             power_off();
@@ -864,6 +887,13 @@ static bool console_command(char *line, bool whole)
         printf("@batt.sim %d%s\n", low_bench_pct,
                low_bench_pct < 0 ? " (real gauge)" : "");
         fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "imu")) {
+        int16_t mg[3] = { 0 };
+        esp_err_t err = muse_imu_read(mg);
+        printf("@imu %s present=%d %d %d %d\n", esp_err_to_name(err), muse_imu_present(),
+               mg[0], mg[1], mg[2]);
         return true;
     }
     if (!strcmp(line, "batt.cue")) {

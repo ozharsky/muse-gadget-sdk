@@ -1160,6 +1160,8 @@ static void tick_sleep(void)
 
 /* ---------- Battery ---------- */
 
+static lv_obj_t *s_batt_power;
+
 static void on_battery_reset(lv_event_t *e)
 {
     (void)e;
@@ -1174,6 +1176,7 @@ static void build_battery_page(lv_obj_t *tile)
     s_batt_shown_us = 0;
     s_batt_status = note(list, "");
     s_batt_level = info_row(list, "Battery");
+    s_batt_power = info_row(list, "Power");
     s_batt_drain = info_row(list, "Used");
     s_batt_full = info_row(list, "A full charge");
     s_batt_off = info_row(list, "Screen off");
@@ -1230,6 +1233,17 @@ static void tick_battery(void)
         snprintf(buf, sizeof(buf), "%s%d%%", p.charging ? LV_SYMBOL_CHARGE " " : "", p.battery_pct);
     }
     set_text(s_batt_level, buf);
+
+    if (p.charging) {
+        strlcpy(buf, "Charging", sizeof(buf));
+    } else if (p.usb) {
+        strlcpy(buf, "On USB, not charging", sizeof(buf));
+    } else if (p.battery_pct < 0) {
+        strlcpy(buf, "No battery", sizeof(buf));
+    } else {
+        strlcpy(buf, "On battery", sizeof(buf));
+    }
+    set_text(s_batt_power, buf);
 
     int used = b.pct_start - b.pct_now, rate10, full_h;
     if (!b.started) {

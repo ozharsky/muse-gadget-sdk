@@ -119,13 +119,14 @@ static int build_status(char *out, size_t len)
     json_str(s->last_e, sizeof(s->last_e), last_snap);
 
     int n = snprintf(out, len,
-                    "{\"name\":\"%s\",\"fw\":\"%s\",\"battery\":%d,"
+                    "{\"name\":\"%s\",\"fw\":\"%s\",\"battery\":%d,\"charging\":%s,\"usb\":%s,"
                     "\"wifi\":{\"on\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d},"
                     "\"hatch\":{\"host\":\"%s\",\"vm\":\"%s\",\"token\":%s,\"state\":\"%s\"},"
                     "\"link\":{\"paired\":%s,\"state\":\"%s\"},"
                     "\"relay\":{\"lan\":\"%s\",\"remote\":\"%s\",\"token\":%s},"
                     "\"volume\":%d,\"speaker\":%s,\"mic_gain\":%d,\"brightness\":%d,\"sleep\":%d,\"last\":\"%s\"}",
                     s_name, esp_app_get_description()->version, p.battery_pct,
+                    p.charging ? "true" : "false", p.usb ? "true" : "false",
                     muse_settings_wifi_on() ? "true" : "false", wifi_state_name(w.state), s->ssid_e, w.ip, w.rssi,
                     s->host_e, s->vm_e, muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
                     muse_link_hatch_linked() ? "true" : "false", muse_link_state_name(muse_link_state()),

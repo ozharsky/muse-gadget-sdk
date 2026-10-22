@@ -283,4 +283,12 @@ menu "Muse"
         depends on MUSE_HATCH
         default "en-US-Chirp3-HD-Algenib"
 
+    config MUSE_IMU
+        bool "QMI8658 motion gestures (Waveshare 1.75/1.75C)"
+        default n
+        help
+            Tilt the device to wake the screen, flip it over to stop a reply that is
+            playing, and shake it for a reaction. Only the Waveshare 1.75 and 1.75C
+            carry the QMI8658 on the BSP I2C bus; other boards leave this off.
+
 endmenu

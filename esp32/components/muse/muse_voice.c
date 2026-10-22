@@ -71,6 +71,7 @@ static const char *TAG = "muse_voice";
 static QueueHandle_t s_queue;
 static volatile bool s_monitor;
 static volatile float s_monitor_db = -100.0f;
+static volatile bool s_stop_reply;   /* a flip stops the reply (muse_imu) */
 static volatile bool s_chirp;
 static volatile bool s_transition;
 static volatile bool s_loopback;
@@ -413,6 +414,13 @@ static bool hatch_reply(bool *delivered)
             muse_state_set_level(0);
             return true;
         }
+        if (s_stop_reply) {
+            s_stop_reply = false;
+            ESP_LOGI(TAG, "reply stopped (device flipped)");
+            muse_hatch_turn_cancel();
+            muse_state_set_level(0);
+            return true;
+        }
         size_t n = muse_hatch_turn_read(buf, MUSE_AUDIO_CHUNK, speaking || done ? 0 : 20);
         if (n) {
             if (!speaking) {
@@ -465,6 +473,12 @@ static const char *not_ready_reason(void)
 }
 
 static volatile bool s_resting;
+
+/* A flip of the device stops whatever is playing, like a press does. */
+void muse_voice_request_stop(void)
+{
+    s_stop_reply = true;
+}
 
 /*
  * Asleep on battery with nothing to do: power the codecs down (the loop rests

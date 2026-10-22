@@ -37,6 +37,7 @@
 #include "freertos/task.h"
 
 #include "muse_board.h"
+#include "muse_imu.h"
 #include "muse_lcd_bands.h"
 #include "muse_mem.h"
 #include "muse_pmu.h"
@@ -61,6 +62,12 @@ static muse_gpio_button_t s_pwr;
 static esp_err_t init(void)
 {
     ESP_RETURN_ON_ERROR(bsp_i2c_init(), TAG, "i2c init");
+#if CONFIG_MUSE_IMU
+    esp_err_t imu = muse_imu_init(bsp_i2c_get_handle());
+    if (imu != ESP_OK) {
+        ESP_LOGW(TAG, "QMI8658 unavailable (%s): motion gestures off", esp_err_to_name(imu));
+    }
+#endif
     ESP_RETURN_ON_ERROR(muse_gpio_button_init(&s_boot, GPIO_NUM_0), TAG, "boot button");
 #if CONFIG_MUSE_BOARD_WAVESHARE_S3_175
     /* Only the PMU sees PWR: latch its edges for poll_buttons(). */
