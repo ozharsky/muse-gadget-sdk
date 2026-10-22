@@ -889,6 +889,10 @@ static bool console_command(char *line, bool whole)
         fflush(stdout);
         return true;
     }
+    if (!strncmp(line, "flush.bench", 11)) {
+        muse_lcd_bands_bench();
+        return true;
+    }
     if (!strcmp(line, "imu")) {
         int16_t mg[3] = { 0 };
         esp_err_t err = muse_imu_read(mg);

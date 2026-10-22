@@ -16,6 +16,7 @@
 
 #include "muse_lcd_bands.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -90,6 +91,13 @@ static uint32_t s_recover_first_ms;
 static volatile uint32_t s_driver_ms;    /* nonzero while a panel driver call is in progress */
 static volatile uint32_t s_wedge_ms;     /* bench: make the next driver call stall this long */
 
+/* Tearing-effect sync + band timings (bench). */
+static volatile bool s_te_on;
+static volatile int s_te_gpio = -1;
+static volatile int64_t s_te_rise, s_te_fall, s_te_period, s_te_blank;
+static volatile uint32_t s_band_t0_us;   /* send task writes, ISR reads */
+static uint32_t s_band_sum_us, s_band_max_us, s_band_count, s_te_held, s_te_frames;
+
 static inline uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
@@ -141,8 +149,14 @@ static bool IRAM_ATTR on_chunk_sent(esp_lcd_panel_io_handle_t io, esp_lcd_panel_
             return woken == pdTRUE;
         }
         bool yield = esp_lv_adapter_display_notify_color_trans_done_from_isr(s_disp);
+        uint32_t us = (uint32_t)esp_timer_get_time() - s_band_t0_us;
         portENTER_CRITICAL_SAFE(&s_lock);
         s_notify_pending = false;
+        s_band_sum_us += us;
+        s_band_count++;
+        if (us > s_band_max_us) {
+            s_band_max_us = us;
+        }
         portEXIT_CRITICAL_SAFE(&s_lock);
         return yield || woken == pdTRUE;
     }
@@ -241,6 +255,7 @@ static void lcd_flush_wait(lv_display_t *disp)
 }
 
 static void lcd_recover(void);
+static void te_wait(void);
 
 /*
  * The guard runs on its own timer so it also catches the case where the send
@@ -349,6 +364,14 @@ static void send_bands(void *arg)
             }
             continue;
         }
+        if (b.y1 == 0) {
+            /* First band of a frame: leave just after the panel restarts its
+             * scan, so this frame lands in one refresh. Frames whose bands are
+             * mostly unchanged are cheap and arrive late; they wait too -- one
+             * refresh of latency, no torn frame. */
+            te_wait();
+        }
+        s_band_t0_us = (uint32_t)esp_timer_get_time();
         size_t row = (size_t)(b.x2 - b.x1) * 2;
         int rows = s_chunk_bytes / row & ~1;
         /* LVGL sends no more until this band is done, so nothing is still
@@ -452,6 +475,93 @@ void muse_lcd_bands_run(void (*fn)(void *arg), void *arg)
         ESP_LOGE(TAG, "panel call queue full (send task stalled): skipped");
     }
     xSemaphoreGive(s_call_lock);
+}
+
+/* The panel toggles this once a refresh: high through the scan, low through
+ * vertical blanking (DCS 35h asks for V-blank only). */
+static void IRAM_ATTR on_te(void *arg)
+{
+    (void)arg;
+    int64_t t = esp_timer_get_time();
+    if (gpio_get_level(s_te_gpio)) {
+        if (s_te_rise) {
+            s_te_period = t - s_te_rise;
+        }
+        s_te_rise = t;
+        s_te_fall = 0;
+    } else {
+        if (s_te_rise) {
+            s_te_blank = t - s_te_rise;
+        }
+        s_te_fall = t;
+    }
+}
+
+void muse_lcd_bands_set_te(int gpio)
+{
+    s_te_gpio = gpio;
+    const gpio_config_t io = {
+        .pin_bit_mask = 1ULL << gpio,
+        .mode = GPIO_MODE_INPUT,
+        .intr_type = GPIO_INTR_ANYEDGE,
+    };
+    esp_err_t err = gpio_config(&io);
+    if (err == ESP_OK) {
+        err = gpio_install_isr_service(0);
+        err = err == ESP_ERR_INVALID_STATE ? ESP_OK : err;   /* already installed */
+    }
+    if (err == ESP_OK) {
+        err = gpio_isr_handler_add(gpio, on_te, NULL);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "tearing effect on GPIO%d: %s", gpio, esp_err_to_name(err));
+        return;
+    }
+    s_te_on = true;
+    vTaskDelay(pdMS_TO_TICKS(40));   /* let a couple of refreshes measure */
+    ESP_LOGI(TAG, "tearing effect on GPIO%d: refresh %d us, blank %d us", gpio,
+             (int)s_te_period, (int)s_te_blank);
+}
+
+/* Waits for the panel to enter blanking (the fall edge), bounded. */
+static void te_wait(void)
+{
+    if (!s_te_on) {
+        return;
+    }
+    int64_t start = esp_timer_get_time();
+    int64_t was = s_te_fall;
+    while (s_te_fall == was) {
+        if (esp_timer_get_time() - start > 25000) {   /* no edge in 25 ms: don't wait */
+            break;
+        }
+    }
+    int64_t waited = esp_timer_get_time() - start;
+    portENTER_CRITICAL_SAFE(&s_lock);
+    s_te_frames++;
+    if (waited > 500) {
+        s_te_held++;
+    }
+    portEXIT_CRITICAL_SAFE(&s_lock);
+}
+
+void muse_lcd_bands_bench(void)
+{
+    uint32_t sum, max, count, held, frames;
+    portENTER_CRITICAL_SAFE(&s_lock);
+    sum = s_band_sum_us;
+    max = s_band_max_us;
+    count = s_band_count;
+    held = s_te_held;
+    frames = s_te_frames;
+    s_band_sum_us = s_band_max_us = s_band_count = 0;
+    s_te_held = s_te_frames = 0;
+    portEXIT_CRITICAL_SAFE(&s_lock);
+    int avg = count ? (int)(sum / count) : 0;
+    printf("@flush.bench bands=%u avg=%d us max=%u us | full frame (4 bands) ~%d us (~%d fps) | te %s, %u/%u frames waited >0.5ms\n",
+           (unsigned)count, avg, (unsigned)max, avg * 4,
+           avg > 0 ? 1000000 / (avg * 4) : 0,
+           s_te_on ? "on" : "off", (unsigned)held, (unsigned)frames);
 }
 
 void muse_lcd_bands_swallow(int completions)

@@ -81,3 +81,17 @@ void muse_lcd_bands_wedge(int ms);
  * not stall for 20 s.
  */
 void muse_lcd_bands_notify_drop(int notifies);
+
+/*
+ * Sync the top band of every frame to the panel's tearing-effect output on
+ * `gpio` (high during vertical blanking). The wait happens in the send task,
+ * which already owns flush timing: the frame's first band leaves just after
+ * the panel restarts its scan, so the whole frame lands in one refresh instead
+ * of being caught halfway by the scan. Call it after muse_lcd_bands_register,
+ * after telling the panel to emit TE (DCS 35h).
+ */
+void muse_lcd_bands_set_te(int gpio);
+
+/* Band-send timings: prints avg/max microseconds per band and the implied
+ * full-frame cost, then resets. Bench: ">flush.bench" (muse_input.c). */
+void muse_lcd_bands_bench(void);
