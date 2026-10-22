@@ -19,6 +19,7 @@
 #if CONFIG_MUSE_IMU
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -156,13 +157,21 @@ esp_err_t muse_imu_init(i2c_master_bus_handle_t bus)
     if (err != ESP_OK) {
         return err;
     }
-    int16_t mg[3];
-    if (muse_imu_read(mg) == ESP_OK) {
-        s_rest.x = mg[0];
-        s_rest.y = mg[1];
-        s_rest.z = mg[2];
-        s_have_rest = true;
+    /* The first conversion is not ready the moment the part is enabled: wait for a
+     * sample that actually looks like gravity, or the rest pose starts at zero and
+     * every tilt test answers "not tilted" until the 2 s re-baseline. */
+    int16_t mg[3] = { 0 };
+    for (int i = 0; i < 10; i++) {
+        if (muse_imu_read(mg) == ESP_OK
+            && abs(mg[0]) + abs(mg[1]) + abs(mg[2]) > 200) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
+    s_rest.x = mg[0];
+    s_rest.y = mg[1];
+    s_rest.z = mg[2];
+    s_have_rest = abs(mg[0]) + abs(mg[1]) + abs(mg[2]) > 200;
     s_present = true;
     ESP_LOGI(TAG, "QMI8658 ready at 31 Hz, rest %d/%d/%d mg", mg[0], mg[1], mg[2]);
     return ESP_OK;
