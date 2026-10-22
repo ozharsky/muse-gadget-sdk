@@ -43,6 +43,7 @@
 #include "muse_mem.h"
 #include "muse_menu.h"
 #include "muse_pixel.h"
+#include "avatar/muse_pixel_video.h"
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
 #include "muse_state.h"
@@ -709,6 +710,12 @@ static void on_canvas_tap(lv_event_t *e)
     (void)e;
     if (lv_tick_get() - s_gesture_ms < 400) {
         return;   /* a swipe just ended (the canvas isn't scrollable, so LVGL still calls it a click) */
+    }
+    /* A clip owns the canvas while it plays: a tap gives the face back. */
+    if (muse_pixel_video_active()) {
+        ESP_LOGI(TAG, "clip stopped (tap): giving the face back");
+        muse_pixel_video("stop");
+        return;
     }
     /* Tap on a waiting notification OPENS its agent; otherwise it's a pet. */
     if (muse_notif_open_pending()) {

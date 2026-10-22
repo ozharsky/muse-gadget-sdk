@@ -359,6 +359,9 @@ static void talk_button(unsigned ev)
             if (!muse_board->keyboard) muse_menu_key(MUSE_MENU_SELECT);
             swallow = true;
         } else {
+            if (muse_pixel_video_active()) {
+                muse_pixel_video("stop");   /* a clip must never trap the face */
+            }
             post(MUSE_PTT_DOWN, false);
             talk_down = true;
             count_tap(true);

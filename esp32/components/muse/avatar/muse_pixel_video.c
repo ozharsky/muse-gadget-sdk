@@ -202,6 +202,13 @@ void muse_pixel_video_render(void)
     if (!v && !s_asset_active) {
         return;
     }
+    if (s_loops_left < 0 && esp_timer_get_time() - s_start_us > 30000000LL) {
+        /* >video=<name> plays until stopped; a forgotten one leaves a black-ish
+         * clip on the glass. Give the face back after 30 s. */
+        s_clip = NULL;
+        s_asset_active = false;
+        return;
+    }
     const int fps = s_asset_active ? s_asset.fps : v->fps;
     const int count = s_asset_active ? s_asset.frames : v->count;
     int64_t us = esp_timer_get_time() - s_start_us;
