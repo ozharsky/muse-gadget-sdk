@@ -27,3 +27,5 @@ prod_data, data, 0x40,    0x820000, 0x1000,
 prod_bak,  data, 0x41,    0x821000, 0x1000,
 # Muse assets: clips packed by tools/muse/assets_pack.py (flashed at this offset).
 assets,    data, 0x42,    0x822000, 8M,
+# Persistent log ring (muse_log.c): 63 x 8 KB blocks, oldest overwritten.
+logs,      data, 0x43,    0x1022000, 512K,

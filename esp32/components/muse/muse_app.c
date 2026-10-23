@@ -27,6 +27,7 @@
 #include "muse_chat.h"
 #include "muse_diag.h"
 #include "muse_input.h"
+#include "muse_log.h"
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_ui.h"
@@ -72,6 +73,7 @@ const muse_board_t *muse_board;
 void muse_app_run(const muse_board_t *board)
 {
     muse_board = board;
+    muse_log_init();   /* first, so the boot is in the history */
     ESP_LOGI(TAG, "board: %s", board->name);
     ESP_ERROR_CHECK(board->init());
     ESP_ERROR_CHECK(muse_settings_init());

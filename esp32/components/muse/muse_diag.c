@@ -32,6 +32,7 @@
  */
 
 #include "muse_diag.h"
+#include "muse_log.h"
 
 #include <string.h>
 
@@ -130,6 +131,7 @@ void muse_diag_boot_report(void)
 
 void muse_diag_note_restart(const char *why)
 {
+    muse_log_save();   /* the last boot's history survives this restart */
     if (!s_ready || !why || !*why) {
         return;
     }

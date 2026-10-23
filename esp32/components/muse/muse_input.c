@@ -58,6 +58,7 @@
 #define MUSE_HAS_LCD_BANDS 1
 #include "boards/muse_lcd_bands.h"   /* >lcd.swallow fault injection */
 #include "muse_assets.h"
+#include "muse_log.h"
 #if CONFIG_MUSE_JPEG_BENCH
 #include "muse_jpeg_bench.h"
 #endif
@@ -923,6 +924,22 @@ static bool console_command(char *line, bool whole)
         return true;
     }
 #if CONFIG_MUSE_JPEG_BENCH
+    if (!strncmp(line, "log.dump", 8)) {
+        muse_log_dump(line[8] == '=' ? atoi(line + 9) : 0);
+        return true;
+    }
+    if (!strncmp(line, "log.ram", 7)) {
+        muse_log_ram_dump(line[7] == '=' ? atoi(line + 8) : 0);
+        return true;
+    }
+    if (!strcmp(line, "log.save")) {
+        muse_log_save();
+        return true;
+    }
+    if (!strcmp(line, "log.clear")) {
+        muse_log_clear();
+        return true;
+    }
     if (!strcmp(line, "assets")) {
         muse_assets_report();
         return true;
