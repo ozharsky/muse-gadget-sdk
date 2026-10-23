@@ -86,3 +86,4 @@ CONFIG_MUSE_IMU=y
 # Dev bench: >jpeg.bench (video-tier feasibility).
 CONFIG_MUSE_JPEG_BENCH=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_32mb.csv"
+CONFIG_LV_USE_SNAPSHOT=y

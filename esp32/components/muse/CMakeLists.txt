@@ -45,6 +45,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_settings.c"
         "muse_diag.c"
         "muse_settings_ui.c"
+        "muse_glance_ui.c"
         "muse_text.c"
         "muse_keypad.c"
         "muse_lv_mem.c"

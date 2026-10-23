@@ -2301,6 +2301,7 @@ static void hermes_react_show(void)
  * nobody answers is a "no". ---- */
 
 static const char *relay_base_url(bool *remote);
+extern "C" void muse_ui_choice_set_motion(bool ok);
 extern "C" bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms,
                                void (*done)(int, void *), void *user);
 extern "C" bool muse_ui_choice_answer(int idx);
@@ -2418,6 +2419,7 @@ static void handle_ask(cJSON *ask)
         ESP_LOGW(TAG, "ask %s: no UI for the card", id);
         return;
     }
+    muse_ui_choice_set_motion(false);   /* an approval runs a command: a tap or a swipe, never a nod */
     /* Logged AFTER the dialog exists: the bench hook matches this line and answers at once. */
     ESP_LOGI(TAG, "ask %s: %s", id, text ? text : "");
     int idx = -1;
@@ -3150,6 +3152,7 @@ static int64_t s_hist_next_us;         /* spacing between inbox network operatio
 
 extern "C" void muse_ui_agent_switch(bool hermes);   /* muse_ui.h has no C++ guards */
 extern "C" void muse_input_poke(void);              /* muse_input.h has no C++ guards either */
+extern "C" bool muse_input_dnd(void);               /* face-down quiet mode (muse_input.c) */
 
 /* GET /notifications -> the newest unread nudge, or false. *reachable: the relay answered. */
 static bool poll_notification(rel_notif_t *out, bool *reachable)
@@ -3537,6 +3540,135 @@ static void notif_present(const rel_notif_t *n)
     ESP_LOGI(TAG, "notif from %s (%s): %s", n->agent, n->is_default ? "hermes" : "alt", n->text);
 }
 
+/* ---- Glance cards: GET /glance every few minutes while idle; the UI cycles them with the clock.
+ * Same double buffer as the inbox: fill the inactive half, then flip s_glance_active. */
+static EXT_RAM_BSS_ATTR muse_glance_t s_glance[2][MUSE_GLANCE_MAX];
+static volatile int s_glance_n[2];
+static volatile int s_glance_active;
+static volatile uint32_t s_glance_gen;
+static int64_t s_glance_next_us;
+
+static void glance_fetch(void)
+{
+    char url[MUSE_RELAY_URL_MAX + 48];
+    bool remote = false;
+    snprintf(url, sizeof(url), "%s/glance", relay_base_url(&remote));
+    const size_t CAP = 4 * 1024;
+    char *resp = static_cast<char *>(psram_alloc(CAP));
+    if (!resp) {
+        return;
+    }
+    tts_buf_t buf = { resp, 0, CAP - 1, false };
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    cfg.method = HTTP_METHOD_GET;
+    cfg.timeout_ms = 2500;
+    cfg.event_handler = tts_http_evt;
+    cfg.user_data = &buf;
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) {
+        heap_caps_free(resp);
+        return;
+    }
+    esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
+    esp_err_t err = esp_http_client_perform(h);
+    int status = esp_http_client_get_status_code(h);
+    esp_http_client_cleanup(h);
+    if (err == ESP_OK && status == 200) {
+        resp[buf.len] = '\0';
+        cJSON *root = cJSON_Parse(resp);
+        int fill = 1 - s_glance_active, n = 0;
+        cJSON *it = nullptr;
+        cJSON *cards = root ? cJSON_GetObjectItem(root, "cards") : nullptr;
+        cJSON_ArrayForEach(it, cards) {
+            const char *kind = cJSON_GetStringValue(cJSON_GetObjectItem(it, "kind"));
+            const char *title = cJSON_GetStringValue(cJSON_GetObjectItem(it, "title"));
+            const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(it, "text"));
+            const char *value = cJSON_GetStringValue(cJSON_GetObjectItem(it, "value"));
+            const char *lbl = cJSON_GetStringValue(cJSON_GetObjectItem(it, "label"));
+            const char *detail = cJSON_GetStringValue(cJSON_GetObjectItem(it, "detail"));
+            const char *icon = cJSON_GetStringValue(cJSON_GetObjectItem(it, "icon"));
+            cJSON *prog = cJSON_GetObjectItem(it, "progress");
+            if (n >= MUSE_GLANCE_MAX || !text || !text[0]) {
+                continue;
+            }
+            muse_glance_t *g = &s_glance[fill][n++];
+            memset(g, 0, sizeof(*g));   /* whole-struct compare below: no stale bytes past the NULs */
+            strlcpy(g->kind, kind ? kind : "note", sizeof(g->kind));
+            strlcpy(g->title, title ? title : "", sizeof(g->title));
+            strlcpy(g->text, text, sizeof(g->text));
+            strlcpy(g->value, value ? value : "", sizeof(g->value));
+            strlcpy(g->label, lbl ? lbl : "", sizeof(g->label));
+            strlcpy(g->detail, detail && detail[0] ? detail : text, sizeof(g->detail));
+            strlcpy(g->icon, icon ? icon : "", sizeof(g->icon));
+            g->progress = cJSON_IsNumber(prog) ? (int8_t)prog->valueint : -1;
+        }
+        /* Publish only a real change, so the page does not rebuild (and flicker) every poll. */
+        int cur = s_glance_active;
+        bool same = s_glance_n[cur] == n &&
+                    memcmp(s_glance[cur], s_glance[fill], sizeof(muse_glance_t) * (size_t)n) == 0;
+        s_glance_n[fill] = n;
+        if (!same) {
+            s_glance_active = fill;
+            s_glance_gen = s_glance_gen + 1;
+        }
+        cJSON_Delete(root);
+    } else {
+        ESP_LOGW(TAG, "glance: GET failed (err %s, HTTP %d)", esp_err_to_name(err), status);
+    }
+    heap_caps_free(resp);
+}
+
+/* Idle and awake (or on USB): every 3 min, the first a few seconds after the link is up. */
+static void glance_tick(void)
+{
+    int64_t now = now_us();
+    if (now < s_glance_next_us || !muse_settings_relay_configured() || s_turn.phase != P_IDLE ||
+        s_resting.load() || !muse_wifi_connected()) {
+        return;
+    }
+    s_glance_next_us = now + (s_glance_n[s_glance_active] ? 180 : 60) * 1000000LL;   /* empty: retry sooner */
+    glance_fetch();
+}
+
+extern "C" void muse_notif_poll_now(void)
+{
+    s_notif_poll_us = 0;
+    s_notif_gap_us = 0;
+    s_glance_next_us = 0;
+}
+
+extern "C" uint32_t muse_glance_gen(void)
+{
+    return s_glance_gen;
+}
+
+extern "C" void muse_glance_refresh(void)
+{
+    if (now_us() + 2 * 1000000LL < s_glance_next_us - 150 * 1000000LL) {
+        return;   /* fetched under 30 s ago: fresh enough */
+    }
+    s_glance_next_us = 0;
+}
+
+extern "C" int muse_glance_count(void)
+{
+    return s_glance_n[s_glance_active];
+}
+
+extern "C" bool muse_glance_get(int i, muse_glance_t *out)
+{
+    int a = s_glance_active;
+    if (i < 0 || i >= s_glance_n[a]) {
+        return false;
+    }
+    *out = s_glance[a][i];
+    return true;
+}
+
 /* Idle poll: only when a poll can act on the result (idle, awake, un-resting, hermes mode). */
 static void notif_tick(void)
 {
@@ -3553,6 +3685,9 @@ static void notif_tick(void)
     }
     if (s_notif_pending) {
         return;   /* one at a time: a nudge on screen waits for the tap */
+    }
+    if (muse_input_dnd()) {
+        return;   /* face-down: leave them on the relay; picking it up polls at once */
     }
     if (now < s_notif_poll_us || now < s_notif_gap_us || s_turn.phase != P_IDLE || s_resting.load() ||
         !muse_wifi_connected() || !muse_hatch_configured()) {
@@ -3635,6 +3770,7 @@ static void hatch_task(void *arg)
         think_tick();   /* the working face, both backends */
         notif_tick();
         notif_hist_tick();   /* the inbox's fetch/cancel, when the settings page asked */
+        glance_tick();       /* the idle screen's cards */
         if (hermes_mode()) {
             /* Look up the Muse VM now, while there is RAM for the account API's TLS: later, with Hermes in use,
              * it can't be done, and switching to Muse would find no credentials ("Can't reach Muse's server"). */

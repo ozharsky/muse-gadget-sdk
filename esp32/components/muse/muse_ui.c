@@ -38,6 +38,7 @@
 #include "muse_ble.h"
 #include "muse_board.h"
 #include "muse_chat.h"
+#include "muse_glance_ui.h"
 #include "muse_console.h"
 #include "muse_link.h"
 #include "muse_mem.h"
@@ -108,7 +109,8 @@ static lv_indev_t *s_indev;
 static lv_obj_t *s_tv;
 static lv_obj_t *s_face;
 static lv_obj_t *s_settings;
-static lv_obj_t *s_dots[2];
+static lv_obj_t *s_glance;      /* the Glance page: between the face and settings */
+static lv_obj_t *s_dots[3];
 static lv_obj_t *s_wifi_icon;
 static lv_obj_t *s_ble_icon;
 static lv_obj_t *s_cover;
@@ -550,13 +552,25 @@ static void on_canvas_long(lv_event_t *e)
     read_open();   /* long press = the last-message popup, and nothing else */
 }
 
-/* ---- Muse asks: a question with up to four tap choices (the ui.choose command) ---- */
+/* ---- Muse asks: a question with up to four tap choices (the ui.choose command) ----
+ * Tap a choice, or swipe the card: right = the first choice, left = the last (the hint line at
+ * the bottom names both). A nod / head-shake answers too, unless the asker turned motion off. */
 #define CHOICE_MAX 4
+#define SWIPE_COMMIT_PX 100
 static struct {
     lv_obj_t *box;
+    lv_obj_t *btn[CHOICE_MAX];
     muse_ui_choice_cb cb;
     void *user;
     uint32_t until;
+    int n;
+    bool motion;
+    bool dragged;      /* the finger moved: its release is a swipe, not a tap */
+    bool leaving;      /* sliding off: input is over */
+    lv_obj_t *hint, *hint_l, *hint_r, *motion_lbl;
+    char first[12], last[12];
+    int pick;          /* the answer the slide-off delivers */
+    lv_coord_t x0;
 } s_choice;
 
 /* With the display lock held (an event or the frame timer). */
@@ -570,15 +584,126 @@ static void choice_finish(int idx)
     lv_obj_t *box = s_choice.box;
     s_choice.box = NULL;
     s_choice.cb = NULL;
+    s_choice.leaving = false;
     lv_obj_delete_async(box);
     if (cb) {
         cb(idx, user);
     }
 }
 
+static void choice_tint(lv_coord_t dx)
+{
+    uint32_t c = dx > 0 ? COLOR_ST_OK : dx < 0 ? COLOR_ST_FAULT : COLOR_ACCENT;
+    lv_obj_set_style_border_color(s_choice.box, lv_color_hex(c), 0);
+    lv_obj_set_style_translate_x(s_choice.box, dx, 0);   /* no rotation: a transformed layer needs a big buffer */
+}
+
+static void slide_x(void *obj, int32_t v)
+{
+    if (obj == s_choice.box) {
+        choice_tint((lv_coord_t)v);
+    }
+}
+
+static void slide_done(lv_anim_t *a)
+{
+    if (s_choice.leaving && a->var == s_choice.box) {
+        choice_finish(s_choice.pick);
+    }
+}
+
+/* Animate the card to `to` px; leaving = it goes off the glass and answers `pick` at the end. */
+static void choice_slide(lv_coord_t to, bool leaving, int pick)
+{
+    s_choice.leaving = leaving;
+    s_choice.pick = pick;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_choice.box);
+    lv_anim_set_values(&a, lv_obj_get_style_translate_x(s_choice.box, 0), to);
+    lv_anim_set_time(&a, leaving ? 220 : 160);
+    lv_anim_set_exec_cb(&a, slide_x);
+    lv_anim_set_path_cb(&a, leaving ? lv_anim_path_ease_in : lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, slide_done);
+    lv_anim_start(&a);
+}
+
+static void choice_pick_out(int idx)
+{
+    if (!s_choice.box || s_choice.leaving || idx < 0 || idx >= s_choice.n) {
+        return;
+    }
+    lv_obj_set_style_bg_color(s_choice.btn[idx], lv_color_hex(idx == 0 ? 0x1d5a2a : 0x5a1d1d), 0);
+    choice_slide(idx == 0 ? s_w : -s_w, true, idx);
+}
+
 static void on_choice_click(lv_event_t *e)
 {
+    if (s_choice.dragged || s_choice.leaving) {
+        return;   /* the release of a swipe, not a tap */
+    }
     choice_finish((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void on_choice_drag(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *in = lv_indev_active();
+    if (!s_choice.box || s_choice.leaving || !in) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    if (code == LV_EVENT_PRESSED) {
+        s_choice.x0 = p.x;
+        s_choice.dragged = false;
+    } else if (code == LV_EVENT_PRESSING) {
+        lv_coord_t dx = p.x - s_choice.x0;
+        if (!s_choice.dragged && LV_ABS(dx) > 12) {
+            s_choice.dragged = true;
+        }
+        if (s_choice.dragged) {
+            choice_tint(dx);
+        }
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (!s_choice.dragged) {
+            return;
+        }
+        lv_coord_t dx = p.x - s_choice.x0;
+        if (dx >= SWIPE_COMMIT_PX) {
+            choice_pick_out(0);
+        } else if (dx <= -SWIPE_COMMIT_PX) {
+            choice_pick_out(s_choice.n - 1);
+        } else {
+            choice_slide(0, false, -1);   /* not far enough: spring back */
+        }
+        /* dragged stays set until the next press, so this release's CLICKED is ignored */
+    }
+}
+
+static void upper_cpy(char *d, const char *s, size_t n)
+{
+    size_t i = 0;
+    for (; s[i] && i + 1 < n; i++) {
+        d[i] = (char)toupper((unsigned char)s[i]);
+    }
+    d[i] = 0;
+}
+
+/* "< NO   SWIPE   YES >" (each side in its colour), plus "NOD = YES   SHAKE = NO" when motion
+ * may answer. Display lock held. */
+static void choice_hint(void)
+{
+    char a[16], b[16], h[48];
+    upper_cpy(a, s_choice.last, sizeof(a));
+    upper_cpy(b, s_choice.first, sizeof(b));
+    snprintf(h, sizeof(h), "< %s", a);
+    lv_label_set_text(s_choice.hint_l, h);
+    snprintf(h, sizeof(h), "%s >", b);
+    lv_label_set_text(s_choice.hint_r, h);
+    snprintf(h, sizeof(h), "NOD = %s   SHAKE = %s", b, a);
+    lv_label_set_text(s_choice.motion_lbl, h);
+    lv_obj_set_flag(s_choice.motion_lbl, LV_OBJ_FLAG_HIDDEN, !s_choice.motion);
 }
 
 /* A question is open: the input task must not auto-sleep out from under it (an approval
@@ -586,6 +711,26 @@ static void on_choice_click(lv_event_t *e)
 bool muse_ui_choice_open(void)
 {
     return s_ready && s_choice.box != NULL;
+}
+
+int muse_ui_choice_count(void)
+{
+    return s_choice.box ? s_choice.n : 0;
+}
+
+bool muse_ui_choice_motion_ok(void)
+{
+    return s_choice.box && s_choice.motion;
+}
+
+void muse_ui_choice_set_motion(bool ok)
+{
+    muse_board->display_lock(-1);
+    s_choice.motion = ok;
+    if (s_choice.box) {
+        choice_hint();
+    }
+    muse_board->display_unlock();
 }
 
 /* Bench/ops: answer the open question programmatically, as if its button was tapped. */
@@ -596,6 +741,17 @@ bool muse_ui_choice_answer(int idx)
     }
     muse_board->display_lock(-1);
     choice_finish(idx);
+    muse_board->display_unlock();
+    return true;
+}
+
+bool muse_ui_choice_answer_animated(int idx)
+{
+    if (!s_ready || !s_choice.box) {
+        return false;
+    }
+    muse_board->display_lock(-1);
+    choice_pick_out(idx);
     muse_board->display_unlock();
     return true;
 }
@@ -621,6 +777,11 @@ bool muse_ui_choose(const char *prompt, const char *const *options, int n, int t
     lv_obj_set_style_pad_row(box, 10, 0);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(box, on_choice_drag, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(box, on_choice_drag, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(box, on_choice_drag, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(box, on_choice_drag, LV_EVENT_PRESS_LOST, NULL);
     lv_obj_t *q = lv_label_create(box);
     lv_obj_set_width(q, lv_pct(100));
     lv_label_set_long_mode(q, LV_LABEL_LONG_MODE_WRAP);
@@ -638,7 +799,7 @@ bool muse_ui_choose(const char *prompt, const char *const *options, int n, int t
         lv_obj_set_style_border_color(b, lv_color_hex(COLOR_ACCENT), 0);
         lv_obj_set_style_border_width(b, 2, 0);
         lv_obj_set_style_radius(b, 6, 0);
-        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_EVENT_BUBBLE);   /* drags reach the card */
         lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(b, on_choice_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *l = lv_label_create(b);
@@ -649,10 +810,42 @@ bool muse_ui_choose(const char *prompt, const char *const *options, int n, int t
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(l, options[i]);
         lv_obj_center(l);
+        s_choice.btn[i] = b;
     }
+    /* The gesture hint: which way is which, named by the choices themselves. */
+    lv_obj_t *hint = lv_obj_create(box);
+    lv_obj_remove_style_all(hint);
+    lv_obj_set_size(hint, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(hint, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(hint, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(hint, LV_OBJ_FLAG_EVENT_BUBBLE);
+    const uint32_t hc[3] = { 0xc05050, COLOR_DIM, 0x48c038 };
+    lv_obj_t *parts[3];
+    for (int i = 0; i < 3; i++) {
+        parts[i] = lv_label_create(hint);
+        lv_obj_set_style_text_font(parts[i], &lv_font_unscii_8, 0);
+        lv_obj_set_style_text_color(parts[i], lv_color_hex(hc[i]), 0);
+    }
+    lv_label_set_text(parts[1], "SWIPE");
+    s_choice.hint = hint;
+    s_choice.hint_l = parts[0];
+    s_choice.hint_r = parts[2];
+    s_choice.motion_lbl = lv_label_create(box);
+    lv_obj_set_width(s_choice.motion_lbl, lv_pct(100));
+    lv_obj_set_style_text_font(s_choice.motion_lbl, &lv_font_unscii_8, 0);
+    lv_obj_set_style_text_color(s_choice.motion_lbl, lv_color_hex(COLOR_DIM), 0);
+    lv_obj_set_style_text_align(s_choice.motion_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    strlcpy(s_choice.first, options[0], sizeof(s_choice.first));
+    strlcpy(s_choice.last, options[n - 1], sizeof(s_choice.last));
     s_choice.box = box;
     s_choice.cb = done;
     s_choice.user = user;
+    s_choice.n = n;
+    s_choice.motion = n == 2;   /* yes/no questions; the approval path turns it off */
+    choice_hint();
+    s_choice.dragged = false;
+    s_choice.leaving = false;
     s_choice.until = lv_tick_get() + (uint32_t)timeout_ms;
     muse_board->display_unlock();
     muse_state_poke();
@@ -1184,7 +1377,7 @@ static void build_screen(void)
 
     lv_obj_t *face = scr;
     if (muse_board->touch) {
-        /* Swipe left from Muse for settings. */
+        /* Swipe left from Muse for the Glance page, once more for settings. */
         s_tv = lv_tileview_create(scr);
         lv_obj_set_style_bg_color(s_tv, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_tv, LV_OPA_COVER, 0);
@@ -1193,7 +1386,8 @@ static void build_screen(void)
         /* It never scrolls, but LVGL would size its scrollbars from all its
          * children every time it draws any part of it. */
         lv_obj_set_scrollbar_mode(s_face, LV_SCROLLBAR_MODE_OFF);
-        s_settings = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT);
+        s_glance = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+        s_settings = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
         face = s_face;
     }
 
@@ -1417,7 +1611,7 @@ static void build_overlays(void)
     lv_obj_t *scr = lv_screen_active();
 
     /* Page dots. */
-    for (int i = 0; i < 2 && s_tv; i++) {
+    for (int i = 0; i < 3 && s_tv; i++) {
         lv_obj_t *d = lv_obj_create(scr);
         lv_obj_remove_style_all(d);
         lv_obj_set_size(d, 8, 8);
@@ -1425,7 +1619,10 @@ static void build_overlays(void)
         lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
         lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
+        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, (i - 1) * 16, -14);
+        lv_obj_set_style_outline_color(d, lv_color_black(), 0);   /* readable over a Glance card */
+        lv_obj_set_style_outline_width(d, 3, 0);
+        lv_obj_set_style_outline_opa(d, LV_OPA_COVER, 0);
         s_dots[i] = d;
     }
 
@@ -1566,7 +1763,6 @@ static const char *idle_name(muse_wifi_state_t wifi)
 /* The idle clock: the time comes from the internet once Wi-Fi is up. */
 static bool s_sntp_started;
 static bool s_have_caption, s_clock_on;
-static int s_clock_min = -1;
 
 static void start_clock(void)
 {
@@ -1586,22 +1782,25 @@ static void update_chrome(float now)
     s_next_settings_tick = now + SETTINGS_TICK_S;
 
     if (s_tv) {
-        int page = lv_tileview_get_tile_active(s_tv) == s_settings;
-        bool subpage = muse_settings_ui_in_subpage();
-        bool swipe = !page || !subpage;
+        lv_obj_t *active = lv_tileview_get_tile_active(s_tv);
+        int page = active == s_settings ? 2 : active == s_glance ? 1 : 0;
+        bool subpage = page == 2 && muse_settings_ui_in_subpage();
+        bool swipe = !subpage;
         if (swipe != lv_obj_has_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE)) {
             lv_obj_set_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE, swipe);
         }
         int shown = page * 2 + subpage;
         if (shown != s_shown_page) {
             if (page) read_hide();   /* reading view lives on lv_layer_top: never over Settings */
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < 3; i++) {
                 lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
-                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
+                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, subpage);
             }
             s_shown_page = shown;
         }
-        muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
+        int sx = lv_obj_get_scroll_x(s_tv);
+        muse_settings_ui_tick(sx > s_w);                 /* settings is the third tile */
+        muse_glance_ui_tick(sx > 0 && sx < 2 * s_w);     /* the Glance page, or sliding over it */
     }
 
     /* Joining, the icon blinks: the compact layout has no state label. The icon's COLOR
@@ -1808,6 +2007,37 @@ static void type_tick(float now)
     }
 }
 
+/* Glance card colours by kind (the relay's /glance producers pick the kind). */
+static uint32_t glance_color(const char *kind)
+{
+    static const struct { const char *k; uint32_t c; } map[] = {
+        { "weather", 0x5cc8ff }, { "print", 0xff9a5c }, { "reminder", 0xffcc4d },
+        { "briefing", COLOR_ACCENT }, { "task", 0xc792ff },
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (!strcmp(kind, map[i].k)) {
+            return map[i].c;
+        }
+    }
+    return COLOR_CAPTION;
+}
+
+/* The quiet idle screen: the clock, then each glance card (GET /glance via the chat session),
+ * in turn -- 8 s for the clock, 5 s per card -- in the caption slot, typed in like the clock. */
+#define GLANCE_CLOCK_S 8.0f
+#define GLANCE_CARD_S 5.0f
+static int s_glance_slot;          /* 0 = clock, 1.. = card index + 1 */
+static float s_glance_until;
+static uint32_t s_shown_key = UINT32_MAX;
+static lv_opa_t s_cap_opa;         /* the caption's own backing, restored when the idle view ends */
+
+static void caption_upper(char *b)
+{
+    for (char *c = b; *c; c++) {
+        *c = (char)toupper((unsigned char)*c);
+    }
+}
+
 static void update_clock(muse_mode_t mode, int answer, float now)
 {
     bool quiet = mode == MUSE_MODE_IDLE && answer < 0 && !s_have_caption && lv_display_get_inactive_time(NULL) > 12000;
@@ -1822,25 +2052,49 @@ static void update_clock(muse_mode_t mode, int answer, float now)
         s_logged = true;
     }
     if (quiet && tt > 1700000000) {   /* the time is known */
-        struct tm tm;
-        localtime_r(&tt, &tm);
-        int key = tm.tm_hour * 60 + tm.tm_min;
-        if (!s_clock_on || key != s_clock_min) {
-            char b[48];
+        int cards = muse_glance_count();
+        if (!s_clock_on || now >= s_glance_until || s_glance_slot > cards) {
+            s_glance_slot = s_clock_on && now >= s_glance_until && cards ? (s_glance_slot + 1) % (cards + 1) : 0;
+            s_glance_until = now + (s_glance_slot ? GLANCE_CARD_S : GLANCE_CLOCK_S);
+        }
+        char b[64];
+        uint32_t color = COLOR_CAPTION, key;
+        muse_glance_t g;
+        if (s_glance_slot && muse_glance_get(s_glance_slot - 1, &g)) {
+            snprintf(b, sizeof(b), "%s\n%s", g.title[0] ? g.title : g.kind, g.text);
+            color = glance_color(g.kind);
+            key = 0x80000000u | (uint32_t)s_glance_slot << 24 | (uint32_t)(strlen(g.text) * 131 + g.text[0]);
+        } else {
+            struct tm tm;
+            localtime_r(&tt, &tm);
             int h12 = tm.tm_hour % 12 ? tm.tm_hour % 12 : 12;
             size_t n = (size_t)snprintf(b, sizeof(b), "%d:%02d %s\n", h12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
             strftime(b + n, sizeof(b) - n, "%a %d %b", &tm);
-            for (char *c = b; *c; c++) {
-                *c = (char)toupper((unsigned char)*c);
+            key = (uint32_t)(tm.tm_hour * 60 + tm.tm_min);
+        }
+        if (!s_clock_on || key != s_shown_key) {
+            caption_upper(b);
+            if (!s_clock_on) {   /* a dark pill: the face behind it is busy pixel art */
+                s_cap_opa = lv_obj_get_style_bg_opa(s_caption_lbl, 0);
+                lv_obj_set_style_bg_color(s_caption_lbl, lv_color_black(), 0);
+                lv_obj_set_style_bg_opa(s_caption_lbl, LV_OPA_80, 0);
+                lv_obj_set_style_radius(s_caption_lbl, 10, 0);
             }
+            lv_obj_set_style_border_color(s_caption_lbl, lv_color_hex(color), 0);
+            lv_obj_set_style_border_opa(s_caption_lbl, LV_OPA_40, 0);
+            lv_obj_set_style_border_width(s_caption_lbl, s_glance_slot ? 1 : 0, 0);
+            lv_obj_set_style_text_color(s_caption_lbl, lv_color_hex(color), 0);
             type_start(s_caption_lbl, b, now);
             lv_obj_remove_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN);
             s_clock_on = true;
-            s_clock_min = key;
+            s_shown_key = key;
         }
     } else if (s_clock_on) {
         s_clock_on = false;
-        s_clock_min = -1;
+        s_shown_key = UINT32_MAX;
+        lv_obj_set_style_text_color(s_caption_lbl, lv_color_hex(COLOR_CAPTION), 0);
+        lv_obj_set_style_bg_opa(s_caption_lbl, s_cap_opa, 0);   /* replies keep their own look */
+        lv_obj_set_style_border_width(s_caption_lbl, 0, 0);
         if (!s_have_caption) {
             type_start(s_caption_lbl, "", now);
             lv_obj_add_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -1985,13 +2239,19 @@ static void update_status(muse_mode_t mode, float now)
 }
 
 static volatile bool s_snapshot;
+static volatile bool s_snap_top;   /* bench: capture lv_layer_top (cards, dialogs) instead of the screen */
+
+void muse_ui_snapshot_top(bool on)
+{
+    s_snap_top = on;
+}
 
 /* Streams the screen over the USB cable as base64 RGB565 (bench testing; needs
  * LV_USE_SNAPSHOT, which devices/sdkconfig.muse-bench turns on). */
 static void send_snapshot(void)
 {
 #if LV_USE_SNAPSHOT
-    lv_draw_buf_t *buf = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
+    lv_draw_buf_t *buf = lv_snapshot_take(s_snap_top ? lv_layer_top() : lv_screen_active(), LV_COLOR_FORMAT_RGB565);
     if (!buf) {
         return;
     }
@@ -2075,9 +2335,9 @@ static void stall_check(void *arg)
 
 /* Bench-only, from any task: select the touch tile without pretending a/s are touch-menu
  * navigation. The switch lands on the next frame (this task). No effect outside bench builds. */
-void muse_ui_bench_page(bool settings)
+void muse_ui_bench_page(int page)
 {
-    s_bench_page = settings ? 1 : 0;
+    s_bench_page = page;   /* 0 face, 1 glance, 2 settings */
 }
 
 /* Bench-only: display-only demo name; never changes BLE identity or provisioning. */
@@ -2117,11 +2377,12 @@ static void frame_tick(lv_timer_t *timer)
     }
 #if LV_USE_SNAPSHOT
     if (s_bench_page >= 0) {
-        bool settings = s_bench_page != 0;
+        bool settings = s_bench_page == 2;
+        lv_obj_t *tile = settings ? s_settings : s_bench_page == 1 ? s_glance : s_face;
         s_bench_page = -1;
         if (s_tv) {
             lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
-            lv_tileview_set_tile(s_tv, settings ? s_settings : s_face, LV_ANIM_OFF);
+            lv_tileview_set_tile(s_tv, tile, LV_ANIM_OFF);
             if (settings) {
                 muse_settings_ui_show_home();   /* arrive on the menu, not a stale sub-page */
             }
@@ -2235,6 +2496,9 @@ esp_err_t muse_ui_start(void)
     s_image_mutex = xSemaphoreCreateMutex();
     muse_board->display_lock(-1);
     build_screen();
+    if (s_glance) {
+        muse_glance_ui_build(s_glance);
+    }
     if (s_settings) {
         muse_settings_ui_build(s_settings);
     } else {

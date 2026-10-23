@@ -188,6 +188,26 @@ void muse_hatch_notif_refresh(void);
 int muse_hatch_notif_hist_count(void);
 bool muse_hatch_notif_hist(int i, muse_notif_row_t *out);
 
+/* Glance cards (GET /glance on the relay): short facts the idle screen cycles with the clock.
+ * kind: weather | print | reminder | briefing | task | note (it picks the colour). */
+#define MUSE_GLANCE_MAX 6
+typedef struct {
+    char kind[10];
+    char title[16];      /* the face caption's first line */
+    char text[44];       /* ... and its second */
+    char label[24];      /* the Glance page: the card's title ("" = title) */
+    char value[16];      /* the Glance page: big value ("52\u00b0", "45%", "25 min") */
+    char detail[244];    /* a longer line under it (UTF-8) */
+    char icon[12];       /* glance_icons.h name; "" = by kind */
+    int8_t progress;     /* 0..100 draws a bar; -1 none */
+} muse_glance_t;
+int muse_glance_count(void);
+uint32_t muse_glance_gen(void);       /* bumps whenever the cards change */
+void muse_glance_refresh(void);       /* fetch soon (the Glance page was opened) */
+/* Poll notifications and glance cards right away (the gadget was just picked up). */
+void muse_notif_poll_now(void);
+bool muse_glance_get(int i, muse_glance_t *out);
+
 /* Remove one notification on the relay -- cancelling an un-fired reminder, or clearing a
  * line. Non-blocking; the session task performs it when the link is idle. */
 void muse_hatch_notif_cancel(const char *id);

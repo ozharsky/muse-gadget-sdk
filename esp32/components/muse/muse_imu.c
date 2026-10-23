@@ -56,6 +56,8 @@ static const char *TAG = "muse_imu";
 #define JOLT_COUNT      2
 #define SHAKE_COOLDOWN_US 1200000
 #define STABLE_AGAIN_US 2000000  /* hold still this long and that's the new rest */
+#define FACEDOWN_HOLD_US 1500000
+#define FACEUP_HOLD_US  300000
 
 #define AWAKE_PERIOD_US 40000
 #define ASLEEP_PERIOD_US 150000
@@ -235,6 +237,39 @@ unsigned muse_imu_poll(int64_t now_us, bool asleep)
     } else {
         s_flip_seen = 0;
         s_flip_latched = false;
+    }
+
+    /* Face-down: an edge after 1.5 s screen-down, and the matching face-up edge once it is
+     * clearly not face-down for 0.3 s (the hysteresis keeps a wobble from toggling it). */
+    static bool s_down;
+    static int64_t s_down_seen, s_up_seen;
+    if (!s_down) {
+        s_down_seen = muse_imu_face_down(&v) ? (s_down_seen ? s_down_seen : now_us) : 0;
+        if (s_down_seen && now_us - s_down_seen >= FACEDOWN_HOLD_US) {
+            s_down = true;
+            s_up_seen = 0;
+            flags |= MUSE_IMU_FACEDOWN;
+        }
+    } else {
+        s_up_seen = muse_imu_face_up_ish(&v) ? (s_up_seen ? s_up_seen : now_us) : 0;
+        if (s_up_seen && now_us - s_up_seen >= FACEUP_HOLD_US) {
+            s_down = false;
+            s_down_seen = 0;
+            flags |= MUSE_IMU_FACEUP;
+        }
+    }
+
+    /* Nod / rock: only awake (the swings need the 25 Hz awake cadence). */
+    static muse_swing_t s_pitch, s_roll;
+    if (!asleep && !s_down) {
+        if (muse_swing_step(&s_pitch, muse_imu_pitch_deg(&v), now_us)) {
+            flags |= MUSE_IMU_NOD;
+            s_roll = (muse_swing_t){ 0 };
+        }
+        if (muse_imu_roll_ok(&v) && muse_swing_step(&s_roll, muse_imu_roll_deg(&v), now_us) && !(flags & MUSE_IMU_NOD)) {
+            flags |= MUSE_IMU_ROCK;
+            s_pitch = (muse_swing_t){ 0 };
+        }
     }
 
     if (jolt) {

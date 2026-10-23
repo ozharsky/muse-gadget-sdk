@@ -40,3 +40,31 @@ bool muse_imu_flipped(const muse_imu_vec_t *rest, const muse_imu_vec_t *cur);
 
 /* A jolt: the magnitude is far from 1 g, which a steady hold never is. */
 bool muse_imu_jolt(const muse_imu_vec_t *v);
+
+/* Screen facing the desk: gravity along the screen's -z at about 1 g (screen-up reads z ~ +1 g).
+ * muse_imu_face_up_ish is the release test (any pose clearly not face-down), so the two
+ * together give the hysteresis a resting-but-wobbly hand needs. */
+bool muse_imu_face_down(const muse_imu_vec_t *v);
+bool muse_imu_face_up_ish(const muse_imu_vec_t *v);
+
+/* Tilt angles of gravity, degrees: pitch in the y-z plane (a nod), roll in the x-z plane (a
+ * side-to-side rock). Roll is meaningless while the screen is upright (x and z both ~0): the
+ * caller only trusts it when muse_imu_roll_ok says gravity has a real x-z component. */
+float muse_imu_pitch_deg(const muse_imu_vec_t *v);
+float muse_imu_roll_deg(const muse_imu_vec_t *v);
+bool muse_imu_roll_ok(const muse_imu_vec_t *v);
+
+/* A back-and-forth swing of one angle: true once the angle has moved >= MUSE_SWING_DEG one way,
+ * then back, then the first way again (three legs) within MUSE_SWING_WINDOW_US; a pause longer
+ * than MUSE_SWING_IDLE_US starts over. Zero-initialise; it resets itself after firing. */
+#define MUSE_SWING_DEG 12.0f
+#define MUSE_SWING_WINDOW_US 1800000
+#define MUSE_SWING_IDLE_US 700000
+typedef struct {
+    bool init;
+    int dir;           /* 0 = waiting to move, +1 / -1 = current leg */
+    int legs;
+    float extreme;     /* baseline while waiting, then the leg's furthest point */
+    int64_t first_us, last_us;
+} muse_swing_t;
+bool muse_swing_step(muse_swing_t *s, float deg, int64_t now_us);

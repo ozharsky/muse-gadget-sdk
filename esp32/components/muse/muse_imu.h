@@ -34,6 +34,10 @@
 #define MUSE_IMU_TILT  (1u << 0)   /* pose changed from the resting one */
 #define MUSE_IMU_FLIP  (1u << 1)   /* resting pose turned over, held */
 #define MUSE_IMU_SHAKE (1u << 2)   /* jolts in quick succession */
+#define MUSE_IMU_FACEDOWN (1u << 3) /* laid screen-down, held 1.5 s (desk "do not disturb") */
+#define MUSE_IMU_FACEUP   (1u << 4) /* picked up / turned back over after FACEDOWN */
+#define MUSE_IMU_NOD      (1u << 5) /* pitch swung back and forth: "yes" */
+#define MUSE_IMU_ROCK     (1u << 6) /* rolled side to side: "no" (not detectable held upright) */
 
 /* Probes 0x6B then 0x6A and configures the accelerometer. */
 esp_err_t muse_imu_init(i2c_master_bus_handle_t bus);

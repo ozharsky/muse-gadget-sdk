@@ -68,3 +68,6 @@ void muse_input_request_power_off(void);
 /* Reboots the board (from the input task): the menu's Restart, the settings page,
  * and the console's ">reboot". The talk-button hold restarts directly. */
 void muse_input_request_restart(void);
+
+/* Face-down "do not disturb": true while the gadget lies screen-down. */
+bool muse_input_dnd(void);

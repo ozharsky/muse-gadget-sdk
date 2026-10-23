@@ -44,6 +44,7 @@
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_ui.h"
+#include "muse_glance_ui.h"
 #include "avatar/muse_pixel_video.h"
 #include "muse_pixel.h"             /* >render.bench: muse_pixel_bench */
 #include "muse_voice.h"
@@ -87,7 +88,7 @@ bool muse_notif_open_pending(void);
 /* muse_ui.c: bench hooks (">settings", ">face.tap", ">face.long"). */
 void muse_ui_show_settings(void);
 #if CONFIG_LV_USE_SNAPSHOT
-void muse_ui_bench_page(bool settings);
+void muse_ui_bench_page(int page);
 void muse_ui_bench_demo(bool enabled);
 #endif
 void muse_ui_show_notifications(void);
@@ -177,6 +178,13 @@ static void power_off(void)
     ESP_LOGE(TAG, "power-off failed (%s)", esp_err_to_name(err));
     muse_state_set_mode(MUSE_MODE_IDLE);
     muse_state_set_caption("COULDN'T POWER OFF");
+}
+
+static volatile bool s_dnd;   /* laid face-down: quiet until picked up */
+
+bool muse_input_dnd(void)
+{
+    return s_dnd;
 }
 
 static void set_asleep(bool asleep, const char *why)
@@ -615,14 +623,36 @@ static void input_task(void *arg)
          * changes (waking outside it leaves the display paused). */
         {
             unsigned imu = muse_imu_poll(esp_timer_get_time(), muse_state_asleep());
-            if (imu & MUSE_IMU_TILT) {
+            /* Face-down = do not disturb: stop talking, go dark, hold notifications (the chat
+             * session checks muse_input_dnd). Turning it back over wakes it and fetches at once. */
+            if (imu & MUSE_IMU_FACEDOWN) {
+                s_dnd = true;
+                muse_voice_request_stop();
+                set_asleep(true, "face down: quiet");
+            }
+            if ((imu & MUSE_IMU_FACEUP) && s_dnd) {
+                s_dnd = false;
+                set_asleep(false, "picked up");
+                muse_state_set_caption("QUIET MODE OFF");
+                muse_notif_poll_now();
+            }
+            if ((imu & MUSE_IMU_TILT) && !s_dnd) {
                 if (muse_state_asleep()) {
                     set_asleep(false, "tilt");
                 } else {
                     muse_ui_react("alert");
                 }
             }
-            if ((imu & MUSE_IMU_SHAKE) && !muse_state_asleep()) {
+            /* An open question that allows it (not an approval): nod = first choice, rock or
+             * shake = last. Otherwise a shake is just a shake. */
+            bool motion_q = !muse_state_asleep() && muse_ui_choice_open() && muse_ui_choice_motion_ok();
+            if (motion_q && (imu & MUSE_IMU_NOD)) {
+                ESP_LOGI(TAG, "nod: answers the open question (first choice)");
+                muse_ui_choice_answer_animated(0);
+            } else if (motion_q && (imu & (MUSE_IMU_ROCK | MUSE_IMU_SHAKE))) {
+                ESP_LOGI(TAG, "head-shake: answers the open question (last choice)");
+                muse_ui_choice_answer_animated(muse_ui_choice_count() - 1);
+            } else if ((imu & MUSE_IMU_SHAKE) && !muse_state_asleep()) {
                 muse_ui_react("confused");
             }
             if ((imu & MUSE_IMU_FLIP) && !muse_state_asleep()) {
@@ -1017,8 +1047,26 @@ static bool console_command(char *line, bool whole)
         return true;
     }
 #if CONFIG_LV_USE_SNAPSHOT
-    if (!strcmp(line, "ui=settings") || !strcmp(line, "ui=face")) {
-        muse_ui_bench_page(!strcmp(line, "ui=settings"));
+    if (!strncmp(line, "choose.pick=", 12)) {   /* bench: answer with the swipe's slide-off */
+        printf("@choose.pick %s\n", muse_ui_choice_answer_animated(atoi(line + 12)) ? "ok" : "none");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "snap.top=", 9)) {
+        extern void muse_ui_snapshot_top(bool on);
+        muse_ui_snapshot_top(line[9] == '1');
+        printf("@snap.top %c\n", line[9]);
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "glance.scroll=", 14)) {
+        muse_glance_ui_bench_scroll(atoi(line + 14));
+        printf("@glance.scroll %d\n", atoi(line + 14));
+        fflush(stdout);
+        return true;
+    }
+    if (!strcmp(line, "ui=settings") || !strcmp(line, "ui=face") || !strcmp(line, "ui=glance")) {
+        muse_ui_bench_page(!strcmp(line, "ui=settings") ? 2 : !strcmp(line, "ui=glance") ? 1 : 0);
         printf("@ui %s\n", line + 3);
         fflush(stdout);
         return true;
