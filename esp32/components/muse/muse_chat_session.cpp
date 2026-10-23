@@ -3577,6 +3577,7 @@ static EXT_RAM_BSS_ATTR muse_glance_t s_glance[2][MUSE_GLANCE_MAX];
 static volatile int s_glance_n[2];
 static volatile int s_glance_active;
 static volatile uint32_t s_glance_gen;
+static volatile int64_t s_glance_ok_us;   /* last successful fetch */
 static int64_t s_glance_next_us;
 
 static void glance_fetch(void)
@@ -3636,7 +3637,25 @@ static void glance_fetch(void)
             strlcpy(g->detail, detail && detail[0] ? detail : text, sizeof(g->detail));
             strlcpy(g->icon, icon ? icon : "", sizeof(g->icon));
             g->progress = cJSON_IsNumber(prog) ? (int8_t)prog->valueint : -1;
+            cJSON *st = nullptr;
+            cJSON *stats = cJSON_GetObjectItem(it, "stats");
+            cJSON_ArrayForEach(st, stats) {
+                if (g->nstats >= 3) {
+                    break;
+                }
+                const char *l = cJSON_GetStringValue(cJSON_GetObjectItem(st, "l"));
+                const char *v = cJSON_GetStringValue(cJSON_GetObjectItem(st, "v"));
+                cJSON *sp = cJSON_GetObjectItem(st, "p");
+                if (!v) {
+                    continue;
+                }
+                strlcpy(g->stats[g->nstats].l, l ? l : "", sizeof(g->stats[0].l));
+                strlcpy(g->stats[g->nstats].v, v, sizeof(g->stats[0].v));
+                g->stats[g->nstats].p = cJSON_IsNumber(sp) ? (int8_t)sp->valueint : -1;
+                g->nstats++;
+            }
         }
+        s_glance_ok_us = now_us();
         /* Publish only a real change, so the page does not rebuild (and flicker) every poll. */
         int cur = s_glance_active;
         bool same = s_glance_n[cur] == n &&
@@ -3670,6 +3689,11 @@ extern "C" void muse_notif_poll_now(void)
     s_notif_poll_us = 0;
     s_notif_gap_us = 0;
     s_glance_next_us = 0;
+}
+
+extern "C" int muse_glance_age_s(void)
+{
+    return s_glance_ok_us ? (int)((now_us() - s_glance_ok_us) / 1000000LL) : -1;
 }
 
 extern "C" uint32_t muse_glance_gen(void)

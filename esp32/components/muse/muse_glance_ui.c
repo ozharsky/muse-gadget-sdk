@@ -25,7 +25,9 @@
 #define CARD_W 300
 #define ICON_PX 48
 
-static lv_obj_t *s_list, *s_time, *s_ampm, *s_date, *s_empty;
+static lv_obj_t *s_list, *s_time, *s_ampm, *s_date, *s_empty, *s_updated;
+static uint32_t s_last_poll_ms;
+static int s_shown_age = -2;
 static uint32_t s_built_gen = UINT32_MAX, s_built_media = UINT32_MAX;
 #define COLOR_MUSIC 0xff7ac8
 static int s_shown_min = -1;
@@ -159,6 +161,40 @@ static void add_card(const muse_glance_t *g)
     lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
     if (g->value[0]) {
         label(col, &lv_font_montserrat_28, COLOR_TEXT, g->value);
+    }
+    if (g->nstats) {   /* side-by-side readings: label, big value, a thin temperature-coloured bar */
+        lv_obj_t *row = lv_obj_create(col);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(row, 12, 0);
+        lv_obj_set_style_pad_top(row, 4, 0);      /* air between the card title and the readings */
+        lv_obj_set_style_pad_bottom(row, 4, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        for (int i = 0; i < g->nstats; i++) {
+            lv_obj_t *cell = lv_obj_create(row);
+            lv_obj_remove_style_all(cell);
+            lv_obj_set_flex_grow(cell, 1);
+            lv_obj_set_height(cell, LV_SIZE_CONTENT);
+            lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_COLUMN);
+            lv_obj_set_style_pad_row(cell, 1, 0);
+            lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+            label(cell, &lv_font_unscii_8, COLOR_DIM, g->stats[i].l);
+            label(cell, &lv_font_montserrat_28, COLOR_TEXT, g->stats[i].v);
+            int p = g->stats[i].p;
+            if (p >= 0) {
+                lv_obj_t *bar = lv_bar_create(cell);
+                lv_obj_set_size(bar, lv_pct(100), 5);
+                lv_bar_set_range(bar, 0, 100);
+                lv_bar_set_value(bar, p > 100 ? 100 : p, LV_ANIM_OFF);
+                uint32_t bc = p >= 80 ? 0xff5c5c : p >= 60 ? 0xffb45c : 0x4dff3c;   /* cool / warm / hot */
+                lv_obj_set_style_bg_color(bar, lv_color_hex(COLOR_FAINT), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+                lv_obj_set_style_radius(bar, 3, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(bar, lv_color_hex(bc), LV_PART_INDICATOR);
+                lv_obj_set_style_radius(bar, 3, LV_PART_INDICATOR);
+            }
+        }
     }
     if (g->progress >= 0) {
         lv_obj_t *bar = lv_bar_create(col);
@@ -342,6 +378,8 @@ void muse_glance_ui_build(lv_obj_t *tile)
     s_ampm = label(row, &lv_font_unscii_8, COLOR_DIM, "");
     lv_obj_set_style_pad_bottom(s_ampm, 6, 0);
     s_date = label(head, &lv_font_unscii_8, 0x4dff3c, "GLANCE");
+    s_updated = label(head, &lv_font_unscii_8, COLOR_FAINT + 0x203020, "");   /* how fresh the cards are */
+    lv_obj_set_style_pad_top(s_updated, 3, 0);
     rebuild();
 }
 
@@ -352,7 +390,27 @@ void muse_glance_ui_tick(bool visible)
     }
     if (visible && !s_was_visible) {
         muse_glance_refresh();                    /* opened: fetch if stale */
+        s_last_poll_ms = lv_tick_get();
         lv_obj_scroll_to_y(s_list, 0, LV_ANIM_OFF);
+    } else if (visible && lv_tick_elaps(s_last_poll_ms) > 30000) {
+        muse_glance_refresh();                    /* on screen: keep it live (every 30 s) */
+        s_last_poll_ms = lv_tick_get();
+    }
+    if (visible) {   /* "updated just now / 3 min ago": whole minutes, so it changes rarely */
+        int age = muse_glance_age_s();
+        int key = age < 0 ? -1 : age / 60;
+        if (key != s_shown_age) {
+            s_shown_age = key;
+            char b[32];
+            if (age < 0) {
+                strlcpy(b, "WAITING FOR CARDS", sizeof(b));
+            } else if (age < 60) {
+                strlcpy(b, "UPDATED JUST NOW", sizeof(b));
+            } else {
+                snprintf(b, sizeof(b), "UPDATED %d MIN AGO", age / 60);
+            }
+            lv_label_set_text(s_updated, b);
+        }
     }
     s_was_visible = visible;
     if (s_bench_scroll >= 0) {

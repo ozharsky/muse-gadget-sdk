@@ -2409,6 +2409,10 @@ static void frame_tick(lv_timer_t *timer)
 
 esp_err_t muse_ui_start(void)
 {
+    /* The local timezone before anything draws a time: the clock survives a soft reboot, and
+     * setting TZ only once Wi-Fi joined showed UTC on every clock for the first seconds. */
+    setenv("TZ", CONFIG_MUSE_TIMEZONE, 1);
+    tzset();
     s_w = muse_board->width;
     s_h = muse_board->height;
     /* The full layout assumes room for the 466 px board's header and bottom

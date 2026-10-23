@@ -200,9 +200,16 @@ typedef struct {
     char detail[244];    /* a longer line under it (UTF-8) */
     char icon[12];       /* glance_icons.h name; "" = by kind */
     int8_t progress;     /* 0..100 draws a bar; -1 none */
+    uint8_t nstats;      /* small side-by-side readings (CPU / GPU temperature, ...) */
+    struct {
+        char l[8];
+        char v[12];
+        int8_t p;        /* bar 0..100; -1 none */
+    } stats[3];
 } muse_glance_t;
 int muse_glance_count(void);
 uint32_t muse_glance_gen(void);       /* bumps whenever the cards change */
+int muse_glance_age_s(void);          /* seconds since the last good fetch, -1 = never */
 void muse_glance_refresh(void);       /* fetch soon (the Glance page was opened) */
 /* Poll notifications and glance cards right away (the gadget was just picked up). */
 void muse_notif_poll_now(void);
