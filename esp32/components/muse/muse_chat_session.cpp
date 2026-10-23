@@ -113,7 +113,7 @@ static hermes_stream_t s_hstream;
 #define MP3_HOLD (1441 + 4)               /* the largest MP3 frame and the next header */
 #define MP3_POLL_ROOM (SCRATCH + 8192)     /* stop reading the socket below this much MP3 room */
 #define IN_BYTES (MIC_RATE * 2 * 8)        /* 8 s of mic backlog while connecting */
-#define OUT_BYTES (MIC_RATE * 2 * 2)       /* 2 s of decoded reply */
+#define OUT_BYTES (MIC_RATE * 2 * 10)      /* 10 s of decoded reply (PSRAM): a whole speech piece decodes ahead, so the next piece's ~3 s fetch never gaps the speaker */
 /* Chunked Muse TTS: a piece this long keeps its own fetch (1.3 s fixed + ~8 ms/char)
  * shorter than the piece before it plays, so speech never waits on a later piece. */
 #define TTS_CHUNK_MIN 40
