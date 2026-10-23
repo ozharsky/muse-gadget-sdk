@@ -54,6 +54,13 @@ float muse_imu_pitch_deg(const muse_imu_vec_t *v);
 float muse_imu_roll_deg(const muse_imu_vec_t *v);
 bool muse_imu_roll_ok(const muse_imu_vec_t *v);
 
+/* Gyro: the rotation rate about gravity (deg/s) -- a head-shake "no", in any pose -- given the
+ * accelerometer's gravity vector and the gyro rates (deg/s, same axes). 0 in free fall. */
+float muse_imu_yaw_rate(const muse_imu_vec_t *g, const float w[3]);
+/* A leaky integrator for a rate (deg/s) into an angle (deg): drift-free over seconds, enough to
+ * see a nod's swing. keep is the fraction left per second (0.25 forgets ~75 % a second). */
+float muse_imu_leaky_angle(float angle, float rate, float dt_s, float keep_per_s);
+
 /* A back-and-forth swing of one angle: true once the angle has moved >= MUSE_SWING_DEG one way,
  * then back, then the first way again (three legs) within MUSE_SWING_WINDOW_US; a pause longer
  * than MUSE_SWING_IDLE_US starts over. Zero-initialise; it resets itself after firing. */

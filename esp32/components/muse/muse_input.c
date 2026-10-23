@@ -1031,8 +1031,10 @@ static bool console_command(char *line, bool whole)
     if (!strcmp(line, "imu")) {
         int16_t mg[3] = { 0 };
         esp_err_t err = muse_imu_read(mg);
-        printf("@imu %s present=%d %d %d %d\n", esp_err_to_name(err), muse_imu_present(),
-               mg[0], mg[1], mg[2]);
+        float w[3] = { 0 };
+        esp_err_t gerr = muse_imu_read_gyro(w);
+        printf("@imu %s present=%d %d %d %d gyro=%s %.1f %.1f %.1f\n", esp_err_to_name(err), muse_imu_present(),
+               mg[0], mg[1], mg[2], gerr == ESP_OK ? "on" : "off", w[0], w[1], w[2]);
         return true;
     }
     if (!strcmp(line, "batt.cue")) {

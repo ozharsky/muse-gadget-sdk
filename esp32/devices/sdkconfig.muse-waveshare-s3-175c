@@ -87,3 +87,8 @@ CONFIG_MUSE_IMU=y
 CONFIG_MUSE_JPEG_BENCH=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_32mb.csv"
 CONFIG_LV_USE_SNAPSHOT=y
+
+# Internal RAM headroom (an always-on Bluetooth link needs ~38 KB): run the BLE controller
+# and logging from flash instead of IRAM.
+CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
+# CONFIG_LOG_IN_IRAM is not set

@@ -88,8 +88,36 @@ static void swing_cases(void)
     assert(muse_imu_roll_deg(&flat) > 25.0f && muse_imu_roll_deg(&flat) < 35.0f);
 }
 
+/* A nod fed through the leaky gyro integrator still swings past the detector's threshold. */
+static void gyro_cases(void)
+{
+    muse_imu_vec_t flat = { 0, 0, 1000 }, upright = { 0, -1000, 0 };
+    float spin_z[3] = { 0, 0, 90 }, spin_y[3] = { 0, 90, 0 }, tip_x[3] = { 90, 0, 0 };
+    assert(fabsf(muse_imu_yaw_rate(&flat, spin_z) - 90.0f) < 0.5f);       /* flat: yaw is z */
+    assert(fabsf(muse_imu_yaw_rate(&upright, spin_y) + 90.0f) < 0.5f);    /* upright: yaw is y */
+    assert(fabsf(muse_imu_yaw_rate(&upright, tip_x)) < 0.5f);             /* a nod is not a shake */
+    muse_swing_t s = { 0 };
+    float ang = 0;
+    int fired = -1;
+    for (int t = 0; t <= 3000 && fired < 0; t += 40) {   /* +-120 deg/s at 1.4 Hz: a brisk nod */
+        float rate = 120.0f * cosf(2.0f * 3.14159265f * 1.4f * (float)t / 1000.0f);
+        ang = muse_imu_leaky_angle(ang, rate, 0.04f, 0.25f);
+        if (muse_swing_step(&s, ang, (int64_t)t * 1000)) {
+            fired = t;
+        }
+    }
+    assert(fired > 0);
+    s = (muse_swing_t){ 0 };
+    ang = 0;
+    for (int t = 0; t <= 3000; t += 40) {                /* a slow 20 deg/s drift: nothing */
+        ang = muse_imu_leaky_angle(ang, 20.0f, 0.04f, 0.25f);
+        assert(!muse_swing_step(&s, ang, (int64_t)t * 1000));
+    }
+}
+
 int main(void)
 {
+    gyro_cases();
     tilted_cases();
     flipped_cases();
     jolt_cases();

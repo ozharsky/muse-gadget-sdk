@@ -47,5 +47,8 @@ bool muse_imu_present(void);
 /* Raw sample in milli-g, for the bench. Fails when the part isn't there. */
 esp_err_t muse_imu_read(int16_t mg[3]);
 
+/* Gyro rates in deg/s (screen axes), while it is on (awake, not face-down). */
+esp_err_t muse_imu_read_gyro(float dps[3]);
+
 /* Throttled (slower asleep) gesture poll; returns MUSE_IMU_* edges. */
 unsigned muse_imu_poll(int64_t now_us, bool asleep);

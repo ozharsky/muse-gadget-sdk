@@ -81,6 +81,20 @@ bool muse_imu_roll_ok(const muse_imu_vec_t *v)
     return sqrtf((float)v->x * v->x + (float)v->z * v->z) > 500.0f;
 }
 
+float muse_imu_yaw_rate(const muse_imu_vec_t *g, const float w[3])
+{
+    float n = normf(g);
+    if (n < 200.0f) {
+        return 0.0f;
+    }
+    return ((float)g->x * w[0] + (float)g->y * w[1] + (float)g->z * w[2]) / n;
+}
+
+float muse_imu_leaky_angle(float angle, float rate, float dt_s, float keep_per_s)
+{
+    return angle * powf(keep_per_s, dt_s) + rate * dt_s;
+}
+
 bool muse_swing_step(muse_swing_t *s, float deg, int64_t now_us)
 {
     if (!s->init || (s->dir && now_us - s->last_us > MUSE_SWING_IDLE_US)) {
