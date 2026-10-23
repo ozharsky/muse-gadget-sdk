@@ -26,6 +26,7 @@ static const char *TAG = "muse_pmu";
 #define REG_STATUS1 0x00        /* bit5 VBUS good, bit3 battery present */
 #define REG_STATUS2 0x01        /* bits[6:5] 01 = charging */
 #define REG_COMMON_CFG 0x10     /* bit0 = soft power-off */
+#define REG_PWROFF_EN 0x22      /* bit1 = a long PWR press powers off (XPowers: LongPressShutdown) */
 #define REG_IRQ_LEVEL 0x27      /* bits[3:2] power-key hold-to-off time */
 #define REG_ADC_ENABLE 0x30     /* bit0 = battery voltage */
 #define REG_VBAT_H 0x34         /* bits[4:0]; 1 mV per count with REG_VBAT_L */
@@ -92,12 +93,23 @@ esp_err_t muse_pmu_init(i2c_master_bus_handle_t bus, bool key_irqs)
         }
         ESP_LOGI(TAG, "IRQs off (were enabled %02x %02x %02x, pending %02x %02x %02x)", en[0], en[1], en[2],
                  sts[0], sts[1], sts[2]);
+        /* Here PWR is the push-to-talk button (read on a GPIO): holding it to talk must never
+         * cut the power, so the PMU's long-press shutdown is off. Power-off stays on the other
+         * button (a 1.5 s hold, done by the firmware). */
+        if (rd(REG_PWROFF_EN, &v) == ESP_OK && (v & 0x02)) {
+            uint8_t back = 0;
+            if (wr(REG_PWROFF_EN, v & ~0x02) == ESP_OK && rd(REG_PWROFF_EN, &back) == ESP_OK && !(back & 0x02)) {
+                ESP_LOGI(TAG, "PWR long-press shutdown off (PWR talks)");
+            } else {
+                ESP_LOGW(TAG, "could not turn off the PWR long-press shutdown");
+            }
+        }
     }
 
     ESP_RETURN_ON_ERROR(rd(REG_ADC_ENABLE, &v), TAG, "read adc enable");
     ESP_RETURN_ON_ERROR(wr(REG_ADC_ENABLE, v | 0x01), TAG, "enable battery voltage");
 
-    ESP_LOGI(TAG, "AXP2101 ready (hardware PWR hold-off 10 s)");
+    ESP_LOGI(TAG, "AXP2101 ready (PWR long-press shutdown %s)", key_irqs ? "after 10 s" : "off");
     return ESP_OK;
 }
 
