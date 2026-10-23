@@ -45,6 +45,7 @@
 #include "muse_state.h"
 #include "muse_ui.h"
 #include "muse_glance_ui.h"
+#include "muse_iphone.h"
 #include "avatar/muse_pixel_video.h"
 #include "muse_pixel.h"             /* >render.bench: muse_pixel_bench */
 #include "muse_voice.h"
@@ -1049,6 +1050,20 @@ static bool console_command(char *line, bool whole)
         return true;
     }
 #if CONFIG_LV_USE_SNAPSHOT
+    if (!strncmp(line, "media.demo=", 11)) {   /* bench: a fake now-playing ("Title|Artist|1"), "" clears */
+        char buf[128];
+        strlcpy(buf, line + 11, sizeof(buf));
+        char *artist = strchr(buf, '|'), *play = NULL;
+        if (artist) {
+            *artist++ = 0;
+            play = strchr(artist, '|');
+            if (play) *play++ = 0;
+        }
+        muse_iphone_bench_now(buf, artist ? artist : "", play && *play == '1');
+        printf("@media.demo ok\n");
+        fflush(stdout);
+        return true;
+    }
     if (!strncmp(line, "choose.pick=", 12)) {   /* bench: answer with the swipe's slide-off */
         printf("@choose.pick %s\n", muse_ui_choice_answer_animated(atoi(line + 12)) ? "ok" : "none");
         fflush(stdout);

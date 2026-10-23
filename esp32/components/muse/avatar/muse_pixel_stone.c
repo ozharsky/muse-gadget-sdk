@@ -1189,7 +1189,7 @@ void muse_pixel_render(const muse_pose_t *p)
     if (props_live) {
         /* Lens-coverage bitset (512 B; a 4 KB bool grid before -- internal RAM is
          * the scarce pool). Prop pixels must never land on the eyes. */
-        static uint8_t over_eye[64 * 64 / 8];
+        static EXT_RAM_BSS_ATTR uint8_t over_eye[64 * 64 / 8];
         memset(over_eye, 0, sizeof over_eye);
         int esx = iround(s_idle.gx * 2.0f), esy = iround(s_idle.gy * 1.0f);
         for (int s2 = 0; s2 < 2; s2++) {

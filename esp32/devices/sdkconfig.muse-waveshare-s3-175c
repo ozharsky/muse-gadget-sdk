@@ -42,7 +42,7 @@ CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 # CONFIG_SPIRAM_IGNORE_NOTFOUND is not set
 # That forces Wi-Fi's TX buffers static, in internal RAM: 8, not 16, at 1.6 KB
 # each, which voice over the tunnel doesn't fill.
-CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=6
 
 # Screen off on battery: the CPU drops to the crystal clock and light-sleeps
 # between button polls (muse_input.c). BLE has to allow that with modem sleep;
@@ -92,3 +92,10 @@ CONFIG_LV_USE_SNAPSHOT=y
 # and logging from flash instead of IRAM.
 CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
 # CONFIG_LOG_IN_IRAM is not set
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_RX_BA_WIN=12
+# The iPhone link (muse_iphone.c) is a GATT client of the phone (ANCS + AMS); NimBLE only
+# builds the client with the central role. Two links: the iPhone and a phone-setup session.
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_GATT_CLIENT=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2

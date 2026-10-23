@@ -99,7 +99,7 @@ static size_t s_pre_next, s_pre_fill;
 #if MUSE_LOW_MEM
 static muse_adpcm_t s_pre_enc;
 #endif
-static int16_t s_chunk[MUSE_AUDIO_CHUNK];
+static EXT_RAM_BSS_ATTR int16_t s_chunk[MUSE_AUDIO_CHUNK];
 static int s_settle;
 
 /*
@@ -357,7 +357,7 @@ static bool hatch_reply(bool *delivered)
 {
     muse_state_set_mode(MUSE_MODE_THINKING);
     muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
-    static int16_t buf[MUSE_AUDIO_CHUNK];
+    static EXT_RAM_BSS_ATTR int16_t buf[MUSE_AUDIO_CHUNK];
     static const int16_t silence[MUSE_AUDIO_CHUNK];
     char text[96];
     static char page[MUSE_CAPTION_MAX];
@@ -891,7 +891,7 @@ static void voice_task(void *arg)
                  * sound in both directions (no Muse voice FX). */
                 extern const uint8_t transition_pcm_start[] asm("_binary_transition_pcm_start");
                 extern const uint8_t transition_pcm_end[] asm("_binary_transition_pcm_end");
-                static int16_t buf[MUSE_AUDIO_CHUNK];
+                static EXT_RAM_BSS_ATTR int16_t buf[MUSE_AUDIO_CHUNK];
                 size_t frames = (size_t)(transition_pcm_end - transition_pcm_start) / 2;
                 ESP_LOGI(TAG, "agent-switch sound: %.2fs", (double)frames / MUSE_AUDIO_RATE);
                 for (size_t i = 0; i < frames; i += MUSE_AUDIO_CHUNK) {

@@ -15,6 +15,7 @@
 #include "lvgl.h"
 #include "muse_chat.h"
 #include "muse_glance_ui.h"
+#include "muse_iphone.h"
 
 #define COLOR_BG 0x000000
 #define COLOR_CARD 0x0a1410
@@ -25,7 +26,8 @@
 #define ICON_PX 48
 
 static lv_obj_t *s_list, *s_time, *s_ampm, *s_date, *s_empty;
-static uint32_t s_built_gen = UINT32_MAX;
+static uint32_t s_built_gen = UINT32_MAX, s_built_media = UINT32_MAX;
+#define COLOR_MUSIC 0xff7ac8
 static int s_shown_min = -1;
 static bool s_was_visible;
 static volatile int s_bench_scroll = -1;   /* bench: scroll the stack (any task -> LVGL task) */
@@ -180,11 +182,108 @@ static void add_card(const muse_glance_t *g)
     }
 }
 
+static void on_media(lv_event_t *e)
+{
+    muse_iphone_media((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static lv_obj_t *media_button(lv_obj_t *row, const char *symbol, int cmd, bool big)
+{
+    lv_obj_t *b = lv_obj_create(row);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, big ? 52 : 44, big ? 52 : 44);
+    lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(big ? COLOR_MUSIC : COLOR_FAINT), 0);
+    lv_obj_set_style_bg_opa(b, big ? LV_OPA_COVER : LV_OPA_60, 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_40, LV_STATE_PRESSED);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(b, on_media, LV_EVENT_CLICKED, (void *)(intptr_t)cmd);
+    lv_obj_t *l = label(b, &lv_font_montserrat_20, big ? 0x1a0612 : COLOR_TEXT, symbol);
+    lv_obj_center(l);
+    return b;
+}
+
+/* The phone's player (AMS): note icon, track, artist, and the transport row. */
+static void add_now_playing(const muse_now_playing_t *np)
+{
+    lv_obj_t *card = lv_obj_create(s_list);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_width(card, CARD_W);
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_CARD), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 20, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(COLOR_MUSIC), 0);
+    lv_obj_set_style_border_opa(card, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(card, 2, 0);
+    lv_obj_set_style_pad_all(card, 12, 0);
+    lv_obj_set_style_pad_row(card, 8, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    lv_obj_t *top = lv_obj_create(card);
+    lv_obj_remove_style_all(top);
+    lv_obj_set_size(top, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(top, 10, 0);
+    lv_obj_remove_flag(top, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(top, LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_t *disc = lv_obj_create(top);
+    lv_obj_remove_style_all(disc);
+    lv_obj_set_size(disc, ICON_PX + 8, ICON_PX + 8);
+    lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(disc, lv_color_hex(COLOR_MUSIC), 0);
+    lv_obj_set_style_bg_opa(disc, LV_OPA_10, 0);
+    lv_obj_remove_flag(disc, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    const lv_image_dsc_t *ic = icon_for("music");
+    if (ic) {
+        lv_obj_t *img = lv_image_create(disc);
+        lv_image_set_src(img, ic);
+        lv_image_set_antialias(img, false);
+        lv_image_set_scale(img, 256 * ICON_PX / GLANCE_ICON_N);
+        lv_obj_center(img);
+    }
+    lv_obj_t *col = lv_obj_create(top);
+    lv_obj_remove_style_all(col);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(col, 2, 0);
+    lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    label(col, &lv_font_unscii_8, COLOR_MUSIC, np->playing ? "NOW PLAYING" : "PAUSED");
+    lv_obj_t *t = label(col, &lv_font_montserrat_20, COLOR_TEXT, np->title);
+    lv_obj_set_width(t, lv_pct(100));
+    lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
+    if (np->artist[0]) {
+        lv_obj_t *a = label(col, &lv_font_montserrat_14, COLOR_DIM, np->artist);
+        lv_obj_set_width(a, lv_pct(100));
+        lv_label_set_long_mode(a, LV_LABEL_LONG_MODE_DOTS);
+    }
+
+    lv_obj_t *row = lv_obj_create(card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    media_button(row, LV_SYMBOL_PREV, MUSE_MEDIA_PREV, false);
+    media_button(row, np->playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY, MUSE_MEDIA_TOGGLE, true);
+    media_button(row, LV_SYMBOL_NEXT, MUSE_MEDIA_NEXT, false);
+}
+
 static void rebuild(void)
 {
     /* Everything below the clock header goes; the header (the first child) stays. */
     while (lv_obj_get_child_count(s_list) > 1) {
         lv_obj_delete(lv_obj_get_child(s_list, 1));
+    }
+    muse_now_playing_t np;
+    if (muse_iphone_now_playing(&np)) {
+        add_now_playing(&np);   /* the phone's music first: it is the card you act on */
     }
     int n = muse_glance_count();
     muse_glance_t g;
@@ -194,7 +293,7 @@ static void rebuild(void)
         }
     }
     s_empty = NULL;
-    if (!n) {
+    if (!n && !np.active) {
         s_empty = label(s_list, &lv_font_montserrat_14, COLOR_DIM, "Nothing new right now.\nWeather, prints and reminders show up here.");
         lv_obj_set_width(s_empty, CARD_W - 40);
         lv_obj_set_style_text_align(s_empty, LV_TEXT_ALIGN_CENTER, 0);
@@ -260,9 +359,10 @@ void muse_glance_ui_tick(bool visible)
         lv_obj_scroll_to_y(s_list, s_bench_scroll, LV_ANIM_OFF);
         s_bench_scroll = -1;
     }
-    uint32_t gen = muse_glance_gen();
-    if (gen != s_built_gen) {
+    uint32_t gen = muse_glance_gen(), media = muse_iphone_gen();
+    if (gen != s_built_gen || media != s_built_media) {
         s_built_gen = gen;
+        s_built_media = media;
         rebuild();
     }
     time_t tt = time(NULL);

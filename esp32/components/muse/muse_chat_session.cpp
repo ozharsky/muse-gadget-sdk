@@ -3875,7 +3875,7 @@ static void post(cmd_type_t type, uint32_t gen)
 
 static void drain_out(void)
 {
-    static int16_t junk[256];
+    static EXT_RAM_BSS_ATTR int16_t junk[256];
     while (xStreamBufferReceive(s_out, junk, sizeof(junk), 0)) {
     }
 }

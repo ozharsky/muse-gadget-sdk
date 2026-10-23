@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "esp_attr.h"
 #include "sdkconfig.h"
 
 #include <stdio.h>
@@ -248,7 +249,7 @@ void muse_assets_report(void)
     }
     /* Time a full pass of the first clip: read + delta + unpack. */
     const muse_asset_t *c = &s_clips[0];
-    static uint8_t out[64 * 64];
+    static EXT_RAM_BSS_ATTR uint8_t out[64 * 64];
     int64_t t0 = esp_timer_get_time();
     int ok = 0;
     for (int i = 0; i < c->frames; i++) {

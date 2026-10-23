@@ -44,9 +44,9 @@ static int s_req_loops;
 
 /* Player state (LVGL task only). */
 static const bench_video_t *s_clip;     /* NULL = faces own the canvas */
-static muse_asset_t s_asset;            /* the partition clip being played */
+static EXT_RAM_BSS_ATTR muse_asset_t s_asset;            /* the partition clip being played */
 static bool s_asset_active;
-static muse_asset_t s_req_asset;        /* pending request (console task owns s_req) */
+static EXT_RAM_BSS_ATTR muse_asset_t s_req_asset;        /* pending request (console task owns s_req) */
 static bool s_req_is_asset;
 static int s_loops_left;                /* -1 = play forever */
 static int64_t s_start_us;

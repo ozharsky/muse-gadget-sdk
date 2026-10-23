@@ -40,8 +40,8 @@ static const char *TAG = "muse_audio";
 static esp_codec_dev_handle_t s_spk;
 static esp_codec_dev_handle_t s_mic;
 static bool s_open;
-static int16_t s_in_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
-static int16_t s_out_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
+static EXT_RAM_BSS_ATTR int16_t s_in_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
+static EXT_RAM_BSS_ATTR int16_t s_out_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
 
 /* One-pole high-pass on the mixed mic signal. */
 static float s_hpf_a;

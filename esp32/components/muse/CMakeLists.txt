@@ -46,6 +46,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_diag.c"
         "muse_settings_ui.c"
         "muse_glance_ui.c"
+        "muse_iphone.c"
         "muse_text.c"
         "muse_keypad.c"
         "muse_lv_mem.c"

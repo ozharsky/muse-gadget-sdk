@@ -15,6 +15,7 @@
  */
 
 #include "muse_settings_ui.h"
+#include "muse_iphone.h"
 #include "avatar/icon_hermes.h"
 #include "avatar/icon_meta.h"
 
@@ -984,12 +985,21 @@ static void on_ble_forget(lv_event_t *e)
     muse_ble_forget_all();
 }
 
+static lv_obj_t *s_iphone_sw, *s_iphone_status;
+
+static void on_iphone_sw(lv_event_t *e)
+{
+    muse_settings_set_iphone_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
 static void build_ble_page(lv_obj_t *tile)
 {
     lv_obj_t *list;
     s_ble = page(tile, "BLUETOOTH", true, &list);
     s_ble_sw = switch_row(list, "Phone setup", muse_settings_ble_on(), on_ble_sw);
     s_ble_status = note(list, "");
+    s_iphone_sw = switch_row(list, "iPhone", muse_settings_iphone_on(), on_iphone_sw);
+    s_iphone_status = note(list, "");
     button(list, "Forget paired phones", COLOR_DANGER, on_ble_forget, NULL);
     note(list, "When on, Muse is visible to phones nearby. Open tools/ble_setup.html in Chrome, "
                "connect, and enter the code Muse shows to pair.");
@@ -1017,6 +1027,19 @@ static void tick_ble(void)
     bool on = muse_settings_ble_on();
     if (on != lv_obj_has_state(s_ble_sw, LV_STATE_CHECKED)) {
         lv_obj_set_state(s_ble_sw, LV_STATE_CHECKED, on);
+    }
+    static const char *const iphone_text[] = {
+        "Off",
+        "On your iPhone: Settings > Bluetooth, tap this gadget, enter the code it shows. "
+        "Then allow Share System Notifications.",
+        "Pairing...", "iPhone connected: notifications and media",
+    };
+    muse_iphone_state_t st = muse_iphone_state();
+    set_text(s_iphone_status, iphone_text[st]);
+    lv_obj_set_style_text_color(s_iphone_status, lv_color_hex(st == MUSE_IPHONE_CONNECTED ? COLOR_OK : COLOR_DIM), 0);
+    bool ion = muse_settings_iphone_on();
+    if (ion != lv_obj_has_state(s_iphone_sw, LV_STATE_CHECKED)) {
+        lv_obj_set_state(s_iphone_sw, LV_STATE_CHECKED, ion);
     }
 }
 

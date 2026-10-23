@@ -22,6 +22,7 @@ C = {
     "g": (110, 124, 134), "B": (92, 200, 255), "b": (50, 130, 220), "O": (255, 154, 92),
     "o": (196, 98, 52), "G": (77, 255, 60), "d": (40, 150, 40), "K": (52, 60, 66), "P": (199, 146, 255),
     "R": (255, 92, 92), "r": (170, 40, 40), "T": (77, 216, 200), "t": (30, 120, 112),
+    "M": (255, 122, 200), "m": (170, 60, 130),
 }
 
 
@@ -222,11 +223,22 @@ def icon_alert():
     return c
 
 
+def icon_music():
+    """Now playing: a pair of beamed eighth notes."""
+    c = canvas()
+    rect(c, 6, 2, 14, 3, "M")                     # the beam
+    rect(c, 6, 4, 6, 11, "M"); rect(c, 14, 4, 14, 10, "M")   # stems
+    disc(c, 4.0, 12.5, 3.1, "M")                  # heads
+    disc(c, 12.0, 11.5, 3.1, "M")
+    put(c, 7, 2, "W"); put(c, 8, 2, "W")          # a glint on the beam
+    return c
+
+
 ICONS = {
     "sun": icon_sun, "partly": icon_partly, "cloud": icon_cloud, "rain": icon_rain, "snow": icon_snow,
     "storm": icon_storm, "fog": icon_fog, "clock": icon_clock, "printer": icon_printer, "bell": icon_bell,
     "spark": icon_spark, "note": icon_note, "task": icon_task, "agent": icon_agent, "chip": icon_chip,
-    "alert": icon_alert,
+    "alert": icon_alert, "music": icon_music,
 }
 
 
