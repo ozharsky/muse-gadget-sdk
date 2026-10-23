@@ -21,7 +21,7 @@ C = {
     "Y": (255, 214, 64), "y": (255, 168, 40), "W": (236, 244, 248), "w": (170, 186, 196),
     "g": (110, 124, 134), "B": (92, 200, 255), "b": (50, 130, 220), "O": (255, 154, 92),
     "o": (196, 98, 52), "G": (77, 255, 60), "d": (40, 150, 40), "K": (52, 60, 66), "P": (199, 146, 255),
-    "R": (255, 92, 92),
+    "R": (255, 92, 92), "r": (170, 40, 40), "T": (77, 216, 200), "t": (30, 120, 112),
 }
 
 
@@ -181,10 +181,52 @@ def icon_task():
     return c
 
 
+def icon_agent():
+    """Hermes: a small robot head with an antenna and two lit eyes."""
+    c = canvas()
+    put(c, 7, 0, "P"); put(c, 8, 0, "P"); rect(c, 7, 1, 8, 2, "w")
+    rect(c, 2, 3, 13, 12, "w"); rect(c, 3, 4, 12, 11, "K")
+    rect(c, 1, 6, 1, 9, "g"); rect(c, 14, 6, 14, 9, "g")          # ears
+    rect(c, 4, 6, 6, 8, "P"); rect(c, 9, 6, 11, 8, "P")          # eyes
+    put(c, 4, 6, "W"); put(c, 9, 6, "W")
+    rect(c, 5, 10, 10, 10, "g")                                   # mouth grille
+    for x in (6, 8):
+        put(c, x, 10, "K")
+    rect(c, 4, 13, 11, 14, "g")                                   # neck/shoulders
+    return c
+
+
+def icon_chip():
+    """This machine: a processor die with pins."""
+    c = canvas()
+    for i in range(3, 13, 3):
+        rect(c, i, 0, i, 2, "w"); rect(c, i, 13, i, 15, "w")      # pins top/bottom
+        rect(c, 0, i, 2, i, "w"); rect(c, 13, i, 15, i, "w")      # pins left/right
+    rect(c, 2, 2, 13, 13, "t"); rect(c, 3, 3, 12, 12, "K")
+    rect(c, 5, 5, 10, 10, "T"); rect(c, 6, 6, 9, 9, "t")
+    put(c, 3, 3, "T")                                             # pin-1 mark
+    return c
+
+
+def icon_alert():
+    """Something needs a look: a red warning triangle."""
+    c = canvas()
+    for y in range(2, 15):
+        half = (y - 1) // 2
+        rect(c, 8 - half - 1, y, 7 + half + 1, y, "R")
+    rect(c, 7, 6, 8, 10, "W"); rect(c, 7, 12, 8, 13, "W")
+    for y in range(2, 15):
+        half = (y - 1) // 2
+        put(c, 8 - half - 1, y, "r"); put(c, 7 + half + 1, y, "r")
+    rect(c, 1, 14, 14, 14, "r")
+    return c
+
+
 ICONS = {
     "sun": icon_sun, "partly": icon_partly, "cloud": icon_cloud, "rain": icon_rain, "snow": icon_snow,
     "storm": icon_storm, "fog": icon_fog, "clock": icon_clock, "printer": icon_printer, "bell": icon_bell,
-    "spark": icon_spark, "note": icon_note, "task": icon_task,
+    "spark": icon_spark, "note": icon_note, "task": icon_task, "agent": icon_agent, "chip": icon_chip,
+    "alert": icon_alert,
 }
 
 

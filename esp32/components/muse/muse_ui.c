@@ -2012,7 +2012,7 @@ static uint32_t glance_color(const char *kind)
 {
     static const struct { const char *k; uint32_t c; } map[] = {
         { "weather", 0x5cc8ff }, { "print", 0xff9a5c }, { "reminder", 0xffcc4d },
-        { "briefing", COLOR_ACCENT }, { "task", 0xc792ff },
+        { "briefing", COLOR_ACCENT }, { "task", 0xc792ff }, { "system", 0x4dd8c8 }, { "alert", 0xff5c5c },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (!strcmp(kind, map[i].k)) {

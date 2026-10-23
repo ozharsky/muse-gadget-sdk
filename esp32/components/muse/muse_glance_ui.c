@@ -44,7 +44,9 @@ static const struct {
     { "print", "printer", "PRINTER", 0xff9a5c },
     { "reminder", "bell", "REMINDER", 0xffcc4d },
     { "briefing", "spark", "BRIEFING", 0x4dff3c },
-    { "task", "task", "TASK", 0xc792ff },
+    { "task", "agent", "HERMES", 0xc792ff },
+    { "system", "chip", "SYSTEM", 0x4dd8c8 },
+    { "alert", "alert", "NEEDS A LOOK", 0xff5c5c },
     { "note", "note", "NOTE", 0xb8ffd0 },
 };
 
@@ -113,8 +115,8 @@ static void add_card(const muse_glance_t *g)
     lv_obj_set_style_border_color(card, lv_color_hex(color), 0);
     lv_obj_set_style_border_opa(card, LV_OPA_50, 0);
     lv_obj_set_style_border_width(card, 2, 0);
-    lv_obj_set_style_pad_all(card, 14, 0);
-    lv_obj_set_style_pad_column(card, 14, 0);
+    lv_obj_set_style_pad_all(card, 12, 0);
+    lv_obj_set_style_pad_column(card, 10, 0);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
@@ -123,7 +125,7 @@ static void add_card(const muse_glance_t *g)
     /* The icon sits on a soft disc of the kind's colour. */
     lv_obj_t *disc = lv_obj_create(card);
     lv_obj_remove_style_all(disc);
-    lv_obj_set_size(disc, ICON_PX + 16, ICON_PX + 16);
+    lv_obj_set_size(disc, ICON_PX + 8, ICON_PX + 8);
     lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(disc, lv_color_hex(color), 0);
     lv_obj_set_style_bg_opa(disc, LV_OPA_10, 0);
