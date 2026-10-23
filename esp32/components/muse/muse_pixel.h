@@ -43,6 +43,9 @@ typedef struct {
 /* Accent colour of a mode (for the surrounding UI), as 0xRRGGBB. */
 uint32_t muse_pixel_accent(muse_mode_t mode);
 
+/* Per-face centring nudge, panel px (the active face's art is not centred in its 64x64 grid). */
+void muse_pixel_center(int *dx, int *dy);
+
 /* Render one frame into Muse's own MUSE_PX_W x MUSE_PX_H grid. */
 void muse_pixel_render(const muse_pose_t *pose);
 

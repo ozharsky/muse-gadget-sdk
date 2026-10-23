@@ -150,6 +150,15 @@ static volatile int s_frame_ms_want;   /* from any task; applied by frame_tick *
 static int s_frame_ms_applied;
 static volatile int s_face_dx, s_face_dy;   /* parallax request (cells) */
 static int s_face_dx_applied, s_face_dy_applied;
+static int s_center_dx_applied, s_center_dy_applied;
+
+/* Per-face centring nudge in panel px (avatar/muse_pixel_switch.c). Weak: boards without the
+ * dispatcher keep the old placement. */
+__attribute__((weak)) void muse_pixel_center(int *dx, int *dy)
+{
+    *dx = 0;
+    *dy = 0;
+}
 static volatile int64_t s_last_frame_us;   /* when the UI task last ran a frame: see stall_check */
 
 static float s_level;
@@ -2086,12 +2095,17 @@ static void frame_tick(lv_timer_t *timer)
         s_frame_ms_applied = want;
         ESP_LOGI(TAG, "face cadence %d ms (%d fps)", want, 1000 / want);
     }
-    if (s_face_dx != s_face_dx_applied || s_face_dy != s_face_dy_applied) {
+    int cdx, cdy;
+    muse_pixel_center(&cdx, &cdy);
+    if (s_face_dx != s_face_dx_applied || s_face_dy != s_face_dy_applied ||
+        cdx != s_center_dx_applied || cdy != s_center_dy_applied) {
         s_face_dx_applied = s_face_dx;
         s_face_dy_applied = s_face_dy;
+        s_center_dx_applied = cdx;
+        s_center_dy_applied = cdy;
         if (s_canvas) {
-            lv_obj_set_style_translate_x(s_canvas, s_face_dx_applied * 2, 0);
-            lv_obj_set_style_translate_y(s_canvas, s_face_dy_applied * 2, 0);
+            lv_obj_set_style_translate_x(s_canvas, s_face_dx_applied * 2 + cdx, 0);
+            lv_obj_set_style_translate_y(s_canvas, s_face_dy_applied * 2 + cdy, 0);
         }
     }
     s_last_frame_us = esp_timer_get_time();

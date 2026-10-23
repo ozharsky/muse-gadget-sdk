@@ -51,6 +51,17 @@ static int face_for_agent(void)
     }
 }
 
+/* Centring nudge per face, panel px from the canvas centre. Measured from each sprite's
+ * content (bbox + brightness centroid), not from the canvas: SHODAN's art sits half a cell
+ * right, the stone half a cell left, and the golem's shoulders pull its bbox 3.5 cells low. */
+void muse_pixel_center(int *dx, int *dy)
+{
+    static const int8_t C[3][2] = { { -2, -1 }, { 2, 0 }, { 0, -10 } };
+    int f = face_for_agent();
+    *dx = C[f][0];
+    *dy = C[f][1];
+}
+
 /*
  * Switching agents plays a glitch: for 1.5 s the picture tears in sideways bands and fills with
  * noise, strongest in the middle, where the face changes from the old agent's to the new one's.

@@ -270,6 +270,7 @@ static float s_spk_hold;
  * muse_pixel_render; these hold what is actually drawn, so a mood or mode change
  * reads as motion, not a cut. First frame: settled (no fade-in from zero). */
 static muse_rig_t s_rig;
+static float s_m2;   /* wide-open mouth weight: eased so half->open dithers in instead of snapping */
 static bool s_rig_init;
 
 /* Returns how closed the eyes are for a blink (0 open .. 1 shut) and steps the gaze/beats. */
@@ -1082,6 +1083,7 @@ void muse_pixel_render(const muse_pose_t *p)
     bright = s_rig.bright;
     bloom = s_rig.bloom;
 
+    s_m2 = muse_ease(s_m2, mouth > 0.9f ? 1.0f : 0.0f, dt, 0.07f);
     memcpy(s_fb, SPR, sizeof(s_fb));
     for (int i = 0; i < W * H; i++) {
         if (SPR_KIND[i] == 2) {
@@ -1159,7 +1161,8 @@ void muse_pixel_render(const muse_pose_t *p)
         }
     }
     if (mode == MUSE_MODE_SPEAKING && s_rig.mouth > 0.02f) {
-        pose(mouth > 0.9f ? POSE_MOUTH_2 : POSE_MOUTH_1, s_rig.mouth, true);
+        pose(POSE_MOUTH_1, s_rig.mouth, true);
+        pose(POSE_MOUTH_2, s_rig.mouth * s_m2, true);
     }
     if (!xeye) {
         eye_glow(bright);
