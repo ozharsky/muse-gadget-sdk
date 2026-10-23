@@ -265,6 +265,7 @@ struct turn_t {
     bool mp3_ended;
     size_t tts_off;          /* Muse: characters of the speaking message already fetched */
     bool tts_more;           /* Muse chunked fetch: another piece is still to come */
+    uint8_t tts_fails;       /* pieces that failed this message (3 = give up) */
     mp3dec_t dec;
     resampler_t down;
     int kbps;
@@ -1855,6 +1856,18 @@ static size_t tts_chunk_len(const char *t, size_t from, size_t len, bool done)
     return last_space - from >= TTS_CHUNK_MIN ? last_space - from : 0;
 }
 
+/* True if a slice has anything to say: a letter or digit (or any non-ASCII byte -- UTF-8 text). */
+static bool speakable(const char *t, size_t n)
+{
+    for (size_t k = 0; k < n; k++) {
+        unsigned char c = (unsigned char)t[k];
+        if (isalnum(c) || c >= 0x80) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* fetch_tts on one NUL-free slice of the texts buffer. */
 static bool fetch_tts_range(char *t, size_t from, size_t cl, bool last, bool first)
 {
@@ -1894,11 +1907,28 @@ static void tts_refill(void)
         return;   /* mid-word tail while the text is still growing: wait */
     }
     bool last = m.done && s_turn.tts_off + cl >= tlen;
-    if (!fetch_tts_range(t, s_turn.tts_off, cl, last, false)) {
-        ESP_LOGW(TAG, "tts: next piece failed; the speech ends early");
-        s_turn.tts_more = false;
-        s_turn.mp3_ended = true;
+    /* A piece with nothing to say (a trailing newline or space after the last sentence) is
+     * skipped: Google answers it with 400 "does not support empty input", and treating that as
+     * a failure used to end the speech mid-reply. Any other failed piece is skipped too, not the
+     * rest of the reply. */
+    if (!speakable(t + s_turn.tts_off, cl)) {
+        s_turn.tts_off += cl;
+        s_turn.tts_more = !last;
+        if (last) {
+            s_turn.mp3_ended = true;
+        }
         return;
+    }
+    if (!fetch_tts_range(t, s_turn.tts_off, cl, last, false)) {
+        ESP_LOGW(TAG, "tts: a piece failed (%u chars); skipping to the next", (unsigned)cl);
+        if (++s_turn.tts_fails >= 3 || last) {   /* the service is down, or nothing follows */
+            if (!last) {
+                ESP_LOGW(TAG, "tts: three pieces failed; the speech ends early");
+            }
+            s_turn.tts_more = false;
+            s_turn.mp3_ended = true;
+            return;
+        }
     }
     s_turn.tts_off += cl;
     s_turn.tts_more = !last;
@@ -1969,6 +1999,7 @@ static void start_tts(void)
         s_turn.silent = true;
         s_turn.tts_off = 0;
         s_turn.tts_more = false;
+        s_turn.tts_fails = 0;
         if (will_fetch && cl &&
             fetch_tts_range(s_turn.texts + i * TEXT_MAX, 0, cl, m.done && cl >= tlen, true)) {
             /* First piece fetched: decode() starts the speech, tts_refill() fetches
