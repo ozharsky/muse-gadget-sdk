@@ -43,6 +43,7 @@
 #include "muse_mem.h"
 #include "muse_menu.h"
 #include "muse_pixel.h"
+#include "muse_mjpeg.h"
 #include "avatar/muse_pixel_video.h"
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
@@ -1378,6 +1379,7 @@ static void image_sync(void)
 static void on_image_clicked(lv_event_t *e)
 {
     (void)e;
+    muse_mjpeg_stop();   /* a video keeps redrawing after image_hide alone */
 #if CONFIG_MUSE_WATCHER_CAMERA
     if (watcher_camera_preview_active()) {
         watcher_camera_preview_toggle();

@@ -282,7 +282,7 @@ static const muse_board_t s_board = {
     .talk_hint = { LV_ALIGN_CENTER, 153, -129 },    /* 40 degrees above/below 3 o'clock */
     .aux_hint = { LV_ALIGN_CENTER, 153, 129 },
 #endif
-    .frame_ms = 25,
+    .frame_ms = 16,   /* 60 fps on USB; the power policy drops to 25 on the cell */
     .init = init,
     .display_start = display_start,
     .display_lock = display_lock,
