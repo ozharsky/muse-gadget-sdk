@@ -67,6 +67,7 @@ void muse_settings_tts_add(uint32_t chars);
 void muse_settings_tts_reset(void);
 bool muse_settings_ble_on(void);
 bool muse_settings_iphone_on(void);   /* the iPhone link: notifications (ANCS) + media (AMS) */
+bool muse_settings_iphone_alerts(void);   /* show the phone's notifications (default off) */
 
 void muse_settings_wifi(char ssid[MUSE_SSID_MAX + 1], char pass[MUSE_PASS_MAX + 1]);
 void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
@@ -84,6 +85,7 @@ esp_err_t muse_settings_set_sleep_s(int secs);
 void muse_settings_set_wifi_on(bool on);
 void muse_settings_set_ble_on(bool on);
 void muse_settings_set_iphone_on(bool on);
+void muse_settings_set_iphone_alerts(bool on);
 /* Which agent answers. Muse is the Meta cloud; the two Hermes slots are the Mac relay
  * against different Hermes PROFILES (agents.json on the relay routes by name). The ALT
  * slot stays dormant until a profile name is set, so a device that never sets one cycles

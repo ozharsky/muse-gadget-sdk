@@ -120,26 +120,45 @@ static const char *app_name(const char *bundle)
         { "com.facebook.Messenger", "Messenger" }, { "com.burbn.instagram", "Instagram" },
         { "com.tinyspeck.chatlyio", "Slack" },  { "com.hammerandchisel.discord", "Discord" },
         { "ph.telegra.Telegraph", "Telegram" }, { "com.google.Gmail", "Gmail" },
+        { "com.apple.news", "News" },           { "com.google.ios.youtube", "YouTube" },
+        { "com.linkedin.LinkedIn", "LinkedIn" }, { "com.apple.mobileslideshow", "Photos" },
+        { "com.apple.Passbook", "Wallet" },     { "com.apple.facetime", "FaceTime" },
+        { "com.apple.Health", "Health" },       { "com.amazon.Amazon", "Amazon" },
     };
     for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
         if (!strcmp(bundle, known[i].id)) {
             return known[i].name;
         }
     }
+    /* Unknown: the bundle's last part, capitalised ("com.acme.notes" -> "Notes"). */
+    static char guess[24];
     const char *dot = strrchr(bundle, '.');
-    return dot && dot[1] ? dot + 1 : bundle;
+    strlcpy(guess, dot && dot[1] ? dot + 1 : bundle, sizeof(guess));
+    if (guess[0] >= 'a' && guess[0] <= 'z') {
+        guess[0] = (char)(guess[0] - 32);
+    }
+    return guess;
 }
+
+static int64_t s_ready_us, s_last_shown_us;
 
 static void present(const char *bundle, const char *title, const char *msg)
 {
-    if (muse_input_dnd()) {
-        return;   /* face-down: the phone has it anyway */
+    int64_t now = esp_timer_get_time();
+    /* Face-down: the phone has it anyway. The first seconds after connecting: iOS can replay
+     * a backlog (not always flagged pre-existing) -- that is history, not news. */
+    if (!muse_settings_iphone_alerts() || muse_input_dnd() || now - s_ready_us < 8 * 1000000LL) {
+        return;
     }
     const char *app = app_name(bundle);
+    bool burst = now - s_last_shown_us < 4 * 1000000LL;   /* a burst: one chime, newest caption */
+    s_last_shown_us = now;
     muse_state_set_asleep(false);
     muse_input_poke();
-    muse_ui_react("alert");
-    muse_voice_request_notif();
+    if (!burst) {
+        muse_ui_react("alert");
+        muse_voice_request_notif();
+    }
     /* Two caption lines: who (or the app), then what. */
     if (title[0] && msg[0]) {
         muse_state_set_caption("%s (%s)\n%s", title, app, msg);
@@ -252,6 +271,7 @@ static void on_eu(const uint8_t *d, int n)
         return;
     }
     uint8_t entity = d[0], attr = d[1];
+    ESP_LOGI(TAG, "AMS update: entity %u attr %u flags %u (%d bytes)", entity, attr, d[2], n - 3);
     char v[64];
     int len = n - 3 < (int)sizeof(v) - 1 ? n - 3 : (int)sizeof(v) - 1;
     memcpy(v, d + 3, len);
@@ -267,6 +287,7 @@ static void on_eu(const uint8_t *d, int n)
     }
     s_now.active = s_now.title[0] != 0;
     s_gen = s_gen + 1;
+    ESP_LOGI(TAG, "now playing: %s %s - %s", s_now.playing ? "playing" : "paused", s_now.artist, s_now.title);
 }
 
 /* ---------- the GATT setup script ---------- */
@@ -305,18 +326,27 @@ static int on_chr(uint16_t conn, const struct ble_gatt_error *err, const struct 
     return 0;
 }
 
+/* Descriptor discovery runs from ONE characteristic's value handle to the service's end (NimBLE
+ * reports every descriptor against that start handle, so the answer cannot be matched by
+ * chr_val): the first CCCD after it is that characteristic's. */
 static int on_dsc(uint16_t conn, const struct ble_gatt_error *err, uint16_t chr_val, const struct ble_gatt_dsc *dsc, void *arg)
 {
+    uint16_t *target = arg;
     if (err->status == 0 && dsc) {
-        if (!ble_uuid_cmp(&dsc->uuid.u, &CCCD.u)) {
-            if (chr_val == s_ns) s_ns_cccd = dsc->handle;
-            else if (chr_val == s_ds) s_ds_cccd = dsc->handle;
-            else if (chr_val == s_eu) s_eu_cccd = dsc->handle;
+        if (!*target && dsc->handle > chr_val && !ble_uuid_cmp(&dsc->uuid.u, &CCCD.u)) {
+            *target = dsc->handle;   /* the first CCCD after the value: this characteristic's */
         }
-        return 0;
+        return 0;   /* let the walk finish: NimBLE calls once more at the end either way */
     }
-    step();
+    step();         /* the walk ended (found or not): next step, exactly once */
     return 0;
+}
+
+static void find_cccd(uint16_t val, uint16_t end, uint16_t *target)
+{
+    if (!val || !end || ble_gattc_disc_all_dscs(s_conn, val, end, on_dsc, target) != 0) {
+        step();
+    }
 }
 
 static void subscribe(uint16_t cccd)
@@ -347,33 +377,37 @@ static void step(void)
         if (!s_ams.start || ble_gattc_disc_all_chrs(s_conn, s_ams.start, s_ams.end, on_chr, NULL) != 0) step();
         break;
     case 4:
-        if (!s_ancs.start || ble_gattc_disc_all_dscs(s_conn, s_ancs.start, s_ancs.end, on_dsc, NULL) != 0) step();
+        find_cccd(s_ns, s_ancs.end, &s_ns_cccd);
         break;
     case 5:
-        if (!s_ams.start || ble_gattc_disc_all_dscs(s_conn, s_ams.start, s_ams.end, on_dsc, NULL) != 0) step();
+        find_cccd(s_ds, s_ancs.end, &s_ds_cccd);
         break;
     case 6:
-        subscribe(s_ds_cccd);   /* Data Source before Notification Source, as the spec asks */
+        find_cccd(s_eu, s_ams.end, &s_eu_cccd);
         break;
     case 7:
-        subscribe(s_ns_cccd);
+        subscribe(s_ds_cccd);   /* Data Source before Notification Source, as the spec asks */
         break;
     case 8:
-        subscribe(s_eu_cccd);
+        subscribe(s_ns_cccd);
         break;
-    case 9: {   /* AMS: Player -> PlaybackInfo */
+    case 9:
+        subscribe(s_eu_cccd);   /* AMS rejects registrations (0xA0) until this is on */
+        break;
+    case 10: {  /* AMS: Player -> PlaybackInfo */
         static const uint8_t reg[] = { 0, 1 };
-        if (!s_eu || ble_gattc_write_flat(s_conn, s_eu, reg, sizeof(reg), on_written, (void *)1) != 0) step();
+        if (!s_eu_cccd || ble_gattc_write_flat(s_conn, s_eu, reg, sizeof(reg), on_written, (void *)1) != 0) step();
         break;
     }
-    case 10: {  /* AMS: Track -> Artist, Title */
+    case 11: {  /* AMS: Track -> Artist, Title */
         static const uint8_t reg[] = { 2, 0, 2 };
-        if (!s_eu || ble_gattc_write_flat(s_conn, s_eu, reg, sizeof(reg), on_written, (void *)1) != 0) step();
+        if (!s_eu_cccd || ble_gattc_write_flat(s_conn, s_eu, reg, sizeof(reg), on_written, (void *)1) != 0) step();
         break;
     }
     default:
         if (!s_ready) {
             s_ready = true;
+            s_ready_us = esp_timer_get_time();
             ESP_LOGI(TAG, "iPhone ready: notifications %s, media %s", s_ns_cccd ? "on" : "unavailable",
                      s_eu_cccd ? "on" : "unavailable");
         }

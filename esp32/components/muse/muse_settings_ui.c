@@ -985,7 +985,12 @@ static void on_ble_forget(lv_event_t *e)
     muse_ble_forget_all();
 }
 
-static lv_obj_t *s_iphone_sw, *s_iphone_status;
+static lv_obj_t *s_iphone_sw, *s_iphone_status, *s_alerts_sw;
+
+static void on_alerts_sw(lv_event_t *e)
+{
+    muse_settings_set_iphone_alerts(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
 
 static void on_iphone_sw(lv_event_t *e)
 {
@@ -1000,6 +1005,7 @@ static void build_ble_page(lv_obj_t *tile)
     s_ble_status = note(list, "");
     s_iphone_sw = switch_row(list, "iPhone", muse_settings_iphone_on(), on_iphone_sw);
     s_iphone_status = note(list, "");
+    s_alerts_sw = switch_row(list, "iPhone alerts", muse_settings_iphone_alerts(), on_alerts_sw);
     button(list, "Forget paired phones", COLOR_DANGER, on_ble_forget, NULL);
     note(list, "When on, Muse is visible to phones nearby. Open tools/ble_setup.html in Chrome, "
                "connect, and enter the code Muse shows to pair.");
