@@ -60,6 +60,7 @@
 #include "muse_assets.h"
 #include "muse_log.h"
 #include "muse_rtc.h"
+#include "muse_mjpeg.h"
 #if CONFIG_MUSE_JPEG_BENCH
 #include "muse_jpeg_bench.h"
 #endif
@@ -363,6 +364,9 @@ static void talk_button(unsigned ev)
         } else {
             if (muse_pixel_video_active()) {
                 muse_pixel_video("stop");   /* a clip must never trap the face */
+            }
+            if (muse_mjpeg_active()) {
+                muse_mjpeg_stop();
             }
             post(MUSE_PTT_DOWN, false);
             talk_down = true;
@@ -939,6 +943,22 @@ static bool console_command(char *line, bool whole)
     }
     if (!strcmp(line, "log.clear")) {
         muse_log_clear();
+        return true;
+    }
+    if (!strncmp(line, "mjpeg.play=", 11)) {
+        char nm[20] = { 0 };
+        int loops = -1;
+        if (sscanf(line + 11, "%19[^,],%d", nm, &loops) >= 1) {
+            bool ok = muse_mjpeg_play(nm, loops);
+            printf("@mjpeg.play %s %s\n", nm, ok ? "ok" : "not found");
+        } else {
+            printf("@mjpeg.play needs a name\n");
+        }
+        return true;
+    }
+    if (!strcmp(line, "mjpeg.stop")) {
+        muse_mjpeg_stop();
+        printf("@mjpeg.stop\n");
         return true;
     }
     if (!strcmp(line, "i2c.scan")) {

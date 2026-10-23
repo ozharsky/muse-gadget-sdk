@@ -14,19 +14,19 @@
 # limitations under the License.
 """Pack animated clips into the gadget's flash asset partition.
 
-The "drop a GIF in" step: any ffmpeg-readable source (GIF, MP4, WebM, APNG, a
-PNG sequence) becomes 64x64, 16-colour, 4-bit frames, delta-coded against the
-previous frame, in one `assets.bin` flashed to the `assets` partition and
-played by name.
+Two kinds of clip, one pack:
 
-Why a custom pack instead of a GIF decoder on the device: a 64x64 GIF frame is
-~4 KB and needs LZW + per-frame palettes; a packed frame here is 2 KB and most
-frames shrink to a few hundred bytes because only changed cells are stored.
-ffmpeg reads every animated format for us -- at build time, not on the chip.
+* **indexed** (`--fmt i4|u8`, the default): 64x64, 16-colour frames,
+  delta-coded against the previous frame. Cheap and tiny (tens of bytes a
+  frame) — the avatar-canvas clips.
+* **mjpeg** (`--fmt mjpeg`): full JPEG frames (default 300x300), played by the
+  cinematic player at the panel's edge. ~18 ms decode at 300 px on this chip.
 
-Usage:
+ffmpeg reads every animated format (GIF, MP4, WebM, APNG, a PNG sequence), so
+"drop a GIF in" is one command:
+
     tools/muse/assets_pack.py --from clip.gif --name bounce --fps 25 --out assets.bin
-    tools/muse/assets_pack.py --from clip.mp4 --name clip2 --fps 25 --out assets.bin --append
+    tools/muse/assets_pack.py --from film.mp4 --name demo --fmt mjpeg --size 300 --fps 20 --out assets.bin --append
     tools/muse/assets_pack.py --list assets.bin
 
 Layout (little-endian):
@@ -35,13 +35,14 @@ Layout (little-endian):
     per clip, entry header 64 B:
         char name[16]
         u16 frames
-        u8 fps, u8 fmt (0=u8, 1=i4), u8 npal, u8 pad[3]
-        u16 pal[16]          (RGB565)
+        u8 fps, u8 fmt (0=u8, 1=i4, 2=mjpeg), u8 npal, u8 pad[3]
+        u16 pal[16]          (RGB565; unused for mjpeg)
         u32 data_off         (from pack start)
         u32 data_len
     then (frames+1) u32 frame offsets, relative to data_off
-    frame 0 is raw; later frames are runs of (u16 skip, u16 len, new bytes),
-    where skip counts bytes since the decoder's position.
+    frame 0 is raw for indexed clips and every frame is raw for mjpeg; indexed
+    frames 1..n are runs of (u16 skip, u16 len, new bytes), skip counted from
+    the decoder's position.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ import argparse
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 W = H = 64
@@ -81,7 +83,7 @@ def nearest(r: int, g: int, b: int) -> int:
     return bi
 
 
-def frames_from(src: Path, fps: float, max_frames: int) -> list[bytes]:
+def frames_indexed(src: Path, fps: float, max_frames: int) -> list[bytes]:
     cmd = ["ffmpeg", "-v", "error", "-i", str(src), "-vf",
            f"scale={W}:{H}:flags=area,fps={fps}", "-pix_fmt", "rgb24",
            "-f", "rawvideo", "-"]
@@ -102,8 +104,22 @@ def frames_from(src: Path, fps: float, max_frames: int) -> list[bytes]:
     return frames
 
 
+def frames_mjpeg(src: Path, fps: float, max_frames: int, size: int, quality: int) -> list[bytes]:
+    with tempfile.TemporaryDirectory() as tmp:
+        pattern = str(Path(tmp) / "f%04d.jpg")
+        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf",
+               f"scale={size}:{size}:flags=lanczos,fps={fps}",
+               "-q:v", str(quality), pattern]
+        out = subprocess.run(cmd, capture_output=True, check=False)
+        if out.returncode != 0:
+            sys.exit(f"ffmpeg failed: {out.stderr.decode()[:400]}")
+        files = sorted(Path(tmp).glob("f*.jpg"))
+        if not files:
+            sys.exit("ffmpeg produced no frames")
+        return [f.read_bytes() for f in files[:max_frames]]
+
+
 def pack_i4(idx: bytes) -> bytes:
-    """Two pixels per byte, even-x in the LOW nibble (the player's contract)."""
     out = bytearray(W * H // 2)
     for i in range(W * H // 2):
         out[i] = idx[i * 2] | (idx[i * 2 + 1] << 4)
@@ -128,15 +144,23 @@ def delta_runs(prev: bytes, cur: bytes) -> bytes:
 
 
 def clip_blobs(name: str, frames: list[bytes], fps: int, fmt: int) -> tuple[bytes, bytes]:
-    """(64-byte entry header with data_off/data_len zeroed, offsets+data)."""
-    packed = [pack_i4(f) if fmt == 1 else f for f in frames]
-    data = bytearray(packed[0])
-    offsets = [0, len(data)]
-    for prev, cur in zip(packed, packed[1:]):
-        data += delta_runs(prev, cur)
-        offsets.append(len(data))
-    hdr = struct.pack("<16sHBBB3s16HII", name.encode(), len(packed), fps, fmt,
-                      len(PAL565), b"\0\0\0", *PAL565, 0, 0)
+    if fmt == 2:
+        offsets = [0]
+        data = bytearray()
+        for f in frames:
+            data += f
+            offsets.append(len(data))
+        npal = 0
+    else:
+        packed = [pack_i4(f) if fmt == 1 else f for f in frames]
+        data = bytearray(packed[0])
+        offsets = [0, len(data)]
+        for prev, cur in zip(packed, packed[1:]):
+            data += delta_runs(prev, cur)
+            offsets.append(len(data))
+        npal = len(PAL565)
+    hdr = struct.pack("<16sHBBB3s16HII", name.encode(), len(frames), fps, fmt,
+                      npal, b"\0\0\0", *(PAL565 if npal else [0] * 16), 0, 0)
     return hdr, struct.pack(f"<{len(offsets)}I", *offsets) + bytes(data)
 
 
@@ -158,7 +182,6 @@ def read_pack(path: Path) -> list[tuple[bytes, bytes]]:
 
 
 def write_pack(path: Path, clips: list[tuple[bytes, bytes]]) -> None:
-    # Lay clips out in order, then patch each header's data_off/data_len.
     body = bytearray()
     off = 16
     patched = []
@@ -182,7 +205,9 @@ def main() -> None:
     ap.add_argument("--from", dest="src", type=Path)
     ap.add_argument("--name")
     ap.add_argument("--fps", type=float, default=25.0)
-    ap.add_argument("--fmt", choices=("i4", "u8"), default="i4")
+    ap.add_argument("--fmt", choices=("i4", "u8", "mjpeg"), default="i4")
+    ap.add_argument("--size", type=int, default=300, help="mjpeg frame size (square)")
+    ap.add_argument("--quality", type=int, default=4, help="mjpeg q:v (2 best .. 31 worst)")
     ap.add_argument("--max-frames", type=int, default=MAX_FRAMES)
     ap.add_argument("--out", type=Path, default=Path("assets.bin"))
     ap.add_argument("--append", action="store_true")
@@ -192,27 +217,33 @@ def main() -> None:
     if args.list:
         for e, d in read_pack(args.list):
             name, nframes, fps, fmt, npal = struct.unpack("<16sHBBB", e[:21])
-            print(f"{name.decode():16s} frames={nframes:4d} fps={fps:3d} "
-                  f"fmt={'i4' if fmt else 'u8'} pal={npal} data={len(d)} B "
-                  f"({len(d) / max(nframes, 1):.0f} B/frame)")
+            kind = "mjpeg" if fmt == 2 else ("i4" if fmt == 1 else "u8")
+            print(f"{name.decode():16s} frames={nframes:4d} fps={fps:3d} fmt={kind:5s} "
+                  f"pal={npal:2d} data={len(d)} B ({len(d) / max(nframes, 1):.0f} B/frame)")
         return
 
     if not args.src or not args.name:
         ap.error("--from and --name are required (or use --list)")
-    frames = frames_from(args.src, args.fps, args.max_frames)
-    fmt = 1 if args.fmt == "i4" else 0
+    fmt = {"u8": 0, "i4": 1, "mjpeg": 2}[args.fmt]
+    if fmt == 2:
+        frames = frames_mjpeg(args.src, args.fps, args.max_frames, args.size, args.quality)
+    else:
+        frames = frames_indexed(args.src, args.fps, args.max_frames)
     hdr, blob = clip_blobs(args.name, frames, int(round(args.fps)), fmt)
-    # split the blob back into (header+table, data): the table length is known
     table_len = (len(frames) + 1) * 4
-    entry = hdr + blob[:table_len]
-    data = blob[table_len:]
-    clips = [ (entry, data) ]
+    entry, data = hdr + blob[:table_len], blob[table_len:]
+    clips = [(entry, data)]
     if args.append and args.out.exists():
         clips = read_pack(args.out) + clips
     write_pack(args.out, clips)
-    raw = len(frames) * (W * H // 2 if fmt else W * H)
-    print(f"clip {args.name}: {len(frames)} frames, {len(data)} B vs {raw} B raw "
-          f"({100.0 * len(data) / raw:.0f}%), {len(data) / len(frames):.0f} B/frame")
+    if fmt == 2:
+        biggest = max(len(f) for f in frames)
+        print(f"clip {args.name}: {len(frames)} mjpeg frames, {len(data)} B "
+              f"({len(data) / len(frames):.0f} B/frame, largest {biggest} B)")
+    else:
+        raw = len(frames) * (W * H // 2 if fmt else W * H)
+        print(f"clip {args.name}: {len(frames)} frames, {len(data)} B vs {raw} B raw "
+              f"({100.0 * len(data) / raw:.0f}%), {len(data) / len(frames):.0f} B/frame")
 
 
 if __name__ == "__main__":

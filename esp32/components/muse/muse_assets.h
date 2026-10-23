@@ -57,5 +57,8 @@ bool muse_assets_open(const char *name, muse_asset_t *out);
  * Sequential frames reuse the previous decode; a jump re-decodes from 0. */
 bool muse_assets_frame(muse_asset_t *a, int fi, uint8_t *out, int out_len);
 
+/* Raw frame bytes (fmt 2 = MJPEG): the JPEG blob for frame `fi`. */
+bool muse_assets_blob(muse_asset_t *a, int fi, uint8_t *dst, unsigned cap, size_t *got);
+
 /* Bench (>assets): pack size, clip list, and a full-clip decode timing. */
 void muse_assets_report(void);

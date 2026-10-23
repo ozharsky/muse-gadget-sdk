@@ -35,6 +35,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_assets.c"
         "muse_log.c"
         "muse_rtc.c"
+        "muse_mjpeg.c"
         "muse_imu.c"
         "muse_imu_math.c"
         "muse_input.c"

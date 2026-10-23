@@ -84,7 +84,8 @@ bool muse_assets_init(void)
         memcpy(c->pal, e + 24, sizeof(c->pal));
         memcpy(&c->data_off, e + 56, 4);
         memcpy(&c->data_len, e + 60, 4);
-        if (c->frames == 0 || c->frames > 250 || c->fps == 0 || c->npal == 0 || c->npal > 16
+        if (c->frames == 0 || c->frames > 250 || c->fps == 0
+            || (c->fmt != 2 && (c->npal == 0 || c->npal > 16))
             || c->data_off < off + ENTRY_HDR || c->data_off + c->data_len > s_pack_len) {
             ESP_LOGW(TAG, "clip %d is malformed; ignoring", i);
             s_count = i;
@@ -205,6 +206,20 @@ bool muse_assets_frame(muse_asset_t *a, int fi, uint8_t *out, int out_len)
     return true;
 }
 
+bool muse_assets_blob(muse_asset_t *a, int fi, uint8_t *dst, unsigned cap, size_t *got)
+{
+    if (!s_part || !a || fi < 0 || fi >= a->frames) {
+        return false;
+    }
+    const uint32_t start = a->offs[fi];
+    const uint32_t end = a->offs[fi + 1];
+    if (end < start || end - start > cap) {
+        return false;
+    }
+    *got = end - start;
+    return esp_partition_read(s_part, a->data_off + start, dst, *got) == ESP_OK;
+}
+
 void muse_assets_report(void)
 {
     if (!muse_assets_init()) {
@@ -215,7 +230,7 @@ void muse_assets_report(void)
     for (int i = 0; i < s_count; i++) {
         const muse_asset_t *c = &s_clips[i];
         printf("@clip %-15s frames=%3u fps=%2u fmt=%s data=%5u B (%u B/frame)\n",
-               c->name, c->frames, c->fps, c->fmt == 1 ? "i4" : "u8",
+               c->name, c->frames, c->fps, c->fmt == 2 ? "mjpeg" : (c->fmt == 1 ? "i4" : "u8"),
                (unsigned)c->data_len, (unsigned)(c->data_len / c->frames));
     }
     /* Time a full pass of the first clip: read + delta + unpack. */
