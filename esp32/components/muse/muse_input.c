@@ -119,10 +119,6 @@ static const char *TAG = "muse_input";
 #define DOUBLE_TICKS 35        /* 350 ms: a second aux press within this toggles phone setup */
 
 #define GOODBYE_MS 1500        /* let the goodbye animation play */
-#define HOLD_RESTART_MS 20000  /* talk-button hold: in-hand restart when the screen freezes.
-                                * A voice note already stops at 15 s (MAX_SECS), so a hold
-                                * this long is unambiguous. This board has NO reset key --
-                                * only BOOT and the (hardware-only) PWR switch. */
 #define HINT_TICKS 60          /* 0.6 s: warn that holding powers off */
 #define LONG_TICKS 150         /* 1.5 s: power off */
 #define SLEEP_CHECK_MS 100
@@ -678,23 +674,12 @@ static void input_task(void *arg)
             power_off();
         }
 
-        /* Restart requests and the talk-button hold. The hold is the only in-hand
-         * recovery on this board (no reset key, no readable PWR); a voice note stops
-         * at 15 s, so 20 s of solid holding means "restart", not "talk". */
-        static int64_t s_talk_down_us;
-        if (s_talk_down && !s_talk_down_us) {
-            s_talk_down_us = esp_timer_get_time();
-        } else if (!s_talk_down) {
-            s_talk_down_us = 0;
-        } else if (esp_timer_get_time() - s_talk_down_us >= (int64_t)HOLD_RESTART_MS * 1000) {
-            ESP_LOGW(TAG, "talk held %d s: forcing a restart", HOLD_RESTART_MS / 1000);
-            s_restart_requested = true;
-        }
+        /* Restart requests (menu, settings page, console). The talk button only talks. */
         if (s_restart_requested) {
             s_restart_requested = false;
             ESP_LOGI(TAG, "restarting");
             muse_state_set_caption("RESTARTING...");
-            muse_diag_note_restart("menu_or_hold");
+            muse_diag_note_restart("menu");
             vTaskDelay(pdMS_TO_TICKS(400));   /* let the caption land, then cut */
             esp_restart();
         }

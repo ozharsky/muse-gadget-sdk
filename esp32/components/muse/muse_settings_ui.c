@@ -1337,8 +1337,7 @@ static void build_power_page(lv_obj_t *tile)
         snprintf(text, sizeof(text), "Press the %s button to turn it back on. To just turn the screen off, press the %s button.",
                  muse_board->talk_button, muse_board->aux_button);
     } else {
-        snprintf(text, sizeof(text), "This board's power switch is the PWR button (hold to cut power). "
-                                     "Frozen? Hold %s for 20 s.", muse_board->talk_button);
+        snprintf(text, sizeof(text), "This board's power switch is the PWR button (hold to cut power).");
     }
     note(list, text);
 }
