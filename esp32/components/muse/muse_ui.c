@@ -2007,36 +2007,10 @@ static void type_tick(float now)
     }
 }
 
-/* Glance card colours by kind (the relay's /glance producers pick the kind). */
-static uint32_t glance_color(const char *kind)
-{
-    static const struct { const char *k; uint32_t c; } map[] = {
-        { "weather", 0x5cc8ff }, { "print", 0xff9a5c }, { "reminder", 0xffcc4d },
-        { "briefing", COLOR_ACCENT }, { "task", 0xc792ff }, { "system", 0x4dd8c8 }, { "alert", 0xff5c5c },
-    };
-    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
-        if (!strcmp(kind, map[i].k)) {
-            return map[i].c;
-        }
-    }
-    return COLOR_CAPTION;
-}
-
-/* The quiet idle screen: the clock, then each glance card (GET /glance via the chat session),
- * in turn -- 8 s for the clock, 5 s per card -- in the caption slot, typed in like the clock. */
-#define GLANCE_CLOCK_S 8.0f
-#define GLANCE_CARD_S 5.0f
-static int s_glance_slot;          /* 0 = clock, 1.. = card index + 1 */
-static float s_glance_until;
+/* The quiet idle screen: the clock in the caption slot, on a dark pill (the face behind it is
+ * busy pixel art). The glance cards live on their own page now (muse_glance_ui.c). */
 static uint32_t s_shown_key = UINT32_MAX;
 static lv_opa_t s_cap_opa;         /* the caption's own backing, restored when the idle view ends */
-
-static void caption_upper(char *b)
-{
-    for (char *c = b; *c; c++) {
-        *c = (char)toupper((unsigned char)*c);
-    }
-}
 
 static void update_clock(muse_mode_t mode, int answer, float now)
 {
@@ -2052,38 +2026,23 @@ static void update_clock(muse_mode_t mode, int answer, float now)
         s_logged = true;
     }
     if (quiet && tt > 1700000000) {   /* the time is known */
-        int cards = muse_glance_count();
-        if (!s_clock_on || now >= s_glance_until || s_glance_slot > cards) {
-            s_glance_slot = s_clock_on && now >= s_glance_until && cards ? (s_glance_slot + 1) % (cards + 1) : 0;
-            s_glance_until = now + (s_glance_slot ? GLANCE_CARD_S : GLANCE_CLOCK_S);
-        }
-        char b[64];
-        uint32_t color = COLOR_CAPTION, key;
-        muse_glance_t g;
-        if (s_glance_slot && muse_glance_get(s_glance_slot - 1, &g)) {
-            snprintf(b, sizeof(b), "%s\n%s", g.title[0] ? g.title : g.kind, g.text);
-            color = glance_color(g.kind);
-            key = 0x80000000u | (uint32_t)s_glance_slot << 24 | (uint32_t)(strlen(g.text) * 131 + g.text[0]);
-        } else {
-            struct tm tm;
-            localtime_r(&tt, &tm);
+        struct tm tm;
+        localtime_r(&tt, &tm);
+        uint32_t key = (uint32_t)(tm.tm_hour * 60 + tm.tm_min);
+        if (!s_clock_on || key != s_shown_key) {
+            char b[48];
             int h12 = tm.tm_hour % 12 ? tm.tm_hour % 12 : 12;
             size_t n = (size_t)snprintf(b, sizeof(b), "%d:%02d %s\n", h12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
             strftime(b + n, sizeof(b) - n, "%a %d %b", &tm);
-            key = (uint32_t)(tm.tm_hour * 60 + tm.tm_min);
-        }
-        if (!s_clock_on || key != s_shown_key) {
-            caption_upper(b);
-            if (!s_clock_on) {   /* a dark pill: the face behind it is busy pixel art */
+            for (char *c = b; *c; c++) {
+                *c = (char)toupper((unsigned char)*c);
+            }
+            if (!s_clock_on) {
                 s_cap_opa = lv_obj_get_style_bg_opa(s_caption_lbl, 0);
                 lv_obj_set_style_bg_color(s_caption_lbl, lv_color_black(), 0);
                 lv_obj_set_style_bg_opa(s_caption_lbl, LV_OPA_80, 0);
                 lv_obj_set_style_radius(s_caption_lbl, 10, 0);
             }
-            lv_obj_set_style_border_color(s_caption_lbl, lv_color_hex(color), 0);
-            lv_obj_set_style_border_opa(s_caption_lbl, LV_OPA_40, 0);
-            lv_obj_set_style_border_width(s_caption_lbl, s_glance_slot ? 1 : 0, 0);
-            lv_obj_set_style_text_color(s_caption_lbl, lv_color_hex(color), 0);
             type_start(s_caption_lbl, b, now);
             lv_obj_remove_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN);
             s_clock_on = true;
@@ -2092,9 +2051,7 @@ static void update_clock(muse_mode_t mode, int answer, float now)
     } else if (s_clock_on) {
         s_clock_on = false;
         s_shown_key = UINT32_MAX;
-        lv_obj_set_style_text_color(s_caption_lbl, lv_color_hex(COLOR_CAPTION), 0);
         lv_obj_set_style_bg_opa(s_caption_lbl, s_cap_opa, 0);   /* replies keep their own look */
-        lv_obj_set_style_border_width(s_caption_lbl, 0, 0);
         if (!s_have_caption) {
             type_start(s_caption_lbl, "", now);
             lv_obj_add_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN);
