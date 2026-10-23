@@ -53,6 +53,10 @@ const muse_asset_t *muse_assets_clip(int i);
 /* Opens a clip by name into `out` (which must outlive playback). */
 bool muse_assets_open(const char *name, muse_asset_t *out);
 
+/* Is this clip an MJPEG one? (No struct copy: the serial console task has
+ * 3.5 KB of stack and a muse_asset_t is over 1 KB.) */
+bool muse_assets_is_mjpeg(const char *name);
+
 /* Decodes frame `fi` into out[W*H] palette indices (64*64 = 4096 bytes).
  * Sequential frames reuse the previous decode; a jump re-decodes from 0. */
 bool muse_assets_frame(muse_asset_t *a, int fi, uint8_t *out, int out_len);

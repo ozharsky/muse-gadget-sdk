@@ -112,6 +112,19 @@ const muse_asset_t *muse_assets_clip(int i)
     return i >= 0 && i < s_count ? &s_clips[i] : NULL;
 }
 
+bool muse_assets_is_mjpeg(const char *name)
+{
+    if (!s_part && !muse_assets_init()) {
+        return false;
+    }
+    for (int i = 0; i < s_count; i++) {
+        if (strncmp(s_clips[i].name, name, sizeof(s_clips[i].name)) == 0) {
+            return s_clips[i].fmt == 2;
+        }
+    }
+    return false;
+}
+
 bool muse_assets_open(const char *name, muse_asset_t *out)
 {
     if (!s_part && !muse_assets_init()) {

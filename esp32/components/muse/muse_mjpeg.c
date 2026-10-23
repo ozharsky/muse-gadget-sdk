@@ -135,9 +135,10 @@ static void play_task(void *arg)
     }
     if (frames_done) {
         int64_t dt = esp_timer_get_time() - t_first;
-        ESP_LOGI(TAG, "%s done: %d frames in %lld ms (%lld fps avg)",
+        ESP_LOGI(TAG, "%s done: %d frames in %lld ms (%lld fps avg), stack min %u B",
                  s_name, frames_done, (long long)(dt / 1000),
-                 (long long)(frames_done * 1000000LL / (dt ? dt : 1)));
+                 (long long)(frames_done * 1000000LL / (dt ? dt : 1)),
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
 done:
     if (dec) {
@@ -157,8 +158,7 @@ bool muse_mjpeg_play(const char *name, int loops)
     if (!name || !name[0] || loops == 0) {
         return false;
     }
-    muse_asset_t probe;
-    if (!muse_assets_open(name, &probe) || probe.fmt != 2) {
+    if (!muse_assets_is_mjpeg(name)) {
         return false;
     }
     muse_mjpeg_stop();
@@ -169,7 +169,8 @@ bool muse_mjpeg_play(const char *name, int loops)
     s_name[sizeof(s_name) - 1] = '\0';
     s_loops = loops;
     s_run = true;
-    if (xTaskCreate(play_task, "muse_mjpeg", 4096, NULL, 4, &s_task) != pdPASS) {
+    /* 4 KB overflowed inside esp_new_jpeg (panicked the device); 8 KB holds it. */
+    if (xTaskCreate(play_task, "muse_mjpeg", 8192, NULL, 4, &s_task) != pdPASS) {
         s_task = NULL;
         s_run = false;
         return false;
