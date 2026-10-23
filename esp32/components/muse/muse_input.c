@@ -59,6 +59,7 @@
 #include "boards/muse_lcd_bands.h"   /* >lcd.swallow fault injection */
 #include "muse_assets.h"
 #include "muse_log.h"
+#include "muse_rtc.h"
 #if CONFIG_MUSE_JPEG_BENCH
 #include "muse_jpeg_bench.h"
 #endif
@@ -938,6 +939,14 @@ static bool console_command(char *line, bool whole)
     }
     if (!strcmp(line, "log.clear")) {
         muse_log_clear();
+        return true;
+    }
+    if (!strcmp(line, "i2c.scan")) {
+        muse_rtc_scan();
+        return true;
+    }
+    if (!strcmp(line, "rtc.probe")) {
+        muse_rtc_probe();
         return true;
     }
     if (!strcmp(line, "assets")) {

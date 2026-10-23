@@ -38,6 +38,7 @@
 
 #include "muse_board.h"
 #include "muse_imu.h"
+#include "muse_rtc.h"
 #include "muse_lcd_bands.h"
 #include "muse_mem.h"
 #include "muse_pmu.h"
@@ -64,6 +65,10 @@ static esp_err_t init(void)
 {
     ESP_RETURN_ON_ERROR(bsp_i2c_init(), TAG, "i2c init");
 #if CONFIG_MUSE_IMU
+    esp_err_t rtc = muse_rtc_init(bsp_i2c_get_handle());
+    if (rtc != ESP_OK) {
+        ESP_LOGW(TAG, "RTC bus handle: %s", esp_err_to_name(rtc));
+    }
     esp_err_t imu = muse_imu_init(bsp_i2c_get_handle());
     if (imu != ESP_OK) {
         ESP_LOGW(TAG, "QMI8658 unavailable (%s): motion gestures off", esp_err_to_name(imu));
