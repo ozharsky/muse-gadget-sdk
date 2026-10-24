@@ -45,6 +45,9 @@
 #include "muse_menu.h"
 #include "muse_settings.h"
 #include "muse_state.h"
+
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
 #include "muse_ui.h"
 #include "muse_glance_ui.h"
 #include "avatar/muse_pixel_video.h"
@@ -979,6 +982,19 @@ static bool console_command(char *line, bool whole)
     if (!strcmp(line, "mjpeg.stop")) {
         muse_mjpeg_stop();
         printf("@mjpeg.stop\n");
+        return true;
+    }
+    if (!strncmp(line, "dns=", 4)) {
+        struct addrinfo hints = { 0 }, *res = NULL;
+        hints.ai_family = AF_INET;
+        int rc = getaddrinfo(line + 4, NULL, &hints, &res);
+        if (rc == 0 && res) {
+            struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+            printf("@dns %s -> %s\n", line + 4, inet_ntoa(sa->sin_addr));
+            freeaddrinfo(res);
+        } else {
+            printf("@dns %s failed (%d)\n", line + 4, rc);
+        }
         return true;
     }
     if (!strcmp(line, "i2c.scan")) {
