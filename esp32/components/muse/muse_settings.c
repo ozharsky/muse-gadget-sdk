@@ -40,8 +40,6 @@ static struct {
     uint16_t sleep_s;
     bool wifi_on;
     bool ble_on;
-    bool iphone_on;
-    bool iphone_alerts;
     uint8_t agent;                       /* 0 Muse, 1 Hermes, 2 Hermes ALT */
     char agent_alt_profile[MUSE_AGENT_PROFILE_MAX + 1];   /* the ALT slot's relay profile name */
     char relay_lan[64];                        /* the relay's last announced LAN address */
@@ -170,12 +168,6 @@ esp_err_t muse_settings_init(void)
     if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
         s.ble_on = b;
     }
-    if (nvs_get_u8(s_nvs, "iphone_on", &b) == ESP_OK) {
-        s.iphone_on = b;
-    }
-    if (nvs_get_u8(s_nvs, "iphone_alert", &b) == ESP_OK) {
-        s.iphone_alerts = b;
-    }
     if (nvs_get_u8(s_nvs, "agent", &b) == ESP_OK) {
         /* Old value is the same 0/1 (Muse/Hermes) the new enum keeps for those slots. */
         s.agent = b < MUSE_AGENT_COUNT ? b : MUSE_AGENT_HERMES;
@@ -211,8 +203,6 @@ int muse_settings_brightness(void) { return s.brightness; }
 int muse_settings_sleep_s(void) { return s.sleep_s; }
 bool muse_settings_wifi_on(void) { return s.wifi_on; }
 bool muse_settings_ble_on(void) { return s.ble_on; }
-bool muse_settings_iphone_on(void) { return s.iphone_on; }
-bool muse_settings_iphone_alerts(void) { return s.iphone_alerts; }
 int muse_settings_agent(void) { return s.agent; }
 bool muse_settings_agent_hermes(void) { return s.agent != MUSE_AGENT_MUSE; }
 void muse_settings_agent_profile(char out[MUSE_AGENT_PROFILE_MAX + 1]) {
@@ -471,18 +461,6 @@ void muse_settings_set_ble_on(bool on)
     notify(MUSE_SETTING_BLE);
 }
 
-void muse_settings_set_iphone_alerts(bool on)
-{
-    s.iphone_alerts = on;
-    save_u8("iphone_alert", on);
-}
-
-void muse_settings_set_iphone_on(bool on)
-{
-    s.iphone_on = on;
-    save_u8("iphone_on", on);
-    notify(MUSE_SETTING_IPHONE);
-}
 
 void muse_settings_set_wifi(const char *ssid, const char *pass)
 {

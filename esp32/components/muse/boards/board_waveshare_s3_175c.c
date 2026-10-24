@@ -110,6 +110,69 @@ static void round_area(lv_event_t *e)
     a->y2 |= 1;
 }
 
+#if !CONFIG_MUSE_BOARD_WAVESHARE_S3_175
+#include "esp_lcd_co5300.h"
+
+#define LCD_PCLK_HZ (80 * 1000 * 1000)   /* the QSPI clock; the BSP's is 40 MHz */
+
+static const co5300_lcd_init_cmd_t s_panel_init[] = {   /* the BSP's, as of v3 */
+    { 0xFE, (uint8_t[]){ 0x20 }, 1, 0 },
+    { 0x19, (uint8_t[]){ 0x10 }, 1, 0 },
+    { 0x1C, (uint8_t[]){ 0xA0 }, 1, 0 },
+    { 0xFE, (uint8_t[]){ 0x00 }, 1, 0 },
+    { 0xC4, (uint8_t[]){ 0x80 }, 1, 0 },
+    { 0x3A, (uint8_t[]){ 0x55 }, 1, 0 },
+    { 0x35, (uint8_t[]){ 0x00 }, 1, 0 },
+    { 0x53, (uint8_t[]){ 0x20 }, 1, 0 },
+    { 0x51, (uint8_t[]){ 0xFF }, 1, 0 },
+    { 0x63, (uint8_t[]){ 0xFF }, 1, 0 },
+    { 0x2A, (uint8_t[]){ 0x00, 0x06, 0x01, 0xD7 }, 4, 0 },
+    { 0x2B, (uint8_t[]){ 0x00, 0x00, 0x01, 0xD1 }, 4, 600 },
+    { 0x11, NULL, 0, 600 },
+    { 0x29, NULL, 0, 0 },
+};
+
+/*
+ * bsp_display_new() with the panel's clock as a knob: at the BSP's 40 MHz a full frame takes
+ * 35-60 ms to reach the glass, two to four refreshes, so a swipe tears whatever the timing.
+ * If the clock can't be had, the panel comes up at 40 MHz rather than not at all (no display
+ * is a boot loop, and boot loops cost the Muse pairing).
+ */
+static esp_err_t panel_new(esp_lcd_panel_handle_t *panel, esp_lcd_panel_io_handle_t *io)
+{
+    const spi_bus_config_t bus = CO5300_PANEL_BUS_QSPI_CONFIG(BSP_LCD_PCLK, BSP_LCD_DATA0, BSP_LCD_DATA1,
+                                                              BSP_LCD_DATA2, BSP_LCD_DATA3, LCD_CHUNK_BYTES);
+    ESP_RETURN_ON_ERROR(spi_bus_initialize(BSP_LCD_SPI_NUM, &bus, SPI_DMA_CH_AUTO), TAG, "panel bus");
+    esp_lcd_panel_io_spi_config_t io_cfg = CO5300_PANEL_IO_QSPI_CONFIG(BSP_LCD_CS, NULL, NULL);
+    io_cfg.trans_queue_depth = CONFIG_BSP_LCD_TRANS_QUEUE_DEPTH;
+    io_cfg.pclk_hz = LCD_PCLK_HZ;
+    if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)BSP_LCD_SPI_NUM, &io_cfg, io) != ESP_OK) {
+        ESP_LOGW(TAG, "panel at %d MHz refused: 40 MHz", LCD_PCLK_HZ / 1000000);
+        io_cfg.pclk_hz = 40 * 1000 * 1000;
+        ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)BSP_LCD_SPI_NUM, &io_cfg, io), TAG,
+                            "panel io");
+    }
+    ESP_LOGI(TAG, "panel clock %d MHz", io_cfg.pclk_hz / 1000000);
+    const co5300_vendor_config_t vendor = {
+        .init_cmds = s_panel_init,
+        .init_cmds_size = sizeof(s_panel_init) / sizeof(s_panel_init[0]),
+        .flags = { .use_qspi_interface = 1 },
+    };
+    const esp_lcd_panel_dev_config_t dev = {
+        .reset_gpio_num = BSP_LCD_RST,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .bits_per_pixel = BSP_LCD_BITS_PER_PIXEL,
+        .vendor_config = (void *)&vendor,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_co5300(*io, &dev, panel), TAG, "panel");
+    esp_lcd_panel_set_gap(*panel, 0x06, 0);
+    esp_lcd_panel_reset(*panel);
+    esp_lcd_panel_init(*panel);
+    esp_lcd_panel_disp_on_off(*panel, true);
+    return ESP_OK;
+}
+#endif
+
 /*
  * bsp_display_start(), less its draw buffers: the BSP's are PSRAM, and every
  * flush from them needs a fresh 46 KB internal DMA bounce buffer, which can't
@@ -126,12 +189,18 @@ static lv_display_t *display_start(lv_indev_t **touch)
     }
 
     esp_lcd_panel_handle_t panel;
+#if CONFIG_MUSE_BOARD_WAVESHARE_S3_175
     const bsp_display_config_t panel_cfg = {
         .max_transfer_sz = LCD_CHUNK_BYTES,
     };
     if (bsp_display_new(&panel_cfg, &panel, &s_io) != ESP_OK) {
         return NULL;
     }
+#else
+    if (panel_new(&panel, &s_io) != ESP_OK) {
+        return NULL;
+    }
+#endif
     const esp_lv_adapter_display_config_t disp_cfg = {
         .panel = panel,
         .panel_io = s_io,

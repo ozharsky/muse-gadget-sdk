@@ -15,9 +15,14 @@
  */
 
 #include "muse_settings_ui.h"
-#include "muse_iphone.h"
-#include "avatar/icon_hermes.h"
-#include "avatar/icon_meta.h"
+/* The agents' faces, made locally from the portraits (tools/muse/agent_icons.py); not in the
+ * public repo, as Hermes's portrait derives from an avatar its licence keeps private. */
+#if __has_include("avatar/agent_icons.h")
+#include "avatar/agent_icons.h"
+#define HAVE_AGENT_ICONS 1
+#else
+#define AGENT_ICON_PX 34
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -985,27 +990,12 @@ static void on_ble_forget(lv_event_t *e)
     muse_ble_forget_all();
 }
 
-static lv_obj_t *s_iphone_sw, *s_iphone_status, *s_alerts_sw;
-
-static void on_alerts_sw(lv_event_t *e)
-{
-    muse_settings_set_iphone_alerts(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
-}
-
-static void on_iphone_sw(lv_event_t *e)
-{
-    muse_settings_set_iphone_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
-}
-
 static void build_ble_page(lv_obj_t *tile)
 {
     lv_obj_t *list;
     s_ble = page(tile, "BLUETOOTH", true, &list);
     s_ble_sw = switch_row(list, "Phone setup", muse_settings_ble_on(), on_ble_sw);
     s_ble_status = note(list, "");
-    s_iphone_sw = switch_row(list, "iPhone", muse_settings_iphone_on(), on_iphone_sw);
-    s_iphone_status = note(list, "");
-    s_alerts_sw = switch_row(list, "iPhone alerts", muse_settings_iphone_alerts(), on_alerts_sw);
     button(list, "Forget paired phones", COLOR_DANGER, on_ble_forget, NULL);
     note(list, "When on, Muse is visible to phones nearby. Open tools/ble_setup.html in Chrome, "
                "connect, and enter the code Muse shows to pair.");
@@ -1033,19 +1023,6 @@ static void tick_ble(void)
     bool on = muse_settings_ble_on();
     if (on != lv_obj_has_state(s_ble_sw, LV_STATE_CHECKED)) {
         lv_obj_set_state(s_ble_sw, LV_STATE_CHECKED, on);
-    }
-    static const char *const iphone_text[] = {
-        "Off",
-        "On your iPhone: Settings > Bluetooth, tap this gadget, enter the code it shows. "
-        "Then allow Share System Notifications.",
-        "Pairing...", "iPhone connected: notifications and media",
-    };
-    muse_iphone_state_t st = muse_iphone_state();
-    set_text(s_iphone_status, iphone_text[st]);
-    lv_obj_set_style_text_color(s_iphone_status, lv_color_hex(st == MUSE_IPHONE_CONNECTED ? COLOR_OK : COLOR_DIM), 0);
-    bool ion = muse_settings_iphone_on();
-    if (ion != lv_obj_has_state(s_iphone_sw, LV_STATE_CHECKED)) {
-        lv_obj_set_state(s_iphone_sw, LV_STATE_CHECKED, ion);
     }
 }
 
@@ -1404,31 +1381,27 @@ static void tick_usage(void)
 
 /* A tappable row whose NAME label is returned so it can be re-labelled, plus a right-side
  * check label. row() returns only the value label; the agent rows need the name too. */
-/* A row's icon is the agent's OWN mark (a real image), not a generic UI symbol: Meta's logo
- * for Muse, the Hermes character for the Hermes slots. Built once from the embedded
- * RGB565A8 data; NULL falls back to no icon. */
+/* A row's icon is the agent's own face: a round crop of its portrait (avatar/agent_icons.h). */
 static const lv_image_dsc_t *agent_icon(int idx)
 {
-    static lv_image_dsc_t meta_dsc, hermes_dsc;
-    static bool built;
-    if (!built) {
-        built = true;
-        meta_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-        meta_dsc.header.cf = LV_COLOR_FORMAT_RGB565A8;
-        meta_dsc.header.w = ICON_META_W;
-        meta_dsc.header.h = ICON_META_H;
-        meta_dsc.header.stride = ICON_META_W * 2;
-        meta_dsc.data = ICON_META_DATA;
-        meta_dsc.data_size = sizeof(ICON_META_DATA);
-        hermes_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-        hermes_dsc.header.cf = LV_COLOR_FORMAT_RGB565A8;
-        hermes_dsc.header.w = ICON_HERMES_W;
-        hermes_dsc.header.h = ICON_HERMES_H;
-        hermes_dsc.header.stride = ICON_HERMES_W * 2;
-        hermes_dsc.data = ICON_HERMES_DATA;
-        hermes_dsc.data_size = sizeof(ICON_HERMES_DATA);
+#if !HAVE_AGENT_ICONS
+    (void)idx;
+    return NULL;
+#else
+    static lv_image_dsc_t dsc[3];
+    static const uint8_t *const DATA[3] = { AGENT_ICON_MUSE, AGENT_ICON_HERMES, AGENT_ICON_BEEPBOP };
+    int i = idx == MUSE_AGENT_MUSE ? 0 : idx == MUSE_AGENT_HERMES ? 1 : 2;
+    if (!dsc[i].data) {
+        dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
+        dsc[i].header.cf = LV_COLOR_FORMAT_RGB565A8;
+        dsc[i].header.w = AGENT_ICON_PX;
+        dsc[i].header.h = AGENT_ICON_PX;
+        dsc[i].header.stride = AGENT_ICON_PX * 2;
+        dsc[i].data = DATA[i];
+        dsc[i].data_size = sizeof(AGENT_ICON_MUSE);
     }
-    return idx == MUSE_AGENT_MUSE ? &meta_dsc : &hermes_dsc;
+    return &dsc[i];
+#endif
 }
 
 static lv_obj_t *agent_row(lv_obj_t *list, const lv_image_dsc_t *icon, lv_obj_t **name_out,
@@ -1438,7 +1411,7 @@ static lv_obj_t *agent_row(lv_obj_t *list, const lv_image_dsc_t *icon, lv_obj_t 
     if (icon) {
         lv_obj_t *img = lv_image_create(c);
         lv_image_set_src(img, icon);
-        lv_obj_set_size(img, ICON_META_W, ICON_META_H);   /* both icons are the same 40x40 */
+        lv_obj_set_size(img, AGENT_ICON_PX, AGENT_ICON_PX);
     } else {
         label(c, &lv_font_montserrat_20, COLOR_ACCENT, LV_SYMBOL_SHUFFLE);
     }
@@ -1514,8 +1487,10 @@ static void tick_agents(void)
         set_text(s_agent_checks[i], idx == cur ? LV_SYMBOL_OK : "");
         lv_obj_set_style_text_color(s_agent_labels[i], lv_color_hex(off ? COLOR_DIM : COLOR_TEXT), 0);
         lv_obj_t *r = lv_obj_get_parent(s_agent_labels[i]);
-        if (r) {
-            lv_obj_set_style_opa(r, off ? LV_OPA_60 : LV_OPA_COVER, 0);
+        lv_obj_t *icon = r ? lv_obj_get_child(r, 0) : NULL;
+        if (icon && lv_obj_check_type(icon, &lv_image_class)) {
+            /* dim just the icon: a whole-row opacity renders the row into a layer every redraw */
+            lv_obj_set_style_image_opa(icon, off ? LV_OPA_50 : LV_OPA_COVER, 0);
         }
     }
 }

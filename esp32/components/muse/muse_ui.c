@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include <ctype.h>
@@ -30,6 +31,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "mbedtls/base64.h"
 #include "src/draw/lv_image_decoder_private.h"   /* custom decoder */
@@ -69,7 +71,6 @@ static const char *TAG = "muse_ui";
 #define ANSWER_MS 300           /* Muse making room for a reply, and back */
 #define SPEAKER_PX 64
 #define SPEAKER_GROW_PX 8       /* how much the speaker button swells while held */
-#define SPEAKER_HOLD_MS 400     /* LVGL's long press */
 
 #define COLOR_DIM 0x5fa070
 #define COLOR_CAPTION 0xb8ffd0
@@ -126,14 +127,13 @@ static lv_obj_t *s_state_lbl;
 static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
 #if LV_USE_SNAPSHOT
 static volatile int s_bench_page = -1;   /* bench: deferred tile switch, applied in the LVGL task */
+static volatile bool s_bench_slide;      /* ...with the swipe's slide (">slide=") */
 static volatile bool s_bench_demo;       /* bench: demo gadget name in screenshots */
 #endif
 static lv_obj_t *s_power_lbl;
 static lv_obj_t *s_caption_lbl;
 static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
 static lv_obj_t *s_meter[METER_SEGS];
-static lv_obj_t *s_speaker;
-static lv_obj_t *s_speaker_icon;
 static lv_obj_t *s_aux_icon;
 static lv_obj_t *s_image;   /* display.draw_url, over the face */
 #if CONFIG_MUSE_WATCHER_CAMERA
@@ -150,8 +150,6 @@ static bool s_ready;
 static lv_timer_t *s_frame_timer;
 static volatile int s_frame_ms_want;   /* from any task; applied by frame_tick */
 static int s_frame_ms_applied;
-static volatile int s_face_dx, s_face_dy;   /* parallax request (cells) */
-static int s_face_dx_applied, s_face_dy_applied;
 static int s_center_dx_applied, s_center_dy_applied;
 
 /* Per-face centring nudge in panel px (avatar/muse_pixel_switch.c). Weak: boards without the
@@ -160,6 +158,20 @@ __attribute__((weak)) void muse_pixel_center(int *dx, int *dy)
 {
     *dx = 0;
     *dy = 0;
+}
+/* Faces that know what they changed (the portraits) say so; -1 = sample the cells instead.
+ * Rects are x1, y1, x2, y2 in canvas px, inclusive. */
+__attribute__((weak)) int muse_pixel_dirty(int (*r)[4], int max)
+{
+    (void)r;
+    (void)max;
+    return -1;
+}
+
+/* Faces that animate all the time (the portraits) keep full rate while idle. */
+__attribute__((weak)) bool muse_pixel_full_rate(void)
+{
+    return false;
 }
 static volatile int64_t s_last_frame_us;   /* when the UI task last ran a frame: see stall_check */
 
@@ -179,7 +191,6 @@ static bool s_dark;
 static int s_brightness = -1;       /* last applied */
 static int s_preview_brightness = -1;
 static int s_shown_page = -1;
-static int s_shown_speaker = -1;
 static muse_mode_t s_last_mode = MUSE_MODE_COUNT;
 
 /*
@@ -344,6 +355,18 @@ static int32_t rect_cells(const lv_area_t *r)
 
 static void invalidate_muse(void)
 {
+    int pr[DIRTY_RECTS_MAX][4];
+    int pn = muse_pixel_dirty(pr, DIRTY_RECTS_MAX);
+    if (pn >= 0) {
+        lv_area_t at;
+        lv_obj_get_coords(s_canvas, &at);
+        for (int i = 0; i < pn; i++) {
+            lv_area_t a = { at.x1 + pr[i][0], at.y1 + pr[i][1], at.x1 + pr[i][2], at.y1 + pr[i][3] };
+            lv_obj_invalidate_area(s_canvas, &a);
+        }
+        s_cells_valid = false;   /* the cells' memory is stale when sampling takes over again */
+        return;
+    }
     if (!s_cells) {
         lv_obj_invalidate(s_canvas);
         return;
@@ -554,7 +577,7 @@ static void on_canvas_long(lv_event_t *e)
 
 /* ---- Muse asks: a question with up to four tap choices (the ui.choose command) ----
  * Tap a choice, or swipe the card: right = the first choice, left = the last (the hint line at
- * the bottom names both). A nod / head-shake answers too, unless the asker turned motion off. */
+ * the bottom names both). */
 #define CHOICE_MAX 4
 #define SWIPE_COMMIT_PX 100
 static struct {
@@ -564,10 +587,9 @@ static struct {
     void *user;
     uint32_t until;
     int n;
-    bool motion;
     bool dragged;      /* the finger moved: its release is a swipe, not a tap */
     bool leaving;      /* sliding off: input is over */
-    lv_obj_t *hint, *hint_l, *hint_r, *motion_lbl;
+    lv_obj_t *hint, *hint_l, *hint_r;
     char first[12], last[12];
     int pick;          /* the answer the slide-off delivers */
     lv_coord_t x0;
@@ -690,8 +712,7 @@ static void upper_cpy(char *d, const char *s, size_t n)
     d[i] = 0;
 }
 
-/* "< NO   SWIPE   YES >" (each side in its colour), plus "NOD = YES   SHAKE = NO" when motion
- * may answer. Display lock held. */
+/* "< NO   SWIPE   YES >", each side in its colour. Display lock held. */
 static void choice_hint(void)
 {
     char a[16], b[16], h[48];
@@ -701,9 +722,6 @@ static void choice_hint(void)
     lv_label_set_text(s_choice.hint_l, h);
     snprintf(h, sizeof(h), "%s >", b);
     lv_label_set_text(s_choice.hint_r, h);
-    snprintf(h, sizeof(h), "NOD = %s   SHAKE = %s", b, a);
-    lv_label_set_text(s_choice.motion_lbl, h);
-    lv_obj_set_flag(s_choice.motion_lbl, LV_OBJ_FLAG_HIDDEN, !s_choice.motion);
 }
 
 /* A question is open: the input task must not auto-sleep out from under it (an approval
@@ -716,21 +734,6 @@ bool muse_ui_choice_open(void)
 int muse_ui_choice_count(void)
 {
     return s_choice.box ? s_choice.n : 0;
-}
-
-bool muse_ui_choice_motion_ok(void)
-{
-    return s_choice.box && s_choice.motion;
-}
-
-void muse_ui_choice_set_motion(bool ok)
-{
-    muse_board->display_lock(-1);
-    s_choice.motion = ok;
-    if (s_choice.box) {
-        choice_hint();
-    }
-    muse_board->display_unlock();
 }
 
 /* Bench/ops: answer the open question programmatically, as if its button was tapped. */
@@ -831,18 +834,12 @@ bool muse_ui_choose(const char *prompt, const char *const *options, int n, int t
     s_choice.hint = hint;
     s_choice.hint_l = parts[0];
     s_choice.hint_r = parts[2];
-    s_choice.motion_lbl = lv_label_create(box);
-    lv_obj_set_width(s_choice.motion_lbl, lv_pct(100));
-    lv_obj_set_style_text_font(s_choice.motion_lbl, &lv_font_unscii_8, 0);
-    lv_obj_set_style_text_color(s_choice.motion_lbl, lv_color_hex(COLOR_DIM), 0);
-    lv_obj_set_style_text_align(s_choice.motion_lbl, LV_TEXT_ALIGN_CENTER, 0);
     strlcpy(s_choice.first, options[0], sizeof(s_choice.first));
     strlcpy(s_choice.last, options[n - 1], sizeof(s_choice.last));
     s_choice.box = box;
     s_choice.cb = done;
     s_choice.user = user;
     s_choice.n = n;
-    s_choice.motion = n == 2;   /* yes/no questions; the approval path turns it off */
     choice_hint();
     s_choice.dragged = false;
     s_choice.leaving = false;
@@ -860,14 +857,6 @@ void muse_ui_set_frame_ms(int ms)
     if (ms >= 10 && ms <= 200) {
         s_frame_ms_want = ms;
     }
-}
-
-void muse_ui_set_face_off(int dx, int dy)
-{
-    if (dx > 3) dx = 3; else if (dx < -3) dx = -3;
-    if (dy > 3) dy = 3; else if (dy < -3) dy = -3;
-    s_face_dx = dx;
-    s_face_dy = dy;
 }
 
 bool muse_ui_react(const char *name)
@@ -1057,83 +1046,6 @@ static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t co
     return l;
 }
 
-static void show_speaker(bool on)
-{
-    /* Off is the one that stands out, like a lit flashlight button. */
-    lv_obj_set_style_bg_color(s_speaker, lv_color_hex(on ? COLOR_METER_OFF : COLOR_LIT), 0);
-    lv_obj_set_style_text_color(s_speaker_icon, lv_color_hex(on ? COLOR_DIM : 0x000000), 0);
-    lv_label_set_text(s_speaker_icon, on ? LV_SYMBOL_VOLUME_MAX : LV_SYMBOL_MUTE);
-    s_shown_speaker = on;
-}
-
-static void set_speaker_size(void *obj, int32_t px)
-{
-    lv_obj_set_size(obj, px, px);
-}
-
-/* Swells over the long press, so the toggle lands as it reaches full size. */
-static void speaker_grow(bool grow)
-{
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_speaker);
-    lv_anim_set_exec_cb(&a, set_speaker_size);
-    lv_anim_set_values(&a, lv_obj_get_width(s_speaker), SPEAKER_PX + (grow ? SPEAKER_GROW_PX : 0));
-    lv_anim_set_duration(&a, grow ? SPEAKER_HOLD_MS : 150);
-    lv_anim_start(&a);
-}
-
-/* Touch and hold to toggle, like the lock screen's flashlight; a tap only says so. */
-static void on_speaker_event(lv_event_t *e)
-{
-    bool on = muse_settings_speaker_on();
-    bool idle = muse_state_mode(NULL) == MUSE_MODE_IDLE;   /* don't cover a reply's captions */
-    switch (lv_event_get_code(e)) {
-    case LV_EVENT_PRESSED:
-        speaker_grow(true);
-        break;
-    case LV_EVENT_LONG_PRESSED:
-        muse_settings_set_speaker_on(!on);
-        show_speaker(!on);
-        if (idle) {
-            muse_state_set_caption(on ? "SPEAKER OFF" : "SPEAKER ON");
-        }
-        break;
-    case LV_EVENT_SHORT_CLICKED:
-        if (idle) {
-            muse_state_set_caption(on ? "HOLD TO MUTE" : "HOLD TO UNMUTE");
-        }
-        break;
-    case LV_EVENT_RELEASED:
-    case LV_EVENT_PRESS_LOST:
-        speaker_grow(false);
-        break;
-    default:
-        break;
-    }
-}
-
-/* Upper left by the status icons, where a thumb finds it without covering the reply. */
-static void build_speaker(lv_obj_t *face, int x, int y)
-{
-    s_speaker = lv_obj_create(face);
-    lv_obj_remove_style_all(s_speaker);
-    lv_obj_set_size(s_speaker, SPEAKER_PX, SPEAKER_PX);
-    lv_obj_set_style_radius(s_speaker, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(s_speaker, LV_OPA_COVER, 0);
-    lv_obj_remove_flag(s_speaker, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_ext_click_area(s_speaker, 12);   /* a fingertip is bigger than the circle */
-    static const lv_event_code_t EVENTS[] = { LV_EVENT_PRESSED, LV_EVENT_LONG_PRESSED, LV_EVENT_SHORT_CLICKED,
-                                              LV_EVENT_RELEASED, LV_EVENT_PRESS_LOST };
-    for (size_t i = 0; i < sizeof(EVENTS) / sizeof(EVENTS[0]); i++) {
-        lv_obj_add_event_cb(s_speaker, on_speaker_event, EVENTS[i], NULL);
-    }
-    s_speaker_icon = make_label(s_speaker, &lv_font_montserrat_28, COLOR_DIM);
-    lv_obj_center(s_speaker_icon);
-    lv_obj_align(s_speaker, LV_ALIGN_CENTER, x, y);
-    show_speaker(muse_settings_speaker_on());
-}
-
 static void set_canvas_px(int px)
 {
     if ((int)s_muse_src.header.w == px) {
@@ -1258,13 +1170,9 @@ static void add_hides(answer_layout_t *l, int n)
  */
 static void build_answer(lv_obj_t *face, int ring_in)
 {
+    /* The upper-left corner by the status icons stays clear (a speaker button sat there). */
     int spk_r = (SPEAKER_PX + SPEAKER_GROW_PX) / 2;
-    int spk_x = -s_w / 2 + 8 + spk_r, spk_y = -s_h / 2 + 8 + spk_r;
-    if (muse_board->round) {
-        spk_y = -ring_in * 5 / 8;
-        int d = ring_in - spk_r - 4;   /* just inside the ring, even when swollen */
-        spk_x = -(int)sqrtf((float)(d * d - spk_y * spk_y));
-    }
+    int spk_y = muse_board->round ? -ring_in * 5 / 8 : -s_h / 2 + 8 + spk_r;
     const lv_font_t *font = caption_font();
     int cw = lv_font_get_glyph_width(font, 'M', ' ');
     int pitch = lv_font_get_line_height(font) + CAPTION_LINE_SPACE;
@@ -1317,10 +1225,6 @@ static void build_answer(lv_obj_t *face, int ring_in)
     lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
-
-    if (muse_board->touch) {
-        build_speaker(face, spk_x, spk_y);
-    }
 
     /* Out of the way while a page is up: the mode name, where Muse was. */
     lv_obj_update_layout(face);
@@ -1377,17 +1281,19 @@ static void build_screen(void)
 
     lv_obj_t *face = scr;
     if (muse_board->touch) {
-        /* Swipe left from Muse for the Glance page, once more for settings. */
+        /* Three pages, left to right: the Glance cards, Muse (home), settings. Swipe right from
+         * Muse for the cards, left for settings. */
         s_tv = lv_tileview_create(scr);
         lv_obj_set_style_bg_color(s_tv, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_tv, LV_OPA_COVER, 0);
         lv_obj_set_scrollbar_mode(s_tv, LV_SCROLLBAR_MODE_OFF);
-        s_face = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+        s_glance = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+        s_face = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
         /* It never scrolls, but LVGL would size its scrollbars from all its
          * children every time it draws any part of it. */
         lv_obj_set_scrollbar_mode(s_face, LV_SCROLLBAR_MODE_OFF);
-        s_glance = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
         s_settings = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
+        lv_tileview_set_tile(s_tv, s_face, LV_ANIM_OFF);   /* start at home */
         face = s_face;
     }
 
@@ -1783,7 +1689,7 @@ static void update_chrome(float now)
 
     if (s_tv) {
         lv_obj_t *active = lv_tileview_get_tile_active(s_tv);
-        int page = active == s_settings ? 2 : active == s_glance ? 1 : 0;
+        int page = active == s_settings ? 2 : active == s_face ? 1 : 0;   /* the dots, left to right */
         bool subpage = page == 2 && muse_settings_ui_in_subpage();
         bool swipe = !subpage;
         if (swipe != lv_obj_has_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE)) {
@@ -1791,7 +1697,7 @@ static void update_chrome(float now)
         }
         int shown = page * 2 + subpage;
         if (shown != s_shown_page) {
-            if (page) read_hide();   /* reading view lives on lv_layer_top: never over Settings */
+            if (page != 1) read_hide();   /* reading view lives on lv_layer_top: only over Muse */
             for (int i = 0; i < 3; i++) {
                 lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
                 lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, subpage);
@@ -1800,7 +1706,7 @@ static void update_chrome(float now)
         }
         int sx = lv_obj_get_scroll_x(s_tv);
         muse_settings_ui_tick(sx > s_w);                 /* settings is the third tile */
-        muse_glance_ui_tick(sx > 0 && sx < 2 * s_w);     /* the Glance page, or sliding over it */
+        muse_glance_ui_tick(sx < s_w, sx % s_w == 0);   /* the Glance page (first tile), or sliding over it */
     }
 
     /* Joining, the icon blinks: the compact layout has no state label. The icon's COLOR
@@ -1885,13 +1791,6 @@ static void update_chrome(float now)
     }
     lv_obj_set_flag(s_pair, LV_OBJ_FLAG_HIDDEN, !b.passkey && !confirm);
 
-    bool speaker = muse_settings_speaker_on();   /* also set from settings, the phone and serial */
-    if (s_speaker && (int)speaker != s_shown_speaker) {
-        show_speaker(speaker);
-    }
-    if (s_speaker && paired == lv_obj_has_flag(s_speaker, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_set_flag(s_speaker, LV_OBJ_FLAG_HIDDEN, !paired);
-    }
     /* Unpaired, a press only says "SET UP MUSE FIRST", so the mic goes too.
      * While a reply's layout is up it decides; that's only ever paired. */
     if (s_answer < 0 && paired == lv_obj_has_flag(s_mic_icon, LV_OBJ_FLAG_HIDDEN)) {
@@ -1964,14 +1863,22 @@ static struct {
 
 static void type_start(lv_obj_t *lbl, const char *text, float now)
 {
-    /* Text that only grows (a live transcript) carries on typing instead of starting over. */
-    size_t old_len = strlen(s_type.full);
-    bool grew = s_type.shown >= 0 && old_len > 0 && lbl == s_type.last_lbl && strncmp(text, s_type.full, old_len) == 0;
+    /* Whatever is already on screen and still true stays put: a live transcript carries on
+     * typing, and "LISTENING 1.2s" -> "1.3s" only retypes the digits, not the whole line. */
+    int keep = 0;
+    if (lbl == s_type.last_lbl && s_type.shown > 0) {
+        while (keep < s_type.shown && text[keep] && text[keep] == s_type.full[keep]) {
+            keep++;
+        }
+        while (keep > 0 && ((unsigned char)text[keep] & 0xC0) == 0x80) {
+            keep--;   /* back to the start of a multi-byte character */
+        }
+    }
     s_type.lbl = lbl;
     s_type.last_lbl = lbl;
     strlcpy(s_type.full, text, sizeof(s_type.full));
-    s_type.start = grew ? now - (float)old_len / TYPE_CPS : now;
-    s_type.shown = grew ? s_type.shown : -1;
+    s_type.start = now - (float)keep / TYPE_CPS;
+    s_type.shown = -1;
     if (!text[0]) {
         lv_label_set_text(lbl, "");
         s_type.lbl = NULL;
@@ -2292,8 +2199,109 @@ static void stall_check(void *arg)
 
 /* Bench-only, from any task: select the touch tile without pretending a/s are touch-menu
  * navigation. The switch lands on the next frame (this task). No effect outside bench builds. */
+/* Bench (">refr"): screen refreshes since the last call -- count, rate, average, worst, and how
+ * many took over 50 ms. Counted from the display's own refresh events. */
+static int64_t s_refr_t0, s_refr_win0, s_refr_sum;
+static int s_refr_n, s_refr_slow, s_refr_max, s_refr_gap;   /* gap: longest wait between frames */
+static int64_t s_refr_end;
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+/* A frame over 100 ms says why: the busiest tasks since a run-time sample taken before it
+ * (one every 100 ms, the scan isn't free), with priority and the core each is pinned to. */
+#define STALL_TASKS 48
+static EXT_RAM_BSS_ATTR TaskStatus_t s_stall_a[STALL_TASKS], s_stall_b[STALL_TASKS];
+static UBaseType_t s_stall_n;
+static int64_t s_stall_at;
+
+static void stall_sample(int64_t now)
+{
+    if (now - s_stall_at >= 100000) {
+        s_stall_n = uxTaskGetSystemState(s_stall_a, STALL_TASKS, NULL);
+        s_stall_at = now;
+    }
+}
+
+static void stall_report(int us, int64_t now)
+{
+    UBaseType_t n = uxTaskGetSystemState(s_stall_b, STALL_TASKS, NULL);
+    for (UBaseType_t i = 0; i < n; i++) {
+        for (UBaseType_t j = 0; j < s_stall_n; j++) {
+            if (s_stall_a[j].xHandle == s_stall_b[i].xHandle) {
+                s_stall_b[i].ulRunTimeCounter -= s_stall_a[j].ulRunTimeCounter;   /* now: time run since */
+                break;
+            }
+        }
+    }
+    char line[256];
+    int len = snprintf(line, sizeof(line), "slow frame %d ms; in the last %d ms ran:", us / 1000,
+                       (int)((now - s_stall_at) / 1000));
+    for (int k = 0; k < 6 && len < (int)sizeof(line); k++) {
+        UBaseType_t best = n;
+        for (UBaseType_t i = 0; i < n; i++) {
+            if (best == n || s_stall_b[i].ulRunTimeCounter > s_stall_b[best].ulRunTimeCounter) {
+                best = i;
+            }
+        }
+        if (best == n || s_stall_b[best].ulRunTimeCounter < 2000) {
+            break;
+        }
+        TaskStatus_t *t = &s_stall_b[best];
+        len += snprintf(line + len, sizeof(line) - (size_t)len, " %s(p%u,c%d) %lu ms", t->pcTaskName,
+                        (unsigned)t->uxCurrentPriority, t->xCoreID == tskNO_AFFINITY ? -1 : (int)t->xCoreID,
+                        (unsigned long)(t->ulRunTimeCounter / 1000));
+        t->ulRunTimeCounter = 0;
+    }
+    ESP_LOGW(TAG, "%s", line);
+}
+#endif
+
+static void refr_event(lv_event_t *e)
+{
+    int64_t now = esp_timer_get_time();
+    if (lv_event_get_code(e) == LV_EVENT_REFR_START) {
+        s_refr_t0 = now;
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+        stall_sample(now);
+#endif
+    } else if (s_refr_t0) {
+        int us = (int)(now - s_refr_t0);
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+        if (us > 100000) {
+            stall_report(us, now);
+        }
+#endif
+        s_refr_n++;
+        s_refr_sum += us;
+        s_refr_slow += us > 50000;
+        s_refr_max = us > s_refr_max ? us : s_refr_max;
+        int gap = s_refr_end ? (int)(now - s_refr_end) : 0;
+        s_refr_gap = gap > s_refr_gap ? gap : s_refr_gap;
+        s_refr_end = now;
+    }
+}
+
+void muse_ui_bench_refr(void)
+{
+    int64_t now = esp_timer_get_time();
+    float win = s_refr_win0 ? (float)(now - s_refr_win0) / 1e6f : 0;
+    printf("@refr %d in %.1fs (%.1f/s), avg %d ms, max %d ms, %d over 50 ms, longest gap %d ms\n", s_refr_n, win,
+           win > 0 ? s_refr_n / win : 0, s_refr_n ? (int)(s_refr_sum / s_refr_n / 1000) : 0, s_refr_max / 1000, s_refr_slow,
+           s_refr_gap / 1000);
+    fflush(stdout);
+    s_refr_n = s_refr_slow = s_refr_max = s_refr_gap = 0;
+    s_refr_sum = 0;
+    s_refr_win0 = now;
+}
+
+void muse_ui_bench_slide(int page)
+{
+    s_bench_slide = true;
+    s_bench_page = page;
+}
+
 void muse_ui_bench_page(int page)
 {
+    s_bench_slide = false;
     s_bench_page = page;   /* 0 face, 1 glance, 2 settings */
 }
 
@@ -2304,8 +2312,36 @@ void muse_ui_bench_demo(bool enabled)
 }
 #endif
 
+/* LVGL's draw threads above every ordinary task. They only run while a frame is drawn, but at
+ * LVGL's own priority (Kconfig caps it at 4) any CPU-bound task on their core held a frame for
+ * as long as it ran: a TLS handshake (2-4 s), the Muse link's Noise work (~200 ms). An unpinned
+ * thread stays on the core it first used the FPU on, so either core's work could do it.
+ * From the first frame: the threads don't exist before LVGL's first refresh setup. */
+static void raise_draw_threads(void)
+{
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+    UBaseType_t cap = uxTaskGetNumberOfTasks() + 4;
+    TaskStatus_t *t = heap_caps_malloc(cap * sizeof(*t), MUSE_BIG_CAPS);
+    UBaseType_t n = t ? uxTaskGetSystemState(t, cap, NULL) : 0;
+    int raised = 0;
+    for (UBaseType_t i = 0; i < n; i++) {
+        if (!strcmp(t[i].pcTaskName, "swdraw")) {
+            vTaskPrioritySet(t[i].xHandle, MUSE_UI_PRIORITY + 1);
+            raised++;
+        }
+    }
+    heap_caps_free(t);
+    ESP_LOGI(TAG, "%d draw threads at priority %d", raised, MUSE_UI_PRIORITY + 1);
+#endif
+}
+
 static void frame_tick(lv_timer_t *timer)
 {
+    static bool s_raised;
+    if (!s_raised) {
+        raise_draw_threads();
+        s_raised = true;
+    }
     int want = s_frame_ms_want;
     if (want && want != s_frame_ms_applied) {
         lv_timer_set_period(timer, want);
@@ -2314,15 +2350,12 @@ static void frame_tick(lv_timer_t *timer)
     }
     int cdx, cdy;
     muse_pixel_center(&cdx, &cdy);
-    if (s_face_dx != s_face_dx_applied || s_face_dy != s_face_dy_applied ||
-        cdx != s_center_dx_applied || cdy != s_center_dy_applied) {
-        s_face_dx_applied = s_face_dx;
-        s_face_dy_applied = s_face_dy;
+    if (cdx != s_center_dx_applied || cdy != s_center_dy_applied) {
         s_center_dx_applied = cdx;
         s_center_dy_applied = cdy;
         if (s_canvas) {
-            lv_obj_set_style_translate_x(s_canvas, s_face_dx_applied * 2 + cdx, 0);
-            lv_obj_set_style_translate_y(s_canvas, s_face_dy_applied * 2 + cdy, 0);
+            lv_obj_set_style_translate_x(s_canvas, cdx, 0);
+            lv_obj_set_style_translate_y(s_canvas, cdy, 0);
         }
     }
     s_last_frame_us = esp_timer_get_time();
@@ -2339,7 +2372,7 @@ static void frame_tick(lv_timer_t *timer)
         s_bench_page = -1;
         if (s_tv) {
             lv_obj_add_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE);
-            lv_tileview_set_tile(s_tv, tile, LV_ANIM_OFF);
+            lv_tileview_set_tile(s_tv, tile, s_bench_slide ? LV_ANIM_ON : LV_ANIM_OFF);
             if (settings) {
                 muse_settings_ui_show_home();   /* arrive on the menu, not a stale sub-page */
             }
@@ -2376,9 +2409,9 @@ static void frame_tick(lv_timer_t *timer)
     if (s_image_dsc.data) {
         return;   /* the image covers the face */
     }
-    if (s_tv && lv_obj_get_scroll_x(s_tv) != 0) {
-        /* Off screen, or sliding to or from settings: hold still so the
-         * slide gets the whole frame time. */
+    if (s_tv && lv_obj_get_scroll_x(s_tv) != s_w) {
+        /* Off screen, or sliding to or from another page: hold still so the
+         * slide gets the whole frame time (Muse is the middle tile). */
         return;
     }
 
@@ -2391,7 +2424,7 @@ static void frame_tick(lv_timer_t *timer)
     static int s_idle_frames;
     bool idle = level < 0.02f && mode == MUSE_MODE_IDLE;
     s_idle_frames = idle ? s_idle_frames + 1 : 0;
-    if (idle && (s_idle_frames & 1)) {
+    if (idle && (s_idle_frames & 1) && !muse_pixel_full_rate()) {
         return;   /* alternate frames: half rate, no timer churn */
     }
     muse_pose_t pose = {
@@ -2406,6 +2439,7 @@ static void frame_tick(lv_timer_t *timer)
 
     update_status(mode, now);
 }
+
 
 esp_err_t muse_ui_start(void)
 {
@@ -2453,6 +2487,8 @@ esp_err_t muse_ui_start(void)
         ESP_LOGE(TAG, "display init failed");
         return ESP_FAIL;
     }
+    lv_display_add_event_cb(disp, refr_event, LV_EVENT_REFR_START, NULL);   /* >refr */
+    lv_display_add_event_cb(disp, refr_event, LV_EVENT_REFR_READY, NULL);
 
     s_image_mutex = xSemaphoreCreateMutex();
     muse_board->display_lock(-1);

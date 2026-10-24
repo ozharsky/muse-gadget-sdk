@@ -39,6 +39,7 @@ typedef struct {
     void (*call)(void *arg);
     void *call_arg;
     int x1, y1, x2, y2;
+    bool last;             /* LVGL's last area of the frame */
 } band_t;
 
 static const char *TAG = "lcd_bands";
@@ -98,6 +99,26 @@ static volatile int64_t s_te_rise, s_te_fall, s_te_period, s_te_blank;
 static volatile uint32_t s_band_t0_us;   /* send task writes, ISR reads */
 static uint32_t s_band_sum_us, s_band_max_us, s_band_count, s_te_held, s_te_frames;
 
+/*
+ * Whole frames, tear-free (set up with the tearing effect, muse_lcd_bands_set_te). A full
+ * frame draws in four bands over ~100 ms; sent band by band, every panel refresh in between
+ * showed part old frame, part new, so a swipe tore. In this mode each band lands in a copy of
+ * the screen (LVGL gets its buffer straight back), and when the frame is complete its changed
+ * areas go to the panel in one burst, timed against the scan (fb_send).
+ */
+#define DIRTY_MAX 8      /* areas kept apart per frame; more become one box */
+#define FB_FAST_W 240    /* an area this narrow is sent faster than the panel scans it */
+typedef struct {
+    int x1, y1, x2, y2;
+} rect_t;
+static uint8_t *s_fb;                    /* the screen, in the panel's byte order */
+static int s_fb_w, s_fb_h;
+static SemaphoreHandle_t s_te_scan;      /* given as each scan starts (TE rise) */
+static rect_t s_dirty[DIRTY_MAX];
+static int s_ndirty;
+static volatile int s_unread;            /* bands LVGL has queued that the send task hasn't copied */
+static int s_k;                          /* the internal buffer the next piece goes in */
+
 static inline uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
@@ -132,6 +153,17 @@ static bool IRAM_ATTR on_chunk_sent(esp_lcd_panel_io_handle_t io, esp_lcd_panel_
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(s_chunk_free, &woken);
     bool last = chunk_done();
+    if (last && s_fb) {
+        uint32_t us = (uint32_t)esp_timer_get_time() - s_band_t0_us;
+        portENTER_CRITICAL_SAFE(&s_lock);
+        s_band_sum_us += us;
+        s_band_count++;
+        if (us > s_band_max_us) {
+            s_band_max_us = us;
+        }
+        portEXIT_CRITICAL_SAFE(&s_lock);
+        return woken == pdTRUE;
+    }
     if (last) {
         bool drop;
         portENTER_CRITICAL_SAFE(&s_lock);
@@ -225,7 +257,7 @@ static void lcd_flush_wait(lv_display_t *disp)
          * notify has not been delivered yet. Waiting on the second half alone
          * was the first bug: mid-band it reads false, and the callback would
          * release LVGL while pieces were still on the wire. */
-        outstanding = s_chunks_out > 0 || s_notify_pending;
+        outstanding = s_unread > 0 || (!s_fb && (s_chunks_out > 0 || s_notify_pending));
         portEXIT_CRITICAL_SAFE(&s_lock);
         if (!outstanding) {
             return;   /* notify arrived (or nothing was owed): LVGL clears its flag */
@@ -319,7 +351,9 @@ static void lcd_recover(void)
     }
 
     ESP_LOGW(TAG, "panel completion lost (%d piece(s) outstanding): releasing the waiting flush", missed);
-    lv_display_flush_ready(s_disp);
+    if (!s_fb) {
+        lv_display_flush_ready(s_disp);
+    }
 
     muse_diag_lcd_t st = {
         .chunks_out = missed,
@@ -332,12 +366,63 @@ static void lcd_recover(void)
 static esp_err_t queue_band(lv_display_t *disp, esp_lcd_panel_handle_t panel, int x1, int y1, int x2, int y2,
                             const void *data, void *ctx)
 {
-    (void)disp;
     (void)panel;
     (void)ctx;
-    band_t b = { .data = data, .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2 };
-    return xQueueSend(s_bands, &b, 0) == pdTRUE ? ESP_OK : ESP_FAIL;
+    band_t b = { .data = data, .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2, .last = lv_display_flush_is_last(disp) };
+    portENTER_CRITICAL_SAFE(&s_lock);
+    s_unread++;
+    portEXIT_CRITICAL_SAFE(&s_lock);
+    if (xQueueSend(s_bands, &b, 0) != pdTRUE) {
+        portENTER_CRITICAL_SAFE(&s_lock);
+        s_unread--;
+        portEXIT_CRITICAL_SAFE(&s_lock);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
+
+/* h rows of x1..x2 from src (rows stride bytes apart) into an internal buffer and onto the
+ * wire; the buffer comes back when the piece is done (on_chunk_sent). */
+static void put_piece(int x1, int y, int x2, int h, const uint8_t *src, size_t stride)
+{
+    size_t row = (size_t)(x2 - x1) * 2;
+    if (xSemaphoreTake(s_chunk_free, pdMS_TO_TICKS(CHUNK_WAIT_MS)) != pdTRUE) {
+        /* A piece's completion never came, so its buffer never returned.
+         * Recover once and take again; if even that fails the chain is
+         * broken for good -- a clean restart beats a frozen screen. */
+        lcd_recover();
+        if (xSemaphoreTake(s_chunk_free, pdMS_TO_TICKS(50)) != pdTRUE) {
+            ESP_LOGE(TAG, "panel send starved past recovery: restarting");
+            esp_restart();
+        }
+    }
+    if (stride == row) {
+        memcpy(s_chunk[s_k], src, h * row);
+    } else {
+        for (int r = 0; r < h; r++) {
+            memcpy(s_chunk[s_k] + r * row, src + r * stride, row);
+        }
+    }
+    s_driver_ms = now_ms();
+    if (s_wedge_ms) {
+        /* Bench: simulate the IDF bus-lock handoff being lost -- the driver call
+         * never returns. The guard must reboot in ~4 s, not freeze for 20 s. */
+        vTaskDelay(pdMS_TO_TICKS(s_wedge_ms));
+        s_wedge_ms = 0;
+    }
+    esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, x1, y, x2, y + h, s_chunk[s_k]);
+    s_driver_ms = 0;
+    s_progress_ms = now_ms();
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_chunk_free);
+        if (chunk_done() && !s_fb) {
+            lv_display_flush_ready(s_disp);
+        }
+    }
+    s_k ^= 1;
+}
+
+static void fb_band(const band_t *b);
 
 /*
  * The panel's draw waits for the piece before to finish, so each piece is
@@ -347,7 +432,6 @@ static esp_err_t queue_band(lv_display_t *disp, esp_lcd_panel_handle_t panel, in
 static void send_bands(void *arg)
 {
     (void)arg;
-    int k = 0;
     band_t b;
     for (;;) {
         xQueueReceive(s_bands, &b, portMAX_DELAY);
@@ -364,6 +448,10 @@ static void send_bands(void *arg)
             }
             continue;
         }
+        if (s_fb) {
+            fb_band(&b);
+            continue;
+        }
         if (b.y1 == 0) {
             /* First band of a frame: leave just after the panel restarts its
              * scan, so this frame lands in one refresh. Frames whose bands are
@@ -378,37 +466,11 @@ static void send_bands(void *arg)
          * counting down. */
         portENTER_CRITICAL_SAFE(&s_lock);
         s_chunks_out = (b.y2 - b.y1 + rows - 1) / rows;   /* see lcd_flush_wait: written-off bands can still decrement this */
+        s_unread--;
         portEXIT_CRITICAL_SAFE(&s_lock);
         for (int y = b.y1; y < b.y2; y += rows) {
             int h = b.y2 - y < rows ? b.y2 - y : rows;
-            if (xSemaphoreTake(s_chunk_free, pdMS_TO_TICKS(CHUNK_WAIT_MS)) != pdTRUE) {
-                /* A piece's completion never came, so its buffer never returned.
-                 * Recover once and take again; if even that fails the chain is
-                 * broken for good -- a clean restart beats a frozen screen. */
-                lcd_recover();
-                if (xSemaphoreTake(s_chunk_free, pdMS_TO_TICKS(50)) != pdTRUE) {
-                    ESP_LOGE(TAG, "panel send starved past recovery: restarting");
-                    esp_restart();
-                }
-            }
-            memcpy(s_chunk[k], b.data + (size_t)(y - b.y1) * row, h * row);
-            s_driver_ms = now_ms();
-            if (s_wedge_ms) {
-                /* Bench: simulate the IDF bus-lock handoff being lost -- the driver call
-                 * never returns. The guard must reboot in ~4 s, not freeze for 20 s. */
-                vTaskDelay(pdMS_TO_TICKS(s_wedge_ms));
-                s_wedge_ms = 0;
-            }
-            esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, b.x1, y, b.x2, y + h, s_chunk[k]);
-            s_driver_ms = 0;
-            s_progress_ms = now_ms();
-            if (err != ESP_OK) {
-                xSemaphoreGive(s_chunk_free);
-                if (chunk_done()) {
-                    lv_display_flush_ready(s_disp);
-                }
-            }
-            k ^= 1;
+            put_piece(b.x1, y, b.x2, h, b.data + (size_t)(y - b.y1) * row, row);
         }
     }
 }
@@ -417,6 +479,8 @@ lv_display_t *muse_lcd_bands_register(esp_lv_adapter_display_config_t cfg, int l
 {
     s_panel = cfg.panel;
     s_chunk_bytes = chunk_bytes;
+    s_fb_w = cfg.profile.hor_res;
+    s_fb_h = cfg.profile.ver_res;
     if (xTaskGetCoreID(xTaskGetCurrentTaskHandle()) != MUSE_UI_CORE) {
         ESP_LOGE(TAG, "not pinned to core %d: the panel's SPI interrupt can strand the send task", MUSE_UI_CORE);
     }
@@ -489,6 +553,11 @@ static void IRAM_ATTR on_te(void *arg)
         }
         s_te_rise = t;
         s_te_fall = 0;
+        if (s_te_scan) {
+            BaseType_t woken = pdFALSE;
+            xSemaphoreGiveFromISR(s_te_scan, &woken);
+            portYIELD_FROM_ISR(woken);
+        }
     } else {
         if (s_te_rise) {
             s_te_blank = t - s_te_rise;
@@ -521,6 +590,105 @@ void muse_lcd_bands_set_te(int gpio)
     vTaskDelay(pdMS_TO_TICKS(40));   /* let a couple of refreshes measure */
     ESP_LOGI(TAG, "tearing effect on GPIO%d: refresh %d us, blank %d us", gpio,
              (int)s_te_period, (int)s_te_blank);
+    if (s_te_period <= 0) {
+        return;   /* no refreshes seen: band by band, as before */
+    }
+    /* Whole frames from here (before LVGL's first, muse_lcd_bands.h). Without the memory,
+     * band by band as before. */
+    SemaphoreHandle_t scan = xSemaphoreCreateBinary();
+    uint8_t *fb = heap_caps_calloc((size_t)s_fb_w * s_fb_h, 2, MALLOC_CAP_SPIRAM);
+    if (!scan || !fb) {
+        ESP_LOGW(TAG, "no room for whole frames: band by band");
+        heap_caps_free(fb);
+        if (scan) {
+            vSemaphoreDelete(scan);
+        }
+        return;
+    }
+    s_te_scan = scan;
+    s_fb = fb;
+    ESP_LOGI(TAG, "whole frames, sent against the scan");
+}
+
+static void fb_merge(void)
+{
+    for (int i = 1; i < s_ndirty; i++) {
+        rect_t *a = &s_dirty[0], *r = &s_dirty[i];
+        a->x1 = r->x1 < a->x1 ? r->x1 : a->x1;
+        a->y1 = r->y1 < a->y1 ? r->y1 : a->y1;
+        a->x2 = r->x2 > a->x2 ? r->x2 : a->x2;
+        a->y2 = r->y2 > a->y2 ? r->y2 : a->y2;
+    }
+    s_ndirty = s_ndirty ? 1 : 0;
+}
+
+/*
+ * The frame's changed areas, from the screen copy, against the panel's scan (16.7 ms, top to
+ * bottom). A narrow area goes faster than the scan: started as the scan starts, the write stays
+ * ahead of it and this refresh shows the area whole. A wide one goes slower: it starts once the
+ * scan is past its first row, so the scan stays ahead -- this refresh shows the old frame, the
+ * next the new one, never a mix. At 80 MHz a full frame takes ~20-35 ms, inside the two
+ * refreshes that needs.
+ */
+static void fb_send(void)
+{
+    bool wide = false;
+    for (int i = 0; i < s_ndirty; i++) {
+        wide |= s_dirty[i].x2 - s_dirty[i].x1 > FB_FAST_W;
+    }
+    if (wide) {
+        fb_merge();   /* one box, so one timing covers all of it */
+    }
+    xSemaphoreTake(s_te_scan, 0);   /* a scan that started before this frame was done doesn't count */
+    int64_t t0 = esp_timer_get_time();
+    bool synced = xSemaphoreTake(s_te_scan, pdMS_TO_TICKS(25)) == pdTRUE;
+    if (synced && wide) {
+        int64_t lead = (s_te_period - s_te_blank) * s_dirty[0].y1 / s_fb_h + 1000;   /* +1 ms: late is safe */
+        vTaskDelay(pdMS_TO_TICKS((lead + 999) / 1000));
+    }
+    portENTER_CRITICAL_SAFE(&s_lock);
+    s_te_frames++;
+    s_te_held += esp_timer_get_time() - t0 > 500;
+    portEXIT_CRITICAL_SAFE(&s_lock);
+
+    int pieces = 0;
+    for (int i = 0; i < s_ndirty; i++) {
+        int rows = s_chunk_bytes / ((size_t)(s_dirty[i].x2 - s_dirty[i].x1) * 2) & ~1;
+        pieces += (s_dirty[i].y2 - s_dirty[i].y1 + rows - 1) / rows;
+    }
+    s_band_t0_us = (uint32_t)esp_timer_get_time();
+    portENTER_CRITICAL_SAFE(&s_lock);
+    s_chunks_out = pieces;
+    portEXIT_CRITICAL_SAFE(&s_lock);
+    for (int i = 0; i < s_ndirty; i++) {
+        const rect_t *r = &s_dirty[i];
+        int rows = s_chunk_bytes / ((size_t)(r->x2 - r->x1) * 2) & ~1;
+        for (int y = r->y1; y < r->y2; y += rows) {
+            int h = r->y2 - y < rows ? r->y2 - y : rows;
+            put_piece(r->x1, y, r->x2, h, s_fb + ((size_t)y * s_fb_w + r->x1) * 2, (size_t)s_fb_w * 2);
+        }
+    }
+    s_ndirty = 0;
+}
+
+/* A band into the screen copy; LVGL has its buffer back at once. The frame's last sends it. */
+static void fb_band(const band_t *b)
+{
+    size_t row = (size_t)(b->x2 - b->x1) * 2;
+    for (int y = b->y1; y < b->y2; y++) {
+        memcpy(s_fb + ((size_t)y * s_fb_w + b->x1) * 2, b->data + (size_t)(y - b->y1) * row, row);
+    }
+    if (s_ndirty == DIRTY_MAX) {
+        fb_merge();
+    }
+    s_dirty[s_ndirty++] = (rect_t){ b->x1, b->y1, b->x2, b->y2 };
+    portENTER_CRITICAL_SAFE(&s_lock);
+    s_unread--;
+    portEXIT_CRITICAL_SAFE(&s_lock);
+    lv_display_flush_ready(s_disp);
+    if (b->last) {
+        fb_send();
+    }
 }
 
 /* Waits for the panel to enter blanking (the fall edge), bounded. */

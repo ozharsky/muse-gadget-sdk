@@ -23,7 +23,9 @@
 
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
+#include "esp_coexist.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
 #include "esp_system.h"     /* esp_restart: the restart paths */
 #include "esp_timer.h"      /* the talk-button hold timer */
 #include "freertos/task.h"
@@ -45,8 +47,10 @@
 #include "muse_state.h"
 #include "muse_ui.h"
 #include "muse_glance_ui.h"
-#include "muse_iphone.h"
 #include "avatar/muse_pixel_video.h"
+#if MUSE_PORTRAITS
+#include "avatar/muse_portrait.h"
+#endif
 #include "muse_pixel.h"             /* >render.bench: muse_pixel_bench */
 #include "muse_voice.h"
 #include "muse_wifi.h"
@@ -90,6 +94,8 @@ bool muse_notif_open_pending(void);
 void muse_ui_show_settings(void);
 #if CONFIG_LV_USE_SNAPSHOT
 void muse_ui_bench_page(int page);
+void muse_ui_bench_slide(int page);
+void muse_ui_bench_refr(void);
 void muse_ui_bench_demo(bool enabled);
 #endif
 void muse_ui_show_notifications(void);
@@ -640,31 +646,11 @@ static void input_task(void *arg)
                     muse_ui_react("alert");
                 }
             }
-            /* An open question that allows it (not an approval): nod = first choice, rock or
-             * shake = last. Otherwise a shake is just a shake. */
-            bool motion_q = !muse_state_asleep() && muse_ui_choice_open() && muse_ui_choice_motion_ok();
-            if (motion_q && (imu & MUSE_IMU_NOD)) {
-                ESP_LOGI(TAG, "nod: answers the open question (first choice)");
-                muse_ui_choice_answer_animated(0);
-            } else if (motion_q && (imu & (MUSE_IMU_ROCK | MUSE_IMU_SHAKE))) {
-                ESP_LOGI(TAG, "head-shake: answers the open question (last choice)");
-                muse_ui_choice_answer_animated(muse_ui_choice_count() - 1);
-            } else if ((imu & MUSE_IMU_SHAKE) && !muse_state_asleep()) {
+            if ((imu & MUSE_IMU_SHAKE) && !muse_state_asleep()) {
                 muse_ui_react("confused");
             }
             if ((imu & MUSE_IMU_FLIP) && !muse_state_asleep()) {
                 muse_voice_request_stop();
-            }
-            /* Parallax: the face leans against the bezel as the device tilts
-             * (gravity in the screen plane, in 2 px steps). */
-            if (!muse_state_asleep()) {
-                int16_t mg[3];
-                if (muse_imu_read(mg) == ESP_OK) {
-                    int dx = mg[0] / 300, dy = -mg[1] / 300;
-                    if (dx > 3) dx = 3; else if (dx < -3) dx = -3;
-                    if (dy > 3) dy = 3; else if (dy < -3) dy = -3;
-                    muse_ui_set_face_off(dx, dy);
-                }
             }
         }
 #endif
@@ -926,6 +912,24 @@ static bool console_command(char *line, bool whole)
         fflush(stdout);
         return true;
     }
+    if (!strncmp(line, "net.up=", 7)) {
+        const char *comma = strchr(line, ',');
+        muse_hatch_bench_net(atoi(line + 7), comma ? atoi(comma + 1) : 0);   /* prints "@net ..." when done */
+        return true;
+    }
+    if (!strncmp(line, "ps=", 3)) {
+        /* Bench: Wi-Fi power save now (0 none, 1 modem sleep, 2 max); the voice task resets it
+         * at its next power change. */
+        printf("@ps %s\n", esp_wifi_set_ps((wifi_ps_type_t)atoi(line + 3)) == ESP_OK ? "set" : "failed");
+        fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "coex=", 5)) {
+        /* Bench: who the shared radio favours (0 Wi-Fi, 1 Bluetooth, 2 balance). */
+        printf("@coex %s\n", esp_coex_preference_set((esp_coex_prefer_t)atoi(line + 5)) == ESP_OK ? "set" : "failed");
+        fflush(stdout);
+        return true;
+    }
     if (!strncmp(line, "ble.setup=", 10)) {
         /* Bench: the same toggle as the aux double-press -- visible to phones/the setup page. */
         bool on = line[10] != '0';
@@ -994,16 +998,6 @@ static bool console_command(char *line, bool whole)
         return true;
     }
 #endif
-    if (!strncmp(line, "parallax=", 9)) {
-        int dx = 0, dy = 0;
-        if (sscanf(line + 9, "%d,%d", &dx, &dy) == 2) {
-            muse_ui_set_face_off(dx, dy);
-            printf("@parallax %d,%d\n", dx, dy);
-        } else {
-            printf("@parallax needs x,y\n");
-        }
-        return true;
-    }
     if (!strncmp(line, "fps=", 4)) {
         int ms = atoi(line + 4);
         muse_ui_set_frame_ms(ms);
@@ -1017,10 +1011,7 @@ static bool console_command(char *line, bool whole)
     if (!strcmp(line, "imu")) {
         int16_t mg[3] = { 0 };
         esp_err_t err = muse_imu_read(mg);
-        float w[3] = { 0 };
-        esp_err_t gerr = muse_imu_read_gyro(w);
-        printf("@imu %s present=%d %d %d %d gyro=%s %.1f %.1f %.1f\n", esp_err_to_name(err), muse_imu_present(),
-               mg[0], mg[1], mg[2], gerr == ESP_OK ? "on" : "off", w[0], w[1], w[2]);
+        printf("@imu %s present=%d %d %d %d\n", esp_err_to_name(err), muse_imu_present(), mg[0], mg[1], mg[2]);
         return true;
     }
     if (!strcmp(line, "batt.cue")) {
@@ -1034,21 +1025,14 @@ static bool console_command(char *line, bool whole)
         set_face(line + 5);
         return true;
     }
-#if CONFIG_LV_USE_SNAPSHOT
-    if (!strncmp(line, "media.demo=", 11)) {   /* bench: a fake now-playing ("Title|Artist|1"), "" clears */
-        char buf[128];
-        strlcpy(buf, line + 11, sizeof(buf));
-        char *artist = strchr(buf, '|'), *play = NULL;
-        if (artist) {
-            *artist++ = 0;
-            play = strchr(artist, '|');
-            if (play) *play++ = 0;
-        }
-        muse_iphone_bench_now(buf, artist ? artist : "", play && *play == '1');
-        printf("@media.demo ok\n");
-        fflush(stdout);
+#if MUSE_PORTRAITS
+    if (!strncmp(line, "portrait=", 9)) {   /* bench: 0 = the pixel faces, 1 = the AI portraits */
+        muse_portrait_enable(atoi(line + 9) != 0);
+        printf("@portrait %d\n", atoi(line + 9) != 0);
         return true;
     }
+#endif
+#if CONFIG_LV_USE_SNAPSHOT
     if (!strncmp(line, "choose.pick=", 12)) {   /* bench: answer with the swipe's slide-off */
         printf("@choose.pick %s\n", muse_ui_choice_answer_animated(atoi(line + 12)) ? "ok" : "none");
         fflush(stdout);
@@ -1071,6 +1055,14 @@ static bool console_command(char *line, bool whole)
         muse_ui_bench_page(!strcmp(line, "ui=settings") ? 2 : !strcmp(line, "ui=glance") ? 1 : 0);
         printf("@ui %s\n", line + 3);
         fflush(stdout);
+        return true;
+    }
+    if (!strncmp(line, "slide=", 6)) {   /* bench: the page change with the swipe's slide */
+        muse_ui_bench_slide(!strcmp(line + 6, "settings") ? 2 : !strcmp(line + 6, "glance") ? 1 : 0);
+        return true;
+    }
+    if (!strcmp(line, "refr")) {   /* bench: screen refresh times since the last call */
+        muse_ui_bench_refr();
         return true;
     }
     if (!strncmp(line, "ui.demo=", 8)) {

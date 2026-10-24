@@ -39,7 +39,6 @@ static const char *TAG = "muse_imu";
 #define REG_CTRL3  0x04
 #define REG_CTRL7  0x08
 #define REG_AX_L   0x35
-#define REG_GX_L   0x3B
 
 #define WHOAMI_QMI8658 0x05
 #define ADDR_LOW       0x6B   /* SA0 low, as the Waveshare BSP wires it */
@@ -47,10 +46,6 @@ static const char *TAG = "muse_imu";
 
 #define ACC_FS_2G      0      /* CTRL2 bits 7:4; 16384 LSB/g */
 #define ACC_ODR_31HZ   8      /* CTRL2 bits 3:0 */
-#define ODR_6DOF_56HZ  7      /* with the gyro on, both run at the gyro's rate */
-#define GYR_FS_512DPS  5      /* CTRL3 bits 6:4; 64 LSB per deg/s */
-#define GYR_LSB_PER_DPS 64.0f
-#define GYRO_KEEP_PER_S 0.25f /* leaky integration: a nod's swing survives, drift does not */
 #define SCL_HZ         100000
 
 /* Gesture tuning. Angles are checked against the resting pose. */
@@ -79,9 +74,6 @@ static int64_t s_tilt_seen, s_flip_seen, s_last_jolt, s_last_shake;
 static int s_jolts;
 static bool s_tilt_latched, s_flip_latched;
 static int64_t s_last_poll;
-static bool s_gyro_on;
-static int64_t s_gyro_us;
-static float s_nod_deg, s_yaw_deg;   /* integrated rotation about the screen's x axis / gravity */
 
 static esp_err_t rd(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *buf, size_t n)
 {
@@ -117,41 +109,6 @@ esp_err_t muse_imu_read(int16_t mg[3])
     };
     for (int i = 0; i < 3; i++) {
         mg[i] = (int16_t)(raw[i] * 1000 / 16384);
-    }
-    return ESP_OK;
-}
-
-/* The gyro costs ~1 mA: on only while awake (nod / head-shake answers), off asleep. */
-static void gyro_enable(bool on)
-{
-    if (on == s_gyro_on || !s_present) {
-        return;
-    }
-    if (on) {
-        wr(s_dev, REG_CTRL2, (ACC_FS_2G << 4) | ODR_6DOF_56HZ);
-        wr(s_dev, REG_CTRL3, (GYR_FS_512DPS << 4) | ODR_6DOF_56HZ);
-        wr(s_dev, REG_CTRL7, 0x03);   /* accel + gyro */
-    } else {
-        wr(s_dev, REG_CTRL7, 0x01);   /* accel only */
-        wr(s_dev, REG_CTRL2, (ACC_FS_2G << 4) | ACC_ODR_31HZ);
-    }
-    s_gyro_on = on;
-    s_gyro_us = 0;
-    s_nod_deg = s_yaw_deg = 0;
-}
-
-esp_err_t muse_imu_read_gyro(float dps[3])
-{
-    if (!s_present || !s_gyro_on) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    uint8_t b[6];
-    esp_err_t err = rd(s_dev, REG_GX_L, b, sizeof(b));
-    if (err != ESP_OK) {
-        return err;
-    }
-    for (int i = 0; i < 3; i++) {
-        dps[i] = (float)(int16_t)((b[2 * i + 1] << 8) | b[2 * i]) / GYR_LSB_PER_DPS;
     }
     return ESP_OK;
 }
@@ -300,34 +257,6 @@ unsigned muse_imu_poll(int64_t now_us, bool asleep)
             s_down = false;
             s_down_seen = 0;
             flags |= MUSE_IMU_FACEUP;
-        }
-    }
-
-    /* Nod / head-shake: only awake (the swings need the 25 Hz awake cadence). With the gyro: a
-     * nod is rotation about the screen's x axis, a shake is rotation about gravity (any pose).
-     * Without it: the accelerometer's pitch / roll angles (a shake held upright is invisible). */
-    static muse_swing_t s_pitch, s_roll;
-    gyro_enable(!asleep && !s_down);
-    float w[3];
-    bool gyro = !asleep && !s_down && muse_imu_read_gyro(w) == ESP_OK;
-    if (gyro) {
-        float dt = s_gyro_us ? (float)(now_us - s_gyro_us) / 1e6f : 0.0f;
-        dt = dt > 0.2f ? 0.2f : dt;
-        s_gyro_us = now_us;
-        s_nod_deg = muse_imu_leaky_angle(s_nod_deg, w[0], dt, GYRO_KEEP_PER_S);
-        s_yaw_deg = muse_imu_leaky_angle(s_yaw_deg, muse_imu_yaw_rate(&v, w), dt, GYRO_KEEP_PER_S);
-    }
-    if (!asleep && !s_down) {
-        float nod = gyro ? s_nod_deg : muse_imu_pitch_deg(&v);
-        if (muse_swing_step(&s_pitch, nod, now_us)) {
-            flags |= MUSE_IMU_NOD;
-            s_roll = (muse_swing_t){ 0 };
-        }
-        bool shake_ok = gyro || muse_imu_roll_ok(&v);
-        float shake = gyro ? s_yaw_deg : muse_imu_roll_deg(&v);
-        if (shake_ok && muse_swing_step(&s_roll, shake, now_us) && !(flags & MUSE_IMU_NOD)) {
-            flags |= MUSE_IMU_ROCK;
-            s_pitch = (muse_swing_t){ 0 };
         }
     }
 

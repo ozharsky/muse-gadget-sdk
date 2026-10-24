@@ -46,7 +46,6 @@ if(CONFIG_MUSE_ENABLED)
         "muse_diag.c"
         "muse_settings_ui.c"
         "muse_glance_ui.c"
-        "muse_iphone.c"
         "muse_text.c"
         "muse_keypad.c"
         "muse_lv_mem.c"
@@ -90,6 +89,12 @@ if(CONFIG_MUSE_ENABLED)
             endforeach()
             set_source_files_properties("${COMPONENT_DIR}/${file}" PROPERTIES COMPILE_DEFINITIONS "${defs}")
         endforeach()
+        if(CONFIG_MUSE_BOARD_WAVESHARE_S3_175C)
+            # AI portrait faces over the pixel ones; their packs live in the assets partition
+            # (tools/muse/portrait_pack.py). >portrait=0 brings the pixel faces back.
+            list(APPEND srcs "avatar/muse_portrait.c")
+            set(muse_portraits 1)
+        endif()
     else()
         list(APPEND srcs "../../avatar/muse_pixel.c")
     endif()
@@ -138,7 +143,7 @@ set(muse_priv_requires
     bt esp-tls mbedtls esp_app_format esp_http_client
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
-    esp_driver_pcnt esp_hw_support spi_flash)
+    esp_driver_pcnt esp_hw_support spi_flash esp_coex)
 list(APPEND muse_priv_requires camera)
 
 idf_component_register(
@@ -149,6 +154,9 @@ idf_component_register(
     REQUIRES esp_driver_gpio esp_driver_i2c
     PRIV_REQUIRES ${muse_priv_requires}
 )
+if(muse_portraits)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_PORTRAITS=1)
+endif()
 
 if(CONFIG_MUSE_ENABLED)
     # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,
@@ -158,4 +166,11 @@ if(CONFIG_MUSE_ENABLED)
     target_compile_definitions(${lvgl_lib} PUBLIC
         "LV_ASSERT_HANDLER_INCLUDE=<stdlib.h>"
         "LV_ASSERT_HANDLER=abort()\;")
+endif()
+
+# The 1.75C sets its panel up itself (its QSPI clock; board_waveshare_s3_175c.c panel_new): the
+# CO5300 driver is already here as the BSP's dependency.
+if(CONFIG_MUSE_BOARD_WAVESHARE_S3_175C)
+    idf_component_get_property(co5300_lib espressif__esp_lcd_co5300 COMPONENT_LIB)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE ${co5300_lib})
 endif()

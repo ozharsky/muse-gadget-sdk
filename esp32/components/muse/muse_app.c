@@ -24,7 +24,6 @@
 #include "muse_battery.h"
 #include "muse_board.h"
 #include "muse_ble.h"
-#include "muse_iphone.h"
 #include "muse_chat.h"
 #include "muse_diag.h"
 #include "muse_input.h"
@@ -63,9 +62,6 @@ static void on_setting(muse_setting_t what)
         break;
     case MUSE_SETTING_HATCH:
         muse_hatch_config_changed();
-        break;
-    case MUSE_SETTING_IPHONE:
-        muse_iphone_apply();
         break;
     default:
         break;   /* brightness, sleep and the speaker are polled where they're used */
@@ -106,7 +102,6 @@ void muse_app_run(const muse_board_t *board)
     /* Home Link owns the radios; these just hand it the saved settings. */
     muse_wifi_apply();
     muse_ble_apply();
-    muse_iphone_start();   /* advertises for the iPhone when Settings > Bluetooth > iPhone is on */
     ESP_LOGI(TAG, "ready: free heap %u internal, %u psram",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
