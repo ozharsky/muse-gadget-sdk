@@ -349,6 +349,25 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
 
 static void go_idle(const char *caption);
 
+/* Status words ("SENDING VOICE NOTE", "NOTE SENT...") can arrive a few hundred ms apart; each
+ * stays up until it has typed out and been readable for a moment, and a newer one waits. */
+#define STATUS_READ_US 900000
+static struct {
+    char next[MUSE_CAPTION_MAX];
+    int64_t due;   /* when the one on screen may give way */
+} s_status;
+
+static void status_flush(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_status.next[0] && now >= s_status.due) {
+        muse_state_set_caption("%s", s_status.next);
+        /* the typewriter runs at 32 characters a second (muse_ui.c TYPE_CPS) */
+        s_status.due = now + (int64_t)strlen(s_status.next) * 1000000 / 32 + STATUS_READ_US;
+        s_status.next[0] = 0;
+    }
+}
+
 /*
  * Plays Hatch's reply as it arrives, with its text as the caption. Returns
  * true if interrupted by a new press. *delivered: the VM has the note.
@@ -356,7 +375,9 @@ static void go_idle(const char *caption);
 static bool hatch_reply(bool *delivered)
 {
     muse_state_set_mode(MUSE_MODE_THINKING);
-    muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
+    s_status.due = 0;
+    strlcpy(s_status.next, "SENDING VOICE NOTE", sizeof(s_status.next));   /* until there's a transcript or reply */
+    status_flush();
     static EXT_RAM_BSS_ATTR int16_t buf[MUSE_AUDIO_CHUNK];
     static const int16_t silence[MUSE_AUDIO_CHUNK];
     char text[96];
@@ -365,13 +386,14 @@ static bool hatch_reply(bool *delivered)
     size_t played = 0;
     int64_t t0 = esp_timer_get_time();
     *delivered = false;
+    s_stop_reply = false;   /* a flip or face-down from before this turn must not cut its reply */
     for (;;) {
         muse_hatch_ev_t ev;
         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
             switch (ev) {
             case MUSE_HATCH_EV_HEARD:
                 if (!speaking && !replied) {
-                    muse_state_set_caption("\"%s\"", text);
+                    snprintf(s_status.next, sizeof(s_status.next), "\"%s\"", text);
                 }
                 break;
             case MUSE_HATCH_EV_SENT:
@@ -379,17 +401,19 @@ static bool hatch_reply(bool *delivered)
                 if (!speaking && !replied) {
                     /* The agent name depends on the transport: the relay is Hermes (or an ALT
                      * profile), Muse is Muse. Hermes agents never showed this before. */
-                    muse_state_set_caption(muse_settings_agent_hermes() ? "NOTE SENT - WAITING FOR AGENT"
-                                                                        : "NOTE SENT - WAITING FOR MUSE");
+                    strlcpy(s_status.next, muse_settings_agent_hermes() ? "NOTE SENT - WAITING FOR AGENT"
+                                                                        : "NOTE SENT - WAITING FOR MUSE",
+                            sizeof(s_status.next));
                 }
                 break;
             case MUSE_HATCH_EV_STATUS:
                 if (!speaking && !replied && text[0]) {
-                    muse_state_set_caption("WORKING: %s", text);   /* what the agent is grinding on */
+                    snprintf(s_status.next, sizeof(s_status.next), "WORKING: %s", text);   /* what the agent is grinding on */
                 }
                 break;
             case MUSE_HATCH_EV_REPLY:
                 replied = *delivered = true;
+                s_status.next[0] = 0;   /* the reply needs no waiting status */
                 /* Once speech starts, the caption follows it. The event only
                  * has room for the page's start; the page itself comes below. */
                 if (!speaking && !muse_hatch_turn_caption(played, page, sizeof(page))) {
@@ -407,6 +431,9 @@ static bool hatch_reply(bool *delivered)
             default:
                 break;
             }
+        }
+        if (!speaking && !replied) {
+            status_flush();
         }
         if (got_event(MUSE_PTT_DOWN)) {
             ESP_LOGI(TAG, "reply interrupted");

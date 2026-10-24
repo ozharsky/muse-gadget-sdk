@@ -57,6 +57,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_tls.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
@@ -70,6 +71,9 @@ extern "C" {
 #include "cJSON.h"
 #include "minimp3.h"
 #include "muse_account_api.h"
+extern "C" {
+#include "muse_adpcm.h"
+}
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_state.h"
@@ -247,6 +251,7 @@ struct turn_t {
     uint8_t *note;           /* NOTE_PART_BYTES of 16 kHz PCM waiting for base64 */
     size_t note_len;
     size_t pcm_bytes;        /* the note so far */
+    bool up_started;         /* the note's upload began at the press (s_up) */
     size_t body_sent;
     char *texts;             /* MAX_MSGS * TEXT_MAX: each message's text */
     uint32_t pcm_out;        /* reply audio frames handed to the voice task */
@@ -775,8 +780,19 @@ static void disconnect(const char *why)
     s_connected = false;
 }
 
+#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
+/* The last TLS session with the VM host: a reconnect (every switch back to Muse) resumes it
+ * instead of verifying the certificate chain and doing a key exchange again -- that software
+ * ECDSA/ECDHE work took ~1.5 s and starved the display through the shared cache while it ran. */
+static esp_tls_client_session_t *s_tls_session;
+#endif
+
 static void forget_vm(void)
 {
+#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
+    esp_tls_free_client_session(s_tls_session);   /* a new host or account starts clean */
+    s_tls_session = nullptr;
+#endif
     free(s_vm.vm_token);
     s_vm = muse_hatch_vm_t{};
     s_vm_direct = false;
@@ -873,11 +889,21 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
     esp_tls_cfg_t cfg = {};
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.timeout_ms = 15000;
+#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
+    cfg.client_session = s_tls_session;   /* a refused ticket falls back to a full handshake */
+#endif
     int64_t t0 = now_us();
     if (esp_tls_conn_new_sync(s_host, strlen(s_host), NOISE_PORT, &cfg, c.tls) != 1) {
         snprintf(err, err_cap, "Can't reach %s", s_host);
         return false;
     }
+#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
+    if (esp_tls_client_session_t *fresh = esp_tls_get_client_session(c.tls)) {
+        esp_tls_free_client_session(s_tls_session);
+        s_tls_session = fresh;
+    }
+    ESP_LOGI(TAG, "TLS to %s in %d ms", s_host, (int)((now_us() - t0) / 1000));
+#endif
     int status = ws_upgrade(c.tls, s_vm.vm_id, s_vm.vm_token);
     *http_status = status;
     if (status != 101) {
@@ -1054,12 +1080,14 @@ static void turn_reset_streams(void)
     }
 }
 
+static void hermes_up_close(void);
+
 static void turn_finish(void)
 {
     turn_reset_streams();
-    if (s_hstream.h) {   /* a Hermes streaming turn in flight: close it */
+    hermes_up_close();   /* a note still streaming up */
+    if (s_hstream.h) {   /* a Hermes streaming turn in flight: close it mid-reply (the client is kept, s_keep_stream) */
         esp_http_client_close(s_hstream.h);
-        esp_http_client_cleanup(s_hstream.h);
         s_hstream.h = nullptr;
         heap_caps_free(s_hstream.line);
         s_hstream.line = nullptr;
@@ -1139,6 +1167,7 @@ static void turn_begin(uint32_t gen)
             return;
         }
         s_turn.pcm_bytes = 0;
+        s_turn.up_started = false;
         s_turn.phase = P_LISTEN;
         return;
     }
@@ -1658,8 +1687,11 @@ struct tts_buf_t {
     bool over;
 };
 
+static int s_http_connects;   /* new connections made by the clients below (their TLS handshakes) */
+
 static esp_err_t tts_http_evt(esp_http_client_event_t *e)
 {
+    s_http_connects += e->event_id == HTTP_EVENT_ON_CONNECTED;
     auto *b = static_cast<tts_buf_t *>(e->user_data);
     if (e->event_id == HTTP_EVENT_ON_DATA) {
         if (b->len + e->data_len < b->cap) {
@@ -1702,7 +1734,157 @@ static size_t b64_decode_inplace(char *s, size_t n)
     return o;
 }
 
+/* The relay's funnel has a Let's Encrypt ECDSA chain. Checked from the bundle's ISRG Root X2 it
+ * takes three P-384 signature checks in software, 3-4 s of every fresh handshake (the Mac does it
+ * in 0.3 s). Trusting the funnel's issuer (YE1, to 2028) and its root (Root YE, to 2032) directly
+ * stops after one or two. A certificate from anywhere else is refused, and from then on (this
+ * boot) the relay is checked against the full bundle again. Public certificates, not secrets. */
+static const char RELAY_CA_PEM[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIICizCCAhGgAwIBAgIQXd1w3TH4AchcGGp6BLgK/jAKBggqhkjOPQQDAzAuMQsw\n"
+    "CQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZRTAeFw0y\n"
+    "NTA5MDMwMDAwMDBaFw0yODA5MDIyMzU5NTlaMDMxCzAJBgNVBAYTAlVTMRYwFAYD\n"
+    "VQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQDEwNZRTEwdjAQBgcqhkjOPQIBBgUr\n"
+    "gQQAIgNiAAQHZVB1/mimla2hfSurylScjPMZaOJXLz/NnAc2sylm8WDyhU9Ccp+z\n"
+    "ASQi5vSwGGJjSGklkD9fdPR8GpyDIOIjCEfrnbt/v+ZSEPLLEGbaM6EccDbN7p9x\n"
+    "teIm2Avf+ryjge4wgeswDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUF\n"
+    "BwMBMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFLsgykcL/tflnPmPCSqj\n"
+    "jDdFsbzYMB8GA1UdIwQYMBaAFKPIJlqOoUzQNWP8myPIOq5W809WMDIGCCsGAQUF\n"
+    "BwEBBCYwJDAiBggrBgEFBQcwAoYWaHR0cDovL3llLmkubGVuY3Iub3JnLzATBgNV\n"
+    "HSAEDDAKMAgGBmeBDAECATAnBgNVHR8EIDAeMBygGqAYhhZodHRwOi8veWUuYy5s\n"
+    "ZW5jci5vcmcvMAoGCCqGSM49BAMDA2gAMGUCMQDgjUEahFT/h3DRakqiPZpLvPgf\n"
+    "Zwkt6K2EOMmh1nvEzl83eMLYcod4GCl3b0J1Nn0CMBNYmEQJb4CEG5WoOe7aRn/L\n"
+    "VKu6saHmHEynI7ysIPd8zQsK1HdmhlHKlw9Z5GpGvA==\n"
+    "-----END CERTIFICATE-----\n"
+    " 2 s:C=US, O=ISRG, CN=Root YE\n"
+    "   i:C=US, O=Internet Security Research Group, CN=ISRG Root X2\n"
+    "   a:PKEY: EC, (secp384r1); sigalg: ecdsa-with-SHA384\n"
+    "   v:NotBefore: May 13 00:00:00 2026 GMT; NotAfter: Sep  2 23:59:59 2032 GMT\n"
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIICpjCCAiugAwIBAgIRAIchZfw0tuX7qK3Vs3BftTowCgYIKoZIzj0EAwMwTzEL\n"
+    "MAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNo\n"
+    "IEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDIwHhcNMjYwNTEzMDAwMDAwWhcN\n"
+    "MzIwOTAyMjM1OTU5WjAuMQswCQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4G\n"
+    "A1UEAxMHUm9vdCBZRTB2MBAGByqGSM49AgEGBSuBBAAiA2IABDwS/6vhrcVqcbBo\n"
+    "+wgdI3fwn9x7DNJJOY/lTOti0vkwuRN87RhEhTH17E7XyFjWsPYhIPt/wzOqxTd2\n"
+    "b+4ZJNy9ID04YywF9U5zasDVyGSNErVNtz8uSGh5izW87j77GaOB6zCB6DAOBgNV\n"
+    "HQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDwYDVR0TAQH/BAUwAwEB\n"
+    "/zAdBgNVHQ4EFgQUo8gmWo6hTNA1Y/ybI8g6rlbzT1YwHwYDVR0jBBgwFoAUfEKW\n"
+    "rt5LSDv6kviejM9ti6lyN5UwMgYIKwYBBQUHAQEEJjAkMCIGCCsGAQUFBzAChhZo\n"
+    "dHRwOi8veDIuaS5sZW5jci5vcmcvMBMGA1UdIAQMMAowCAYGZ4EMAQIBMCcGA1Ud\n"
+    "HwQgMB4wHKAaoBiGFmh0dHA6Ly94Mi5jLmxlbmNyLm9yZy8wCgYIKoZIzj0EAwMD\n"
+    "aQAwZgIxAMU19WCtmxVND8UHBZRoma49Z7jPs64Dma0eTu1OChVbB/2J7GV3nvYK\n"
+    "Ax54uk1G9QIxAO0miLVJu8PLNiXXXkiE/gsK3CTRTF/aeo4bMX42Zw40csRU6AC2\n"
+    "6hSW1/IWaas6dg==\n"
+    "-----END CERTIFICATE-----\n";
+static bool s_relay_ca_off;
+
+static void relay_tls(esp_http_client_config_t *cfg)
+{
+    cfg->cert_pem = s_relay_ca_off ? nullptr : RELAY_CA_PEM;
+    cfg->crt_bundle_attach = s_relay_ca_off ? esp_crt_bundle_attach : nullptr;
+}
+
+/* After a failed call: true if it was the pinned issuers that refused the relay's certificate,
+ * with cfg switched to the full bundle for a retry. */
+static bool relay_tls_refused(esp_http_client_handle_t h, esp_http_client_config_t *cfg)
+{
+    int code = 0, flags = 0;
+    esp_http_client_get_and_clear_last_tls_error(h, &code, &flags);
+    if (!cfg->cert_pem || !flags) {
+        return false;
+    }
+    ESP_LOGW(TAG, "relay certificate isn't from Let's Encrypt YE (flags 0x%x): full bundle from now on", flags);
+    s_relay_ca_off = true;
+    relay_tls(cfg);
+    return true;
+}
+
 /* Fetches speech for text and queues its MP3 for decode(). False leaves nothing queued. */
+/* Kept-alive HTTPS for the calls that repeat (speech pieces, the relay's polls). Each used to open
+ * a fresh TLS connection, and the handshake's software crypto starved the display for 0.5-2.4 s
+ * at a time through the cache both cores share. A kept client stays connected between calls; if
+ * the far end has closed it, the call is made once more on a fresh one, whose saved session
+ * ticket makes that handshake short. Session task only, one call at a time per slot. */
+struct keep_t {
+    esp_http_client_handle_t h;
+    char base[72];   /* scheme://host[:port] it is connected to */
+};
+
+static void keep_drop(keep_t *k)
+{
+    if (k->h) {
+        esp_http_client_cleanup(k->h);
+        k->h = nullptr;
+    }
+}
+
+static esp_http_client_handle_t keep_get(keep_t *k, esp_http_client_config_t *cfg)
+{
+    const char *u = cfg->url, *sch = strstr(u, "://"), *path = sch ? strchr(sch + 3, '/') : nullptr;
+    size_t blen = path ? (size_t)(path - u) : strlen(u);
+    if (k->h && (blen >= sizeof(k->base) || strncmp(k->base, u, blen) != 0 || k->base[blen])) {
+        keep_drop(k);   /* another server (the relay's LAN door or its funnel): start over */
+    }
+    if (k->h) {
+        esp_http_client_set_url(k->h, cfg->url);
+        esp_http_client_set_method(k->h, cfg->method);
+        esp_http_client_set_timeout_ms(k->h, cfg->timeout_ms);
+        esp_http_client_set_user_data(k->h, cfg->user_data);
+        esp_http_client_set_post_field(k->h, nullptr, 0);
+        return k->h;
+    }
+#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
+    cfg->save_client_session = true;
+#endif
+    k->h = esp_http_client_init(cfg);
+    if (k->h) {
+        size_t n = blen < sizeof(k->base) - 1 ? blen : sizeof(k->base) - 1;
+        memcpy(k->base, u, n);
+        k->base[n] = 0;
+    }
+    return k->h;
+}
+
+/* One call on the slot's client: prep(h) sets its headers and body and resets the reply buffer
+ * (it runs again for the retry). *status is the HTTP status, 0 when the call failed. */
+template <typename Prep>
+static esp_err_t keep_perform(keep_t *k, esp_http_client_config_t *cfg, Prep prep, int *status)
+{
+    *status = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {   /* stale socket, then refused pin */
+        bool reused = k->h != nullptr;
+        esp_http_client_handle_t h = keep_get(k, cfg);
+        if (!h) {
+            return ESP_ERR_NO_MEM;
+        }
+        prep(h);
+        int connects = s_http_connects;
+        int64_t t0 = now_us();
+        esp_err_t err = esp_http_client_perform(h);
+        if (s_http_connects != connects) {
+            ESP_LOGI(TAG, "new connection to %s (%lld ms with the call)", k->base, (long long)((now_us() - t0) / 1000));
+        }
+        if (err == ESP_OK) {
+            *status = esp_http_client_get_status_code(h);
+            return err;
+        }
+        bool refused = relay_tls_refused(h, cfg);
+        keep_drop(k);
+        if (refused) {
+            continue;
+        }
+        if (!reused) {
+            return err;   /* a fresh connection failed: the server, not a stale socket */
+        }
+    }
+    return ESP_FAIL;
+}
+
+static keep_t s_keep_tts;     /* texttospeech.googleapis.com */
+static keep_t s_keep_relay;   /* the relay's GETs: notifications, their history, the glance cards */
+static keep_t s_keep_stream;  /* the turn's client; each turn connects afresh (esp_http_client_open always does) */
+
 static bool fetch_tts(const char *text, bool last = true, bool first = true)
 {
     const size_t CAP = 192 * 1024;   /* one 90-char piece is ~66 KB of JSON; 900 KB was the whole-message era */
@@ -1756,16 +1938,14 @@ static bool fetch_tts(const char *text, bool last = true, bool first = true)
         cfg.timeout_ms = 8000;   /* this task is blocked meanwhile; if Google is slow, show the text rather than wait */
         cfg.event_handler = tts_http_evt;
         cfg.user_data = &buf;
-        esp_http_client_handle_t h = esp_http_client_init(&cfg);
-        if (!h) {
-            goto out;
-        }
-        esp_http_client_set_header(h, "Content-Type", "application/json");
-        esp_http_client_set_post_field(h, body, strlen(body));
         int64_t t0 = now_us();
-        esp_err_t err = esp_http_client_perform(h);
-        int status = esp_http_client_get_status_code(h);
-        esp_http_client_cleanup(h);
+        int status;
+        esp_err_t err = keep_perform(&s_keep_tts, &cfg, [&](esp_http_client_handle_t h) {
+            buf.len = 0;
+            buf.over = false;
+            esp_http_client_set_header(h, "Content-Type", "application/json");
+            esp_http_client_set_post_field(h, body, strlen(body));
+        }, &status);
         if (err != ESP_OK || status != 200 || buf.over) {
             ESP_LOGW(TAG, "tts: request failed (err %s, HTTP %d%s)", esp_err_to_name(err), status, buf.over ? ", too big" : "");
             if (status != 200 && buf.len) {
@@ -2332,7 +2512,6 @@ static void hermes_react_show(void)
  * nobody answers is a "no". ---- */
 
 static const char *relay_base_url(bool *remote);
-extern "C" void muse_ui_choice_set_motion(bool ok);
 extern "C" bool muse_ui_choose(const char *prompt, const char *const *options, int n, int timeout_ms,
                                void (*done)(int, void *), void *user);
 extern "C" bool muse_ui_choice_answer(int idx);
@@ -2374,7 +2553,7 @@ static void approval_post(const char *id, const char *choice)
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 8000;
@@ -2450,7 +2629,6 @@ static void handle_ask(cJSON *ask)
         ESP_LOGW(TAG, "ask %s: no UI for the card", id);
         return;
     }
-    muse_ui_choice_set_motion(false);   /* an approval runs a command: a tap or a swipe, never a nod */
     /* Logged AFTER the dialog exists: the bench hook matches this line and answers at once. */
     ESP_LOGI(TAG, "ask %s: %s", id, text ? text : "");
     int idx = -1;
@@ -2596,24 +2774,117 @@ static void hermes_dispatch_line(char *line, size_t len)
 }
 
 /* Starts a streamed turn: opens the HTTP exchange; hermes_stream_pump() drives it. */
-static bool hermes_request_stream(void)
+/* A client for the turn, on its own kept slot (esp_http_client_open always makes a new connection,
+ * so nothing is gained by sharing one), with the note's headers. len -1: a chunked body. On a
+ * failed open the refused-pin case is tried once more against the full bundle. Null: no relay. */
+static esp_http_client_handle_t hermes_open(int len)
 {
     char url[256];
-    snprintf(url, sizeof(url), "%s/turn?stream=1%s", hermes_home_url(), agent_profile_query());
     bool remote = false;
-    const char *rem = hermes_remote_url();
-    if (rem[0] && !hermes_home_reachable()) {
-        snprintf(url, sizeof(url), "%s/turn?stream=1%s", rem, agent_profile_query());
-        remote = true;
-        ESP_LOGI(TAG, "hermes: home relay unreachable, using the remote address");
-    }
+    snprintf(url, sizeof(url), "%s/turn?stream=1%s", relay_base_url(&remote), agent_profile_query());
     if (strstr(url + 8, "://") || !strstr(url, "://")) {
         ESP_LOGE(TAG, "hermes: bad relay address (%s)", url);
-        turn_fail("BAD RELAY ADDRESS");
+        return nullptr;
+    }
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    if (remote) {
+        relay_tls(&cfg);
+    }
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 100000;
+    cfg.buffer_size = 4096;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        esp_http_client_handle_t h = keep_get(&s_keep_stream, &cfg);
+        if (!h) {
+            return nullptr;
+        }
+        esp_http_client_set_header(h, "Content-Type", "application/octet-stream");
+        esp_http_client_set_header(h, "X-Audio", "ima-adpcm");
+        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
+        int64_t t0 = now_us();
+        esp_err_t err = esp_http_client_open(h, len);   /* connects, then sends the headers */
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "hermes: relay %s connected in %lld ms", remote ? "(remote)" : "(home)",
+                     (long long)((now_us() - t0) / 1000));
+            return h;
+        }
+        ESP_LOGW(TAG, "hermes: relay connect failed (%s) after %lld ms", esp_err_to_name(err),
+                 (long long)((now_us() - t0) / 1000));
+        bool refused = relay_tls_refused(h, &cfg);
+        keep_drop(&s_keep_stream);
+        if (!refused) {
+            break;
+        }
+    }
+    return nullptr;
+}
+
+/* The note streams up while it is spoken: the connection opens at the press and the speech goes
+ * as it comes, chunked, in IMA ADPCM (a quarter of the bytes). At release only its last fraction
+ * is left to send -- the ~2 s TLS handshake through the funnel and the upload both happen while
+ * the user talks. If the stream can't open or breaks, the whole note goes at release instead. */
+#define UP_PCM 8192   /* a quarter second of PCM per chunk, 2 KB of ADPCM */
+static struct {
+    esp_http_client_handle_t h;   /* open, chunked body under way; null: not streaming */
+    muse_adpcm_t adpcm;
+    size_t sent;                  /* bytes of s_hbuf's PCM already encoded and written */
+    uint8_t out[UP_PCM / 4 + 16];  /* one chunk: its size line, the ADPCM, CRLF */
+} s_up;
+
+static void hermes_up_close(void)
+{
+    if (s_up.h) {
+        esp_http_client_close(s_up.h);   /* the client stays in s_keep_stream */
+        s_up.h = nullptr;
+    }
+}
+
+/* Encodes and writes what has been recorded, a chunk at a time (all of it, and the body's end,
+ * when last). False: the stream broke and is closed. */
+static bool hermes_up_push(bool last)
+{
+    size_t avail = (s_turn.pcm_bytes - s_up.sent) & ~(size_t)3;   /* whole sample pairs */
+    while (s_up.h && (avail >= UP_PCM || (last && avail))) {
+        size_t take = avail < UP_PCM ? avail : UP_PCM;
+        int n = snprintf(reinterpret_cast<char *>(s_up.out), 12, "%x\r\n", (unsigned)(take / 4));
+        muse_adpcm_encode_block(&s_up.adpcm, reinterpret_cast<const int16_t *>(s_hbuf + s_up.sent), take / 2, s_up.out + n);
+        n += (int)(take / 4);
+        s_up.out[n++] = '\r';
+        s_up.out[n++] = '\n';
+        if (esp_http_client_write(s_up.h, reinterpret_cast<const char *>(s_up.out), n) != n) {
+            ESP_LOGW(TAG, "hermes: note stream broke after %u bytes; it goes whole at release", (unsigned)s_up.sent);
+            hermes_up_close();
+            return false;
+        }
+        s_up.sent += take;
+        avail -= take;
+    }
+    if (last && s_up.h && esp_http_client_write(s_up.h, "0\r\n\r\n", 5) != 5) {
+        hermes_up_close();
         return false;
     }
+    return s_up.h != nullptr;
+}
+
+/* At the press: opens the turn's connection and starts the note's body. */
+static void hermes_up_begin(void)
+{
+    s_up.h = hermes_open(-1);
+    s_up.adpcm = {};
+    s_up.sent = 0;
+    if (s_up.h) {
+        esp_http_client_set_timeout_ms(s_up.h, 5000);   /* a write mustn't hold the mic backlog long */
+    }
+}
+
+/* At release: the rest of the note, then the reply's headers. Falls back to sending the whole note
+ * on a fresh connection once if the stream broke. False: the turn failed (already reported). */
+static bool hermes_request_stream(void)
+{
     char *line = static_cast<char *>(psram_alloc(160 * 1024));   /* a long sentence's b64 MP3 can be ~60-100K */
     if (!line) {
+        hermes_up_close();
         turn_fail("OUT OF MEMORY");
         return false;
     }
@@ -2627,53 +2898,54 @@ static bool hermes_request_stream(void)
     s_hstream.got_reply = false;
     s_hstream.react[0] = '\0';
 
-    esp_http_client_config_t cfg = {};
-    cfg.url = url;
-    if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    }
-    cfg.method = HTTP_METHOD_POST;
-    cfg.timeout_ms = 100000;
-    cfg.buffer_size = 4096;
-    esp_http_client_handle_t h = esp_http_client_init(&cfg);
-    if (!h) {
-        heap_caps_free(line);
-        s_hstream.line = nullptr;
-        turn_fail("OUT OF MEMORY");
-        return false;
-    }
-    esp_http_client_set_header(h, "Content-Type", "application/octet-stream");
-    esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
-    esp_http_client_set_post_field(h, reinterpret_cast<const char *>(s_hbuf), s_turn.pcm_bytes);
-    int64_t t0 = now_us();
-    esp_err_t err = esp_http_client_open(h, s_turn.pcm_bytes);   /* headers only */
-    if (err == ESP_OK) {
-        /* write the PCM body: esp_http_client_open sends the headers, not the payload */
-        int written = esp_http_client_write(h, reinterpret_cast<const char *>(s_hbuf), s_turn.pcm_bytes);
-        if (written < 0) {
-            err = ESP_FAIL;
-        } else {
-            ESP_LOGI(TAG, "hermes stream: body written (%d bytes, %lld ms)", written,
+    int64_t t0 = now_us(), hdr = -1;
+    bool encoded = false;
+    esp_http_client_handle_t h = nullptr;
+    for (int attempt = 0; attempt < 2 && hdr < 0; attempt++) {
+        if (attempt == 0 && hermes_up_push(true)) {
+            h = s_up.h;
+            s_up.h = nullptr;
+            ESP_LOGI(TAG, "hermes: note streamed (%u bytes of ADPCM), the last in %lld ms", (unsigned)(s_up.sent / 4),
                      (long long)((now_us() - t0) / 1000));
-            /* The note has left the device: tell the voice task, so it can say "note sent,
-             * waiting" while the agent thinks (Muse shows this; Hermes did not). */
-            if (s_turn.gen == s_gen.load()) {
-                emit(MUSE_HATCH_EV_SENT, nullptr);
+        } else {
+            /* the whole note at once: packed in place (each byte lands behind the samples it came from) */
+            size_t samples = s_turn.pcm_bytes / 2 & ~(size_t)1;
+            if (!encoded) {
+                muse_adpcm_t adpcm = {};
+                muse_adpcm_encode_block(&adpcm, reinterpret_cast<const int16_t *>(s_hbuf), samples, s_hbuf);
+                encoded = true;
             }
+            int body = (int)(samples / 2);
+            h = hermes_open(body);
+            if (h && esp_http_client_write(h, reinterpret_cast<const char *>(s_hbuf), body) != body) {
+                esp_http_client_close(h);
+                h = nullptr;
+            }
+            if (!h) {
+                continue;
+            }
+            ESP_LOGI(TAG, "hermes: note sent whole (%d bytes) in %lld ms", body, (long long)((now_us() - t0) / 1000));
+        }
+        /* The note has left the device: tell the voice task, so it can say "note sent, waiting"
+         * while the agent thinks. */
+        if (s_turn.gen == s_gen.load()) {
+            emit(MUSE_HATCH_EV_SENT, nullptr);
+        }
+        esp_http_client_set_timeout_ms(h, 100000);   /* the agent may take a while */
+        hdr = esp_http_client_fetch_headers(h);
+        if (hdr < 0 || esp_http_client_get_status_code(h) == 0) {
+            ESP_LOGW(TAG, "hermes: no reply on that connection; once more with the whole note");
+            esp_http_client_close(h);
+            hdr = -1;
         }
     }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "hermes stream: open/write failed (%s) after %lld ms", esp_err_to_name(err),
-                 (long long)((now_us() - t0) / 1000));
-        esp_http_client_cleanup(h);
+    if (hdr < 0) {
         heap_caps_free(line);
         s_hstream.line = nullptr;
         turn_fail("CAN'T REACH HERMES");
         return false;
     }
-    int64_t hdr = esp_http_client_fetch_headers(h);
-    ESP_LOGI(TAG, "hermes stream: open ok, headers %lld bytes in %lld ms", (long long)hdr,
-             (long long)((now_us() - t0) / 1000));
+    ESP_LOGI(TAG, "hermes stream: reply headers %lld ms after release", (long long)((now_us() - t0) / 1000));
     s_hstream.h = h;
     s_turn.chat_us = s_turn.last_event_us = now_us();
     return true;
@@ -2709,8 +2981,11 @@ static bool hermes_stream_pump(void)
     }
     if (hs.ended || n <= 0) {   /* ended, or the server closed (read returned 0/-1) */
         int status = esp_http_client_get_status_code(hs.h);
-        esp_http_client_close(hs.h);
-        esp_http_client_cleanup(hs.h);
+        int rest = 0;
+        /* read() returning 0 is also how a complete chunked body ends: judge by completeness */
+        if (esp_http_client_flush_response(hs.h, &rest) != ESP_OK || !esp_http_client_is_complete_data_received(hs.h)) {
+            esp_http_client_close(hs.h);   /* not cleanly finished: the next turn connects afresh */
+        }
         hs.h = nullptr;
         heap_caps_free(hs.line);
         hs.line = nullptr;
@@ -2735,14 +3010,20 @@ static void hermes_step(void)
             turn_fail("OUT OF MEMORY");
             return;
         }
+        if (!s_turn.up_started) {
+            s_turn.up_started = true;
+            hermes_up_begin();   /* blocks for the handshake; the mic backlog holds 8 s meanwhile */
+        }
         size_t room = HERMES_MAX_BYTES - s_turn.pcm_bytes;
         size_t got = room ? xStreamBufferReceive(s_in, s_hbuf + s_turn.pcm_bytes, room & ~(size_t)1, 0) : 0;
         s_turn.pcm_bytes += got;
         if (!s_turn.end_requested && s_turn.pcm_bytes < HERMES_MAX_BYTES) {
+            hermes_up_push(false);
             return;
         }
         mark(M_RELEASE);
         if (s_turn.pcm_bytes < MIC_RATE * 2 * 3 / 10) {
+            hermes_up_close();
             turn_fail("DIDN'T CATCH THAT");
             return;
         }
@@ -3204,21 +3485,18 @@ static bool poll_notification(rel_notif_t *out, bool *reachable)
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_GET;
     cfg.timeout_ms = 2500;
     cfg.event_handler = tts_http_evt;
     cfg.user_data = &buf;
-    esp_http_client_handle_t h = esp_http_client_init(&cfg);
-    if (!h) {
-        heap_caps_free(resp);
-        return false;
-    }
-    esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
-    esp_err_t err = esp_http_client_perform(h);
-    int status = esp_http_client_get_status_code(h);
-    esp_http_client_cleanup(h);
+    int status;
+    esp_err_t err = keep_perform(&s_keep_relay, &cfg, [&](esp_http_client_handle_t h) {
+        buf.len = 0;
+        buf.over = false;
+        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
+    }, &status);
     bool ok = false;
     if (err != ESP_OK || status != 200) {
         ESP_LOGW(TAG, "notif: GET /notifications failed (err %s, HTTP %d)", esp_err_to_name(err), status);
@@ -3273,7 +3551,7 @@ static void notif_ack(const char *id)
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 8000;
@@ -3306,19 +3584,20 @@ static void notif_hist_fetch(void)
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_GET;
     cfg.timeout_ms = 4000;
     cfg.event_handler = tts_http_evt;
     cfg.user_data = &buf;
-    esp_http_client_handle_t h = esp_http_client_init(&cfg);
     bool ok = false;
-    if (h) {
-        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
-        esp_err_t err = esp_http_client_perform(h);
-        int status = esp_http_client_get_status_code(h);
-        esp_http_client_cleanup(h);
+    {
+        int status;
+        esp_err_t err = keep_perform(&s_keep_relay, &cfg, [&](esp_http_client_handle_t h) {
+            buf.len = 0;
+            buf.over = false;
+            esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
+        }, &status);
         if (err == ESP_OK && status == 200) {
             resp[buf.len] = '\0';
             cJSON *root = cJSON_Parse(resp);
@@ -3403,7 +3682,7 @@ static void notif_hist_cancel(const char *id)
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 4000;
@@ -3434,7 +3713,7 @@ static void notif_hist_clear(void)
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 4000;
@@ -3594,21 +3873,18 @@ static void glance_fetch(void)
     esp_http_client_config_t cfg = {};
     cfg.url = url;
     if (remote) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_GET;
     cfg.timeout_ms = 2500;
     cfg.event_handler = tts_http_evt;
     cfg.user_data = &buf;
-    esp_http_client_handle_t h = esp_http_client_init(&cfg);
-    if (!h) {
-        heap_caps_free(resp);
-        return;
-    }
-    esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
-    esp_err_t err = esp_http_client_perform(h);
-    int status = esp_http_client_get_status_code(h);
-    esp_http_client_cleanup(h);
+    int status;
+    esp_err_t err = keep_perform(&s_keep_relay, &cfg, [&](esp_http_client_handle_t h) {
+        buf.len = 0;
+        buf.over = false;
+        esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
+    }, &status);
     if (err == ESP_OK && status == 200) {
         resp[buf.len] = '\0';
         cJSON *root = cJSON_Parse(resp);
@@ -4225,4 +4501,49 @@ extern "C" int muse_hatch_hermes_link(void)
         return 1;   /* stale failure: stop reporting a fault we have not seen for 10 min */
     }
     return s_hermes_link;
+}
+
+static void bench_net_task(void *arg)
+{
+    int kb = (int)(intptr_t)arg;
+    char url[MUSE_RELAY_URL_MAX + 16];
+    snprintf(url, sizeof(url), "%s/bench", hermes_remote_url());
+    size_t n = (size_t)kb * 1024;
+    char *body = static_cast<char *>(psram_alloc(n ? n : 1));
+    wifi_ps_type_t ps = WIFI_PS_NONE;
+    esp_wifi_get_ps(&ps);
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    relay_tls(&cfg);
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 20000;
+    esp_http_client_handle_t h = body ? esp_http_client_init(&cfg) : nullptr;
+    if (h) {
+        memset(body, 'x', n);
+        int64_t t0 = now_us();
+        esp_err_t err = esp_http_client_open(h, (int)n);
+        int64_t t1 = now_us();
+        int w = err == ESP_OK ? esp_http_client_write(h, body, (int)n) : -1;
+        int64_t t2 = now_us();
+        int64_t hdr = w >= 0 ? esp_http_client_fetch_headers(h) : -1;
+        int64_t t3 = now_us();
+        printf("@net %s%s: open+tls %lld ms, upload %d KB in %lld ms (%.1f KB/s), reply %d after %lld ms, ps=%d\n",
+               err == ESP_OK && w >= 0 && hdr >= 0 ? "ok" : "failed", cfg.cert_pem ? " (pinned)" : " (bundle)",
+               (long long)(t1 - t0) / 1000, kb,
+               (long long)(t2 - t1) / 1000, (t2 - t1) > 0 ? kb * 1e6 / (double)(t2 - t1) : 0.0,
+               esp_http_client_get_status_code(h), (long long)(t3 - t2) / 1000, (int)ps);
+        esp_http_client_cleanup(h);
+    } else {
+        printf("@net failed: no memory\n");
+    }
+    fflush(stdout);
+    heap_caps_free(body);
+    vTaskDeleteWithCaps(nullptr);
+}
+
+void muse_hatch_bench_net(int kb, int prio)
+{
+    /* on the turn's core, by default at its priority too (hatch_task, 5) */
+    xTaskCreatePinnedToCoreWithCaps(bench_net_task, "bench_net", 16 * 1024, (void *)(intptr_t)kb, prio > 0 ? prio : 5, nullptr, 0,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }

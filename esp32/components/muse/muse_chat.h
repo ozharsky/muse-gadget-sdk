@@ -92,6 +92,10 @@ bool muse_hatch_ready(void);
 int muse_hatch_hermes_link(void);
 void muse_hatch_hermes_link_note(bool ok);
 
+/* Bench (">net.up=KB[,PRIO]"): a fresh TLS connection to the relay's remote address, posting KB
+ * of filler; prints connect+handshake, upload and response times. Runs in its own task. */
+void muse_hatch_bench_net(int kb, int prio);
+
 /* Press: connects if needed and starts streaming speech to the VM. */
 void muse_hatch_turn_begin(void);
 /* The last reply's whole text (empty before the first), for the reading view. */

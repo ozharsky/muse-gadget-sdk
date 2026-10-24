@@ -31,6 +31,13 @@ CONFIG_ESP32S3_DATA_CACHE_64KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
 CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+# run-time stats: a frame over 100 ms logs the tasks that ran during it (muse_ui.c stall_report);
+# the trace facility also lets muse_ui.c raise LVGL's draw threads above the network work
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+# precomputed curve tables in flash (~29 KB): ECDHE and half of each signature check 3-4x faster
+CONFIG_MBEDTLS_ECP_FIXED_POINT_OPTIM=y
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # Static buffers in PSRAM: Wi-Fi's, lwIP's and BT's, and those marked
@@ -99,3 +106,6 @@ CONFIG_ESP_WIFI_RX_BA_WIN=12
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
 CONFIG_BT_NIMBLE_GATT_CLIENT=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+
+# Resume the Muse VM TLS session on reconnect (no full handshake on every agent switch)
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
