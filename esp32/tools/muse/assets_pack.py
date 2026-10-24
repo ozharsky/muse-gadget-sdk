@@ -144,7 +144,7 @@ def delta_runs(prev: bytes, cur: bytes) -> bytes:
 
 
 def clip_blobs(name: str, frames: list[bytes], fps: int, fmt: int) -> tuple[bytes, bytes]:
-    if fmt == 2:
+    if fmt in (2, 3):
         offsets = [0]
         data = bytearray()
         for f in frames:
@@ -186,6 +186,7 @@ def write_pack(path: Path, clips: list[tuple[bytes, bytes]]) -> None:
     off = 16
     patched = []
     for hdr_table, data in clips:
+        data += b"\0" * (-len(data) % 4)   # every entry's data 4-aligned: blobs are read in place (mmap)
         hdr = bytearray(hdr_table[:ENTRY_HDR])
         table = hdr_table[ENTRY_HDR:]
         data_off = off + ENTRY_HDR + len(table)
@@ -205,7 +206,8 @@ def main() -> None:
     ap.add_argument("--from", dest="src", type=Path)
     ap.add_argument("--name")
     ap.add_argument("--fps", type=float, default=25.0)
-    ap.add_argument("--fmt", choices=("i4", "u8", "mjpeg"), default="i4")
+    ap.add_argument("--fmt", choices=("i4", "u8", "mjpeg", "blob"), default="i4",
+                    help="blob: --from is one file stored as is (the portrait packs)")
     ap.add_argument("--size", type=int, default=300, help="mjpeg frame size (square)")
     ap.add_argument("--quality", type=int, default=4, help="mjpeg q:v (2 best .. 31 worst)")
     ap.add_argument("--max-frames", type=int, default=MAX_FRAMES)
@@ -217,15 +219,17 @@ def main() -> None:
     if args.list:
         for e, d in read_pack(args.list):
             name, nframes, fps, fmt, npal = struct.unpack("<16sHBBB", e[:21])
-            kind = "mjpeg" if fmt == 2 else ("i4" if fmt == 1 else "u8")
+            kind = ("u8", "i4", "mjpeg", "blob")[fmt] if fmt < 4 else "?"
             print(f"{name.decode():16s} frames={nframes:4d} fps={fps:3d} fmt={kind:5s} "
                   f"pal={npal:2d} data={len(d)} B ({len(d) / max(nframes, 1):.0f} B/frame)")
         return
 
     if not args.src or not args.name:
         ap.error("--from and --name are required (or use --list)")
-    fmt = {"u8": 0, "i4": 1, "mjpeg": 2}[args.fmt]
-    if fmt == 2:
+    fmt = {"u8": 0, "i4": 1, "mjpeg": 2, "blob": 3}[args.fmt]
+    if fmt == 3:
+        frames, args.fps = [args.src.read_bytes()], 1
+    elif fmt == 2:
         frames = frames_mjpeg(args.src, args.fps, args.max_frames, args.size, args.quality)
     else:
         frames = frames_indexed(args.src, args.fps, args.max_frames)
@@ -234,9 +238,11 @@ def main() -> None:
     entry, data = hdr + blob[:table_len], blob[table_len:]
     clips = [(entry, data)]
     if args.append and args.out.exists():
-        clips = read_pack(args.out) + clips
+        clips = [c for c in read_pack(args.out) if c[0][:16].rstrip(b"\0").decode() != args.name] + clips   # same name: replaced
     write_pack(args.out, clips)
-    if fmt == 2:
+    if fmt == 3:
+        print(f"blob {args.name}: {len(data)} B")
+    elif fmt == 2:
         biggest = max(len(f) for f in frames)
         print(f"clip {args.name}: {len(frames)} mjpeg frames, {len(data)} B "
               f"({len(data) / len(frames):.0f} B/frame, largest {biggest} B)")

@@ -11,6 +11,12 @@
 #include "esp_timer.h"
 #include "sdkconfig.h"
 #include "muse_settings.h"
+#if MUSE_PORTRAITS
+#include "muse_portrait.h"
+#define PORTRAIT() muse_portrait_on()
+#else
+#define PORTRAIT() false
+#endif
 
 uint32_t shodan_pixel_accent(muse_mode_t mode);
 void shodan_pixel_set_size(int px);
@@ -58,6 +64,10 @@ void muse_pixel_center(int *dx, int *dy)
 {
     static const int8_t C[3][2] = { { -2, -1 }, { 2, 0 }, { 0, -10 } };
     int f = face_for_agent();
+    if (PORTRAIT()) {
+        *dx = *dy = 0;   /* the portraits are framed centred */
+        return;
+    }
     *dx = C[f][0];
     *dy = C[f][1];
 }
@@ -95,6 +105,11 @@ void muse_pixel_transition(bool to_hermes)
 
 uint32_t muse_pixel_accent(muse_mode_t mode)
 {
+#if MUSE_PORTRAITS
+    if (PORTRAIT()) {
+        return muse_portrait_accent(s_show, mode);
+    }
+#endif
     switch (s_show) {
     case 2: return stock2_pixel_accent(mode);
     case 1: return stock_pixel_accent(mode);
@@ -106,6 +121,9 @@ void muse_pixel_set_size(int px)
 {
     set_size_all(px);
     muse_pixel_video_set_size(px);
+#if MUSE_PORTRAITS
+    muse_portrait_set_size(px);
+#endif
 }
 
 void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1)
@@ -114,6 +132,12 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
         muse_pixel_video_scale(dst, stride_px, x0, x1, y0, y1);
         return;
     }
+#if MUSE_PORTRAITS
+    if (PORTRAIT()) {
+        muse_portrait_scale(dst, stride_px, x0, x1, y0, y1);
+        return;
+    }
+#endif
     switch (s_show) {
     case 2: stock2_pixel_scale(dst, stride_px, x0, x1, y0, y1); break;
     case 1: stock_pixel_scale(dst, stride_px, x0, x1, y0, y1); break;
@@ -134,6 +158,13 @@ static void render_frame(const muse_pose_t *p)
         s_show = target;
         s_show_init = true;
     }
+#if MUSE_PORTRAITS
+    if (muse_portrait_render(p, target, 0)) {   /* the portraits swap agents with their own fade */
+        s_show = last_agent_seen = target;
+        s_tr_start = 0;
+        return;
+    }
+#endif
     float amp = 0;
     if (s_tr_start) {
         float t = (float)(esp_timer_get_time() - s_tr_start) / TRANSITION_US;
@@ -289,9 +320,38 @@ void muse_pixel_render(const muse_pose_t *p)
     }
 }
 
+int muse_pixel_dirty(int (*r)[4], int max)
+{
+#if MUSE_PORTRAITS
+    static bool was_clip;
+    if (PORTRAIT() && muse_pixel_video_active()) {
+        was_clip = true;   /* the clip samples its own changes */
+    } else if (PORTRAIT()) {
+        if (was_clip) {
+            was_clip = false;
+            muse_portrait_redraw_all();   /* nothing of the clip may stay on the glass */
+        }
+        return muse_portrait_dirty(r, max);
+    }
+#endif
+    (void)r;
+    (void)max;
+    return -1;
+}
+
+bool muse_pixel_full_rate(void)
+{
+    return PORTRAIT();
+}
+
 bool muse_pixel_react(const char *name)
 {
-    switch (face_for_agent()) {
+#if MUSE_PORTRAITS
+    if (PORTRAIT()) {
+        return muse_portrait_react(name);   /* never the old pixel-art clips over a portrait */
+    }
+#endif
+    switch (PORTRAIT() ? -1 : face_for_agent()) {
     case 2:
         if (stock2_pixel_react(name)) {
             return true;

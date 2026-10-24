@@ -42,6 +42,8 @@ components/muse/avatar/*
 !components/muse/avatar/sprite_construct.h
 !components/muse/avatar/sprite_keller.h
 !components/muse/avatar/golem_moods.h
+!components/muse/avatar/muse_portrait.c
+!components/muse/avatar/muse_portrait.h
 
 # Local debug artifacts (not tracked).
 *.log
@@ -65,3 +67,4 @@ __pycache__/
 .idea/
 local.properties
 assets.bin
+portraits/

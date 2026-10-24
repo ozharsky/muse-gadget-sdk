@@ -56,3 +56,34 @@ static inline float muse_lip(muse_lip_t *l, float level, float dt)
     }
     return l->state == 2 ? 1.0f : (l->state == 1 ? 0.55f : 0.0f);
 }
+
+/* Continuous openness for faces that cross-fade (the portraits): the voice's syllables, not its
+ * loudness. Speech sits high in the level's range (about 0.5..0.9), so a fixed mapping holds the
+ * mouth open; this tracks a decaying peak and a rising floor and opens between them, so every
+ * syllable opens and every dip closes, loud voice or quiet. Feed it the raw per-chunk level.
+ *
+ *   muse_lip_agc_t s_agc;                            // one per face
+ *   float open = muse_lip_agc(&s_agc, level, dt);   // 0..1, smoothed
+ */
+typedef struct {
+    float peak, floor, open;
+} muse_lip_agc_t;
+
+static inline float muse_lip_agc(muse_lip_agc_t *a, float level, float dt)
+{
+    float target = 0;
+    if (level > 0.01f) {
+        a->peak = level > a->peak ? level : a->peak - dt * 0.25f;
+        a->floor = level < a->floor ? level : a->floor + dt * 0.2f;
+        a->floor = a->floor > a->peak ? a->peak : a->floor;
+        float span = a->peak - a->floor;
+        span = span < 0.15f ? 0.15f : span;
+        target = (level - a->floor) / span;
+        target = target < 0 ? 0 : target > 1 ? 1 : target;
+    } else {
+        a->peak = a->peak > dt * 0.3f ? a->peak - dt * 0.3f : 0;   /* silence: close, forget slowly */
+    }
+    float k = (target > a->open ? 25.0f : 14.0f) * dt;          /* opens faster than it closes */
+    a->open += (target - a->open) * (k > 1 ? 1 : k);
+    return a->open;
+}

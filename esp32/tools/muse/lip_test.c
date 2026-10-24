@@ -102,6 +102,26 @@ int main(void)
         fail |= !ok;
     }
 
+    /* 4. muse_lip_agc: syllables at speech's usual loudness (0.6..0.9) swing the mouth wide
+     *    open and nearly shut; silence closes it */
+    {
+        muse_lip_agc_t a = {0};
+        float lo = 1, hi = 0;
+        for (int i = 0; i < 250; i++) {                 /* 10 s at 4 syllables/s */
+            float o = muse_lip_agc(&a, 0.75f + 0.15f * sinf((float)i * DT * 6.2832f * 4.0f), DT);
+            if (i > 50) {
+                lo = o < lo ? o : lo;
+                hi = o > hi ? o : hi;
+            }
+        }
+        for (int i = 0; i < 25; i++) {
+            muse_lip_agc(&a, 0.0f, DT);
+        }
+        int ok = hi > 0.8f && lo < 0.25f && a.open < 0.05f;
+        printf("agc follows syllables (open %.2f..%.2f), closes in silence (%.2f): %s\n", lo, hi, a.open, ok ? "ok" : "FAIL");
+        fail |= !ok;
+    }
+
     printf(fail ? "LIP TEST FAIL\n" : "LIP TEST OK\n");
     return fail;
 }

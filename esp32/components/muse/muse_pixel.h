@@ -46,6 +46,13 @@ uint32_t muse_pixel_accent(muse_mode_t mode);
 /* Per-face centring nudge, panel px (the active face's art is not centred in its 64x64 grid). */
 void muse_pixel_center(int *dx, int *dy);
 
+/* Optional (the portraits): the rects this frame changed, x1, y1, x2, y2 in canvas px inclusive,
+ * or -1 to let the UI sample the grid's cells. */
+int muse_pixel_dirty(int (*r)[4], int max);
+
+/* Optional (the portraits): keep the full frame rate while idle. */
+bool muse_pixel_full_rate(void);
+
 /* Render one frame into Muse's own MUSE_PX_W x MUSE_PX_H grid. */
 void muse_pixel_render(const muse_pose_t *pose);
 
