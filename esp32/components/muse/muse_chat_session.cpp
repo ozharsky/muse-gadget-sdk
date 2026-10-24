@@ -74,6 +74,7 @@ extern "C" {
 extern "C" {
 #include "muse_adpcm.h"
 }
+#include "muse_diag.h"
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_state.h"
@@ -113,7 +114,7 @@ static hermes_stream_t s_hstream;
 #define NDJSON_LINE_MAX (16 * 1024)               /* one NDJSON line / the chat ack */
 #define SUB_LINE_MAX (256 * 1024)          /* an event line grows its buffer up to this */
 #define CHAT_PART (16 * 1024)              /* one body chunk of a long typed message */
-#define MP3_BUF (512 * 1024)
+#define MP3_BUF (256 * 1024)              /* ~64 s at 32 kbps; it slides as it plays (decode) */
 #define MP3_HOLD (1441 + 4)               /* the largest MP3 frame and the next header */
 #define MP3_POLL_ROOM (SCRATCH + 8192)     /* stop reading the socket below this much MP3 room */
 #define IN_BYTES (MIC_RATE * 2 * 8)        /* 8 s of mic backlog while connecting */
@@ -132,7 +133,7 @@ static hermes_stream_t s_hstream;
 #define DEAD_US (60 * 1000000LL)           /* nothing from the server, pongs included */
 #define IDLE_CLOSE_US (10 * 60 * 1000000LL)
 #define AUTO_RETRY_MIN_US (5 * 1000000LL)  /* connecting without a turn, after a failure */
-#define AUTO_RETRY_MAX_US (120 * 1000000LL)
+#define AUTO_RETRY_MAX_US (30 * 1000000LL)   /* awake, someone may be waiting to talk */
 #define FINAL_TIMEOUT_US (15 * 1000000LL)  /* release -> final transcript */
 #define REPLY_TIMEOUT_US (60 * 1000000LL)  /* chat posted -> first assistant message */
 #define TURN_CAP_US (180 * 1000000LL)
@@ -973,6 +974,51 @@ static const char *agent_profile_query(void)
 }
 
 
+/*
+ * Muse must come back by itself. Its link and a reply need ~1 MB of PSRAM; with Hermes's note
+ * buffer (then 640 KB of PCM) still held, connects failed "Out of memory" for good -- until a
+ * restart (2026-10-24).
+ * That buffer is now let go off Hermes (hatch_task), and if Muse still can't be reached the
+ * last resort is the restart a person would do: Muse failing for HEAL_AFTER_US (3+ failed
+ * attempts, the latest within a minute) while Wi-Fi is up and nothing is happening. Never in
+ * the first 10 minutes of a boot (so it can't loop: a boot loop costs the Muse pairing), and
+ * each one in a row waits twice as long, up to an hour; any successful connect resets that.
+ */
+#define HEAL_AFTER_US (5 * 60 * 1000000LL)
+#define HEAL_MIN_UPTIME_US (10 * 60 * 1000000LL)
+#define HEAL_MAX_UPTIME_US (60 * 60 * 1000000LL)
+#define HEAL_MAGIC 0x4845414Cu   /* "HEAL" */
+static RTC_NOINIT_ATTR uint32_t s_heal_magic, s_heal_count;   /* restarts in a row, kept across them */
+static struct {
+    int fails;
+    int64_t down_since_us, last_fail_us;
+} s_heal;
+
+static void heal_check(void)
+{
+    if (s_heal_magic != HEAL_MAGIC) {
+        s_heal_magic = HEAL_MAGIC;   /* first boot after power-on */
+        s_heal_count = 0;
+    }
+    int64_t now = now_us();
+    if (s_connected || !muse_wifi_connected() || !muse_hatch_configured()) {
+        s_heal.fails = 0;
+        s_heal.down_since_us = 0;
+        return;
+    }
+    int64_t min_up = HEAL_MIN_UPTIME_US << (s_heal_count < 3 ? s_heal_count : 3);
+    min_up = min_up < HEAL_MAX_UPTIME_US ? min_up : HEAL_MAX_UPTIME_US;
+    if (s_heal.fails < 3 || now - s_heal.down_since_us < HEAL_AFTER_US || now - s_heal.last_fail_us > 60 * 1000000LL ||
+        now < min_up || s_turn.phase != P_IDLE) {
+        return;
+    }
+    s_heal_count++;
+    ESP_LOGE(TAG, "Muse unreachable for %d min (%d failed attempts): restarting (%u in a row)",
+             (int)((now - s_heal.down_since_us) / 60000000LL), s_heal.fails, (unsigned)s_heal_count);
+    muse_diag_note_restart("muse_unreachable");
+    esp_restart();
+}
+
 static bool ensure_connected(void)
 {
     if (s_connected || hermes_mode()) {
@@ -996,6 +1042,9 @@ static bool ensure_connected(void)
             char detail[48] = "Connected to ";
             strlcat(detail, s_vm.vm_name[0] ? s_vm.vm_name : s_vm.vm_id, sizeof(detail));
             muse_hatch_report(MUSE_HATCH_REACHABLE, detail);
+            s_heal.fails = 0;
+            s_heal.down_since_us = 0;
+            s_heal_count = 0;
             return true;
         }
         disconnect(err);
@@ -1010,10 +1059,20 @@ static bool ensure_connected(void)
         }
         break;
     }
-    ESP_LOGW(TAG, "connect failed: %s (int free %uK, largest %uK)", err,
+    ESP_LOGW(TAG, "connect failed: %s (int free %uK, largest %uK; psram free %uK, largest %uK)", err,
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
     muse_hatch_report(MUSE_HATCH_UNREACHABLE, err);
+    s_heal.fails++;
+    s_heal.last_fail_us = now_us();
+    if (!s_heal.down_since_us) {
+        s_heal.down_since_us = s_heal.last_fail_us;
+    }
+    if (s_auto_next_us == INT64_MAX) {
+        s_auto_next_us = now_us() + AUTO_RETRY_MIN_US;   /* failing: keep trying on our own, not just at the next press */
+    }
     return false;
 }
 
@@ -1065,7 +1124,8 @@ static int pitch_pct(void)
 
 static char s_hreact[24];     /* Hermes's mood for this reply, acted out when its speech starts */
 
-static uint8_t *s_hbuf;      /* HERMES_MAX_BYTES of 16 kHz PCM, PSRAM, allocated on first use */
+static uint8_t *s_hbuf;      /* the note as IMA ADPCM: HERMES_MAX_BYTES of PCM in a quarter of that (PSRAM) */
+static muse_adpcm_t s_hnote;  /* its encoder, from the press */
 
 /* ---- Turn: dictation ---- */
 
@@ -1160,13 +1220,14 @@ static void turn_begin(uint32_t gen)
     }
     if (s_turn.hermes) {   /* route by the pinned backend; a live mode flip must not reroute this turn */
         if (!s_hbuf) {
-            s_hbuf = static_cast<uint8_t *>(psram_alloc(HERMES_MAX_BYTES));
+            s_hbuf = static_cast<uint8_t *>(psram_alloc(HERMES_MAX_BYTES / 4));
         }
         if (!s_hbuf) {
             turn_fail("OUT OF MEMORY");
             return;
         }
         s_turn.pcm_bytes = 0;
+        s_hnote = {};
         s_turn.up_started = false;
         s_turn.phase = P_LISTEN;
         return;
@@ -2792,7 +2853,7 @@ static esp_http_client_handle_t hermes_open(int len)
         relay_tls(&cfg);
     }
     cfg.method = HTTP_METHOD_POST;
-    cfg.timeout_ms = 100000;
+    cfg.timeout_ms = 10000;   /* connect + TLS: ~2 s through the funnel; the mic backlog holds 8 s */
     cfg.buffer_size = 4096;
     for (int attempt = 0; attempt < 2; attempt++) {
         esp_http_client_handle_t h = keep_get(&s_keep_stream, &cfg);
@@ -2802,6 +2863,7 @@ static esp_http_client_handle_t hermes_open(int len)
         esp_http_client_set_header(h, "Content-Type", "application/octet-stream");
         esp_http_client_set_header(h, "X-Audio", "ima-adpcm");
         esp_http_client_set_header(h, "X-Gadget-Token", relay_token());
+        esp_http_client_close(h);   /* nothing may still be open on it (see hermes_stream_pump) */
         int64_t t0 = now_us();
         esp_err_t err = esp_http_client_open(h, len);   /* connects, then sends the headers */
         if (err == ESP_OK) {
@@ -2824,12 +2886,11 @@ static esp_http_client_handle_t hermes_open(int len)
  * as it comes, chunked, in IMA ADPCM (a quarter of the bytes). At release only its last fraction
  * is left to send -- the ~2 s TLS handshake through the funnel and the upload both happen while
  * the user talks. If the stream can't open or breaks, the whole note goes at release instead. */
-#define UP_PCM 8192   /* a quarter second of PCM per chunk, 2 KB of ADPCM */
+#define UP_BYTES 2048   /* ADPCM per chunk: a quarter second */
 static struct {
     esp_http_client_handle_t h;   /* open, chunked body under way; null: not streaming */
-    muse_adpcm_t adpcm;
-    size_t sent;                  /* bytes of s_hbuf's PCM already encoded and written */
-    uint8_t out[UP_PCM / 4 + 16];  /* one chunk: its size line, the ADPCM, CRLF */
+    size_t sent;                  /* bytes of the note (ADPCM) already written */
+    uint8_t out[UP_BYTES + 16];   /* one chunk: its size line, the ADPCM, CRLF */
 } s_up;
 
 static void hermes_up_close(void)
@@ -2840,16 +2901,16 @@ static void hermes_up_close(void)
     }
 }
 
-/* Encodes and writes what has been recorded, a chunk at a time (all of it, and the body's end,
- * when last). False: the stream broke and is closed. */
+/* Writes what has been recorded, a chunk at a time (all of it, and the body's end, when last).
+ * False: the stream broke and is closed. */
 static bool hermes_up_push(bool last)
 {
-    size_t avail = (s_turn.pcm_bytes - s_up.sent) & ~(size_t)3;   /* whole sample pairs */
-    while (s_up.h && (avail >= UP_PCM || (last && avail))) {
-        size_t take = avail < UP_PCM ? avail : UP_PCM;
-        int n = snprintf(reinterpret_cast<char *>(s_up.out), 12, "%x\r\n", (unsigned)(take / 4));
-        muse_adpcm_encode_block(&s_up.adpcm, reinterpret_cast<const int16_t *>(s_hbuf + s_up.sent), take / 2, s_up.out + n);
-        n += (int)(take / 4);
+    size_t avail = s_turn.pcm_bytes / 4 - s_up.sent;
+    while (s_up.h && (avail >= UP_BYTES || (last && avail))) {
+        size_t take = avail < UP_BYTES ? avail : UP_BYTES;
+        int n = snprintf(reinterpret_cast<char *>(s_up.out), 12, "%x\r\n", (unsigned)take);
+        memcpy(s_up.out + n, s_hbuf + s_up.sent, take);
+        n += (int)take;
         s_up.out[n++] = '\r';
         s_up.out[n++] = '\n';
         if (esp_http_client_write(s_up.h, reinterpret_cast<const char *>(s_up.out), n) != n) {
@@ -2871,7 +2932,6 @@ static bool hermes_up_push(bool last)
 static void hermes_up_begin(void)
 {
     s_up.h = hermes_open(-1);
-    s_up.adpcm = {};
     s_up.sent = 0;
     if (s_up.h) {
         esp_http_client_set_timeout_ms(s_up.h, 5000);   /* a write mustn't hold the mic backlog long */
@@ -2899,23 +2959,16 @@ static bool hermes_request_stream(void)
     s_hstream.react[0] = '\0';
 
     int64_t t0 = now_us(), hdr = -1;
-    bool encoded = false;
     esp_http_client_handle_t h = nullptr;
     for (int attempt = 0; attempt < 2 && hdr < 0; attempt++) {
         if (attempt == 0 && hermes_up_push(true)) {
             h = s_up.h;
             s_up.h = nullptr;
-            ESP_LOGI(TAG, "hermes: note streamed (%u bytes of ADPCM), the last in %lld ms", (unsigned)(s_up.sent / 4),
+            ESP_LOGI(TAG, "hermes: note streamed (%u bytes of ADPCM), the last in %lld ms", (unsigned)s_up.sent,
                      (long long)((now_us() - t0) / 1000));
         } else {
-            /* the whole note at once: packed in place (each byte lands behind the samples it came from) */
-            size_t samples = s_turn.pcm_bytes / 2 & ~(size_t)1;
-            if (!encoded) {
-                muse_adpcm_t adpcm = {};
-                muse_adpcm_encode_block(&adpcm, reinterpret_cast<const int16_t *>(s_hbuf), samples, s_hbuf);
-                encoded = true;
-            }
-            int body = (int)(samples / 2);
+            /* the whole note at once, on a fresh connection */
+            int body = (int)(s_turn.pcm_bytes / 4);
             h = hermes_open(body);
             if (h && esp_http_client_write(h, reinterpret_cast<const char *>(s_hbuf), body) != body) {
                 esp_http_client_close(h);
@@ -2931,7 +2984,7 @@ static bool hermes_request_stream(void)
         if (s_turn.gen == s_gen.load()) {
             emit(MUSE_HATCH_EV_SENT, nullptr);
         }
-        esp_http_client_set_timeout_ms(h, 100000);   /* the agent may take a while */
+        esp_http_client_set_timeout_ms(h, 30000);   /* the relay answers with headers before the agent starts */
         hdr = esp_http_client_fetch_headers(h);
         if (hdr < 0 || esp_http_client_get_status_code(h) == 0) {
             ESP_LOGW(TAG, "hermes: no reply on that connection; once more with the whole note");
@@ -2947,6 +3000,9 @@ static bool hermes_request_stream(void)
     }
     ESP_LOGI(TAG, "hermes stream: reply headers %lld ms after release", (long long)((now_us() - t0) / 1000));
     s_hstream.h = h;
+    /* From here the pump reads in short waits: the agent can take minutes (or hang), and this
+     * task has to stay free to take the next press, which ends this reply and sends a new note. */
+    esp_http_client_set_timeout_ms(h, 100);
     s_turn.chat_us = s_turn.last_event_us = now_us();
     return true;
 }
@@ -2959,8 +3015,10 @@ static bool hermes_stream_pump(void)
         return false;
     }
     uint8_t chunk[2048];
-    int n;
-    while ((n = esp_http_client_read(hs.h, reinterpret_cast<char *>(chunk), sizeof(chunk))) > 0) {
+    int n = 0, reads = 0;
+    /* A few reads a pass, then back to the task's loop (commands, the next press): a reply that
+     * trickles status lines, or none at all, must not hold the task. */
+    while (reads++ < 8 && (n = esp_http_client_read(hs.h, reinterpret_cast<char *>(chunk), sizeof(chunk))) > 0) {
         for (int i = 0; i < n && !hs.ended; i++) {
             char ch = static_cast<char>(chunk[i]);
             if (ch == '\n') {
@@ -2979,13 +3037,15 @@ static bool hermes_stream_pump(void)
             break;
         }
     }
+    if (!hs.ended && (n > 0 || n == -ESP_ERR_HTTP_EAGAIN)) {
+        return true;   /* more to come (or nothing yet): next pass */
+    }
     if (hs.ended || n <= 0) {   /* ended, or the server closed (read returned 0/-1) */
         int status = esp_http_client_get_status_code(hs.h);
-        int rest = 0;
-        /* read() returning 0 is also how a complete chunked body ends: judge by completeness */
-        if (esp_http_client_flush_response(hs.h, &rest) != ESP_OK || !esp_http_client_is_complete_data_received(hs.h)) {
-            esp_http_client_close(hs.h);   /* not cleanly finished: the next turn connects afresh */
-        }
+        /* Closed even when cleanly finished: esp_http_client_open always connects anew, and over a
+         * connection left open its TLS layer starts a new session without freeing the old one --
+         * ~39 KB of PSRAM lost per Hermes turn, until Muse couldn't connect any more. */
+        esp_http_client_close(hs.h);
         hs.h = nullptr;
         heap_caps_free(hs.line);
         hs.line = nullptr;
@@ -3014,9 +3074,19 @@ static void hermes_step(void)
             s_turn.up_started = true;
             hermes_up_begin();   /* blocks for the handshake; the mic backlog holds 8 s meanwhile */
         }
-        size_t room = HERMES_MAX_BYTES - s_turn.pcm_bytes;
-        size_t got = room ? xStreamBufferReceive(s_in, s_hbuf + s_turn.pcm_bytes, room & ~(size_t)1, 0) : 0;
-        s_turn.pcm_bytes += got;
+        static int16_t stage[1024];   /* the mic backlog, a few KB at a time, into the ADPCM note */
+        for (;;) {
+            size_t want = xStreamBufferBytesAvailable(s_in) & ~(size_t)3;   /* whole sample pairs */
+            size_t room = HERMES_MAX_BYTES - s_turn.pcm_bytes;
+            want = want < sizeof(stage) ? want : sizeof(stage);
+            want = want < room ? want : room & ~(size_t)3;
+            size_t got = want ? xStreamBufferReceive(s_in, stage, want, 0) & ~(size_t)3 : 0;
+            if (!got) {
+                break;
+            }
+            muse_adpcm_encode_block(&s_hnote, stage, got / 2, s_hbuf + s_turn.pcm_bytes / 4);
+            s_turn.pcm_bytes += got;
+        }
         if (!s_turn.end_requested && s_turn.pcm_bytes < HERMES_MAX_BYTES) {
             hermes_up_push(false);
             return;
@@ -4119,6 +4189,12 @@ static void hatch_task(void *arg)
             }
             continue;
         }
+        /* Hermes's note buffer (160 KB) waits for its next turn instead of sitting in Muse's way. */
+        if (s_hbuf && s_turn.phase == P_IDLE) {
+            heap_caps_free(s_hbuf);
+            s_hbuf = nullptr;
+        }
+        heal_check();
         /* A network change (or loss) leaves the old socket dead without telling us: drop it now and
          * reconnect as soon as Wi-Fi is back, rather than discovering it a turn or a minute later. */
         static bool s_wifi_was = true;
