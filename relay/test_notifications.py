@@ -29,12 +29,12 @@ class NotifyIdentity(unittest.TestCase):
             self.assertTrue(who["is_default"], "empty/default must open the Hermes slot")
 
     def test_a_known_profile_resolves_to_the_alt_slot_with_its_name(self):
-        if not (agents.resolve("sidekick").get("usable") if hasattr(agents, "resolve") else True):
-            self.skipTest("edit agents.json for this machine first (example profile: sidekick)")
-        who = notifications.resolve_agent("sidekick")
-        self.assertEqual(who["agent"], "sidekick")
+        if not (agents.resolve("beepbop").get("usable") if hasattr(agents, "resolve") else True):
+            self.skipTest("edit agents.json for this machine first (example profile: beepbop)")
+        who = notifications.resolve_agent("beepbop")
+        self.assertEqual(who["agent"], "beepbop")
         self.assertFalse(who["is_default"], "a real profile must open the ALT slot, not default")
-        self.assertEqual(who["label"], "Sidekick")
+        self.assertEqual(who["label"], "BEEPBOP")
 
     def test_unknown_profile_falls_back_to_default_never_an_unroutable_name(self):
         who = notifications.resolve_agent("no_such_profile_xyz")
@@ -53,10 +53,10 @@ class NotifyStore(unittest.TestCase):
         notifications.STORE = self._orig
 
     def test_add_round_trips_identity_and_acks_once(self):
-        if not (agents.resolve("sidekick").get("usable") if hasattr(agents, "resolve") else True):
-            self.skipTest("edit agents.json for this machine first (example profile: sidekick)")
-        it = notifications.add("build finished", agent="sidekick", mood="alert")
-        self.assertEqual(it["agent"], "sidekick")
+        if not (agents.resolve("beepbop").get("usable") if hasattr(agents, "resolve") else True):
+            self.skipTest("edit agents.json for this machine first (example profile: beepbop)")
+        it = notifications.add("build finished", agent="beepbop", mood="alert")
+        self.assertEqual(it["agent"], "beepbop")
         self.assertFalse(it["is_default"])
         pend = notifications.pending()
         self.assertEqual(len(pend), 1)
@@ -67,12 +67,12 @@ class NotifyStore(unittest.TestCase):
 
     def test_newest_first(self):
         a = notifications.add("one", agent="default")
-        b = notifications.add("two", agent="sidekick")
+        b = notifications.add("two", agent="beepbop")
         order = [n["id"] for n in notifications.pending()]
         self.assertEqual(order, [b["id"], a["id"]])
 
     def test_empty_text_is_refused(self):
-        self.assertIsNone(notifications.add("   ", agent="sidekick"))
+        self.assertIsNone(notifications.add("   ", agent="beepbop"))
         self.assertEqual(notifications.pending(), [])
 
     def test_corrupt_store_reads_as_empty_never_raises(self):
@@ -95,7 +95,7 @@ class NotifyHistory(unittest.TestCase):
 
     def test_history_keeps_read_items_newest_first(self):
         a = notifications.add("one", agent="default")
-        b = notifications.add("two", agent="sidekick")
+        b = notifications.add("two", agent="beepbop")
         notifications.ack(a["id"])
         h = notifications.history()
         self.assertEqual([n["id"] for n in h], [b["id"], a["id"]],
@@ -124,7 +124,7 @@ class NotifyHistory(unittest.TestCase):
     def test_clear_keeps_unfired_reminders(self):
         """The gadget's Clear: history goes, commitments stay."""
         notifications.add("a past nudge", agent="default")
-        notifications.add("shown already", agent="sidekick")
+        notifications.add("shown already", agent="beepbop")
         notifications.ack(notifications.history()[0]["id"])
         keep = notifications.add("tea in 10", agent="default", due=time.time() + 600)
         fired = notifications.add("went off", agent="default", due=time.time() - 5)
@@ -177,18 +177,18 @@ class RelayEndpoints(unittest.TestCase):
             return json.loads(r.read())
 
     def test_create_then_serve_then_ack(self):
-        if not (agents.resolve("sidekick").get("usable") if hasattr(agents, "resolve") else True):
-            self.skipTest("edit agents.json for this machine first (example profile: sidekick)")
+        if not (agents.resolve("beepbop").get("usable") if hasattr(agents, "resolve") else True):
+            self.skipTest("edit agents.json for this machine first (example profile: beepbop)")
         notifications.clear()
         out = self._req("/notifications", "POST",
-                        {"text": "the print finished", "agent": "sidekick", "mood": "alert"})
+                        {"text": "the print finished", "agent": "beepbop", "mood": "alert"})
         self.assertTrue(out["ok"])
         got = out["notification"]
-        self.assertEqual(got["agent"], "sidekick")
+        self.assertEqual(got["agent"], "beepbop")
         self.assertFalse(got["is_default"])
         served = self._req("/notifications")["notifications"]
         self.assertEqual(len(served), 1)
-        self.assertEqual(served[0]["agent"], "sidekick")   # the EXACT agent, round-tripped
+        self.assertEqual(served[0]["agent"], "beepbop")   # the EXACT agent, round-tripped
         ack = self._req("/notifications/ack", "POST", {"id": got["id"]})
         self.assertTrue(ack["ok"])
         self.assertEqual(self._req("/notifications")["notifications"], [])
@@ -196,7 +196,7 @@ class RelayEndpoints(unittest.TestCase):
     def test_missing_text_is_400(self):
         import urllib.error
         with self.assertRaises(urllib.error.HTTPError) as cm:
-            self._req("/notifications", "POST", {"agent": "sidekick"})
+            self._req("/notifications", "POST", {"agent": "beepbop"})
         self.assertEqual(cm.exception.code, 400)
 
     def test_no_token_is_401(self):
@@ -223,7 +223,7 @@ class RelayEndpoints(unittest.TestCase):
     def test_cancel_endpoint_deletes_and_reports(self):
         notifications.clear()
         out = self._req("/notifications", "POST",
-                        {"text": "tea", "agent": "sidekick", "due_in": 3600})
+                        {"text": "tea", "agent": "beepbop", "due_in": 3600})
         nid = out["notification"]["id"]
         self.assertEqual(self._req("/notifications")["notifications"], [],
                          "an un-fired reminder is not pending")

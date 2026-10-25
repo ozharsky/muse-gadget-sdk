@@ -3,11 +3,11 @@
 
 Usage:
     python3 notify.py default  "Disk is getting full"      # opens the Hermes slot
-    python3 notify.py sidekick  "The build finished!"         # opens the ALT slot = sidekick
-    NOTIF_MOOD=alert python3 notify.py sidekick "Printer done"  # optional mood (see below)
-    python3 notify.py sidekick "Tea's ready" --in 8m          # REMINDER: fires in 8 minutes
-    python3 notify.py sidekick "Stand up" --at 14:30          # REMINDER: fires at 14:30 today
-    python3 notify.py sidekick "Call mom" --at "tomorrow 9:00"
+    python3 notify.py beepbop  "The build finished!"         # opens the ALT slot = beepbop
+    NOTIF_MOOD=alert python3 notify.py beepbop "Printer done"  # optional mood (see below)
+    python3 notify.py beepbop "Tea's ready" --in 8m          # REMINDER: fires in 8 minutes
+    python3 notify.py beepbop "Stand up" --at 14:30          # REMINDER: fires at 14:30 today
+    python3 notify.py beepbop "Call mom" --at "tomorrow 9:00"
 
 Moods (any the avatar knows): alert, surprised, pleased, smirk, scan, proud, excited, thinking
 ... (run `>react=<name>` over serial, or see the reaction list, to preview). "alert" is a good
@@ -18,7 +18,7 @@ the poll until `due` passes, then it appears exactly like any other nudge (chirp
 the agent). No firmware involved. While undelivered it sits in notifications.json; `--cancel`
 lists what is waiting.
 
-The agent argument is a profile name from the relay's agents.json; `default` (or an empty
+The agent argument is a profile name from agents.json next to this file; `default` (or an empty
 string) means the base Hermes. An unknown name is accepted but the device will open the Hermes
 slot instead (the relay refuses to open a profile it cannot route).
 """

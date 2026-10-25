@@ -208,8 +208,8 @@ def resolve(name, base=None, path=None):
 
 
 def describe(path=None):
-    """Serializable profile list for ``GET /agents``: names + labels + voice + usability,
-    re-read each call, never any key material."""
+    """Serializable profile list for ``GET /agents`` and the ``task_bridge.py agents`` CLI
+    (section 5): names + labels + voice + usability, re-read each call, never any key material."""
     return [{"name": e["name"], "label": e["label"], "voice": e["voice"],
              "voice_name": e["voice_name"], "effort": e["effort"],
              "usable": e["usable"], "reason": e["reason"]}

@@ -5,10 +5,12 @@
     "api_key_file": "~/.hermes/config.yaml",
     "personality_file": null
   },
-  "sidekick": {
-    "label": "Sidekick",
+  "beepbop": {
+    "label": "BEEPBOP",
     "voice": "plain",
-    "api_key_file": "~/.hermes/config.yaml",
-    "personality_file": null
+    "voice_name": "en-US-Chirp3-HD-Enceladus",
+    "effort": "low",
+    "api_key_file": "~/.hermes/profiles/beepbop/config.yaml",
+    "personality_file": "~/.hermes/profiles/beepbop/SOUL.md"
   }
 }

@@ -4,8 +4,8 @@
 Gadget -> POST /turn (raw 16 kHz mono PCM16, or ?text=...), header X-Gadget-Token.
 Relay  -> Google Speech-to-Text -> Hermes API server -> {"heard": ..., "reply": ...}.
 Secrets stay here: the Hermes key is read from ~/.hermes/config.yaml, the Google key from
-$GOOGLE_API_KEY or ./google.key. The gadget only knows the relay token
-(./token, created on first run).
+$GOOGLE_API_KEY or ~/muse/hermes-relay/google.key. The gadget only knows the relay token
+(~/muse/hermes-relay/token, created on first run).
 
 Per-profile routing (THREE_AGENT_SPEC.md sections 2-3).  Every Hermes turn may name a Hermes
 PROFILE with a `profile` query param, on /turn (voice and text, streaming and not):
@@ -17,7 +17,7 @@ PROFILE with a `profile` query param, on /turn (voice and text, streaming and no
 default key (today's behaviour). Otherwise the turn is sent to
 `{HERMES}/p/<name>/v1/chat/completions` authenticated with THAT profile's API key. The name -> 
 (label, voice, url, key, personality) mapping lives in agents.py + agents.json:
-`agents.json` next to this file is the single file the user edits
+`~/muse/hermes-relay/agents.json` is the single file the user edits
 when a profile is created; a missing/unreadable/malformed entry, or one whose key cannot be
 read, routes the turn to `default` with a warning -- a config mistake never errors a turn.
 `GET /agents` (token-gated) returns the parsed profile list for the gadget/settings.
@@ -33,6 +33,7 @@ import base64, json, os, re, secrets, shutil, subprocess, sys, threading, time, 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import agents
+import extras          # glance cards + conversation history (gadget idle screen, companion page)
 import notifications
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +51,9 @@ MOODS = ["smirk", "scan", "alert", "glitch", "squint", "angry", "surprised", "pl
          "cloudy", "windy", "hot", "snow"]
 IMG_MAX = 100_000         # bytes of JPEG sent to the gadget inside the reply
 IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".heic", ".webp", ".bmp", ".tiff"}
+MAX_BODY = 1_000_000      # JSON bodies; anything larger is refused, not read
+MAX_AUDIO = 4_000_000     # a voice note in PCM (~125 s at 16 kHz mono); ADPCM is far smaller
+SOCKET_TIMEOUT_S = 30     # a stalled client is dropped instead of pinning a thread forever
 # The system prompt is three parts, so the middle (persona) can swap per profile while the
 # intro and the gadget RULES stay byte-identical for every voice.  The "sasshole" persona is
 # the historical text verbatim (this string used to be the whole SYSTEM).
@@ -78,7 +82,7 @@ SYSTEM_RULES = ("Answer in one to three short spoken sentences. No markdown, lis
           "Before running a DESTRUCTIVE or system-wide command on this machine, ask the user first: "
           "POST the command to http://127.0.0.1:8788/approvals as JSON {\"command\":\"<the exact shell command>\",\"reason\":\"<one short clause>\"} "
           "and look at \"approved\". Only if it is true, run it; if false, do not run it and say it was not approved. "
-          
+          "If asked for something like that, briefly say what you WOULD do instead of doing it. "
           "You MAY use your tools freely -- this is a real assistant, not a dumb speaker -- but a voice turn is "
           "only useful while it is quick: prefer the smallest number of steps that truly answers, and skip steps "
           "that are only for show. If a task will clearly take minutes, say so and stop -- the user will ask again."
@@ -105,7 +109,7 @@ SYSTEM = system_prompt("sasshole")   # default persona; per-profile turns use ro
 # Voice turns die at 85 s; the gadget itself waits 100. Real agentic work (screenshots,
 # edits) can legitimately grind 1-3 minutes server-side -- a follow-up turn picks up the finished result.
 HERMES_TIMEOUT = 85
-ASK_TIMEOUT = 45          # seconds the gadget gets to answer an approval before we DENY
+ASK_TIMEOUT = 70          # seconds the gadget gets to answer an approval before we DENY
 
 _ASKS = {}                 # id -> {"event": threading.Event, "choice": str|None}
 _ACTIVE_PUSH = None           # push() of the turn in flight (asks ride its stream)
@@ -116,7 +120,7 @@ EFFORT = os.environ.get("HERMES_EFFORT", "medium")               # how hard it t
 PROVIDER = os.environ.get("HERMES_PROVIDER", "ollama-cloud")   # Hermes ignores a bare model name unless a provider is given
 SESSION_KEY = "muse-gadget"                                      # scopes Hermes's long-term memory to the gadget
 SESSION_FILE = os.path.join(HERE, "session_id")                  # legacy single slot; kept only for the one-time migration
-SESSION_IDS_FILE = os.path.join(HERE, "session_ids.json")        # per-agent session slots: {"default": id, "sidekick": id, ...}
+SESSION_IDS_FILE = os.path.join(HERE, "session_ids.json")        # per-agent session slots: {"default": id, "beepbop": id, ...}
 MAX_REPLY = 700           # characters; the gadget text buffer is 1 KB
 SESSION_RESET_TOKENS = 0        # 0 = OFF: never silently drop a conversation. The old caps (30k..240k)
                                 # kept orphaning live threads (8 silent resets in relay.log); threads grow
@@ -204,7 +208,8 @@ def _start_worker():
     global _worker
     env = dict(os.environ, PYTHONUTF8="1")
     _worker = subprocess.Popen([WHISPER_PY, os.path.join(HERE, "whisper_worker.py")], stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,   # pythonw has no real
+                               text=True, encoding="utf-8", errors="replace",        # stderr to inherit
                                bufsize=1, env=env)
     if _worker.stdout.readline().strip() != "ready":
         _worker.kill()
@@ -250,6 +255,48 @@ def transcribe_local(pcm):
 
 
 _google_down_until = 0
+
+
+_IMA_STEPS = [7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88,
+    97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658,
+    724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660,
+    4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818,
+    18500, 20350, 22385, 24623, 27086, 29794, 32767]
+_IMA_INDEX = [-1, -1, -1, -1, 2, 4, 6, 8]
+
+
+def read_chunked(f, cap=MAX_AUDIO):
+    """A chunked request body (HTTP/1.1 Transfer-Encoding: chunked); trailers are skipped.
+    Refuses anything over `cap` bytes instead of buffering it without bound."""
+    out = bytearray()
+    while True:
+        size = int(f.readline().split(b";")[0].strip() or b"0", 16)
+        if not size:
+            while f.readline().strip():
+                pass
+            return bytes(out)
+        if len(out) + size > cap:
+            raise ValueError("chunked body over %d bytes" % cap)
+        out += f.read(size)
+        f.readline()
+
+
+def ima_adpcm_to_pcm(data):
+    """The gadget's voice note as IMA ADPCM (muse_adpcm.c: state from zero, low nibble first) -> PCM16."""
+    out = bytearray(len(data) * 4)
+    pred, index, o = 0, 0, 0
+    for b in data:
+        for code in (b & 15, b >> 4):
+            st = _IMA_STEPS[index]
+            diff = st >> 3
+            if code & 4: diff += st
+            if code & 2: diff += st >> 1
+            if code & 1: diff += st >> 2
+            pred = max(-32768, min(32767, pred - diff if code & 8 else pred + diff))
+            index = max(0, min(88, index + _IMA_INDEX[code & 7]))
+            out[o:o + 2] = (pred & 0xFFFF).to_bytes(2, "little")
+            o += 2
+    return bytes(out)
 
 
 def transcribe(pcm):
@@ -318,11 +365,24 @@ def prepare_image(src):
             import tempfile
             path = os.path.realpath(os.path.expanduser(src))
             ok_dirs = (os.path.expanduser("~"), tempfile.gettempdir(), "/tmp",
-                       "/private/tmp", "/private/var/folders")   # home, tmp (per-OS), macOS temp
+                       "/private/tmp", "/private/var/folders",   # home, tmp (per-OS), macOS temp
+                       os.path.expanduser(os.path.join("~", "AppData", "Local", "hermes", "cache", "images")))
             if not any(path.startswith(d + os.sep) for d in ok_dirs) or os.path.splitext(path)[1].lower() not in IMG_EXT:
                 raise ValueError("not an image in an allowed folder: " + path)
-            with open(path, "rb") as i, open(raw, "wb") as o:
-                o.write(i.read(30_000_000))
+            # A screenshot the agent is still writing is briefly locked on Windows (Errno 13);
+            # copy it under a short retry instead of failing the whole reply on a race.
+            data = None
+            for attempt in range(4):
+                try:
+                    with open(path, "rb") as i:
+                        data = i.read(30_000_000)
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        raise ValueError("image is locked by another program (still being written?): " + path)
+                    time.sleep(0.25)
+            with open(raw, "wb") as o:
+                o.write(data)
         sips = shutil.which("sips")
         ffmpeg = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
         for q in (80, 60, 45, 30):   # the gadget takes the picture inside the reply: keep it small
@@ -597,9 +657,9 @@ def migrate_legacy_session():
         return
     legacy = open(SESSION_FILE).read().strip()
     if legacy:
-        _save_ids({"default": legacy, "sidekick": legacy})
+        _save_ids({"default": legacy, "beepbop": legacy})
         os.replace(SESSION_FILE, SESSION_FILE + ".pre-perprofile.bak")
-        print("session slots: legacy %s seeded into default + sidekick" % legacy, flush=True)
+        print("session slots: legacy %s seeded into default + beepbop" % legacy, flush=True)
 
 
 def ask_hermes(text, route=None):
@@ -669,6 +729,7 @@ def _reply_lines(text):
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = SOCKET_TIMEOUT_S   # socketserver sets this on the request socket
 
     def reply(self, code, obj):
         b = json.dumps(obj).encode()
@@ -684,6 +745,8 @@ class H(BaseHTTPRequestHandler):
     def _json_body(self):
         try:
             n = int(self.headers.get("Content-Length", 0))
+            if n > MAX_BODY:
+                return {}
             return json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return {}
@@ -692,18 +755,38 @@ class H(BaseHTTPRequestHandler):
         """NDJSON for an empty transcript: heard nothing, say so, done. The gadget's
         stream parser expects NDJSON lines; a bare JSON body reads as "relay
         unreachable" and falsely marks the Hermes link dead on a silent press."""
+        return self.stream_short("", "I didn't catch that.")
+
+    def stream_short(self, heard, reply):
+        """A whole NDJSON answer at once (heard, then the done reply) for turns that never reach
+        the agent: an empty transcript, "start a new conversation"."""
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Transfer-Encoding", "chunked")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        body = (json.dumps({"heard": ""}) + "\n"
-                + json.dumps({"reply": "I didn't catch that.", "react": "", "done": True}) + "\n").encode()
+        body = (json.dumps({"heard": heard}) + "\n"
+                + json.dumps({"reply": reply, "react": "", "done": True}) + "\n").encode()
         self.wfile.write(("%x\r\n" % len(body)).encode() + body + b"\r\n0\r\n\r\n")
         self.wfile.flush()
 
+    def _serve_app(self):
+        """The companion page (no token to load it: the page asks for one before any data call)."""
+        try:
+            body = open(os.path.join(HERE, "companion.html"), "rb").read()
+        except OSError:
+            return self.reply(404, {"error": "companion.html missing"})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
+        if u.path in ("/app", "/app/"):
+            return self._serve_app()
         if not self._authed():
             return self.reply(401, {"error": "unauthorized"})
         if u.path == "/agents":
@@ -720,6 +803,15 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, {"notifications": notifications.pending()})
             except Exception as e:
                 return self.reply(502, {"error": str(e)[:120]})
+        if u.path == "/glance":
+            return self.reply(200, {"cards": extras.glance_get()})
+        if u.path == "/history":
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                n = int(q.get("limit", ["40"])[0])
+            except ValueError:
+                n = 40
+            return self.reply(200, {"history": extras.history_get(n)})
         if u.path == "/notifications/history":
             # The gadget's inbox page: recent history, read items included, so a nudge that
             # went stale before anyone tapped it is still there. `limit` caps the rows.
@@ -777,6 +869,11 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path.startswith("/notifications"):
             return self._do_notification(u)
+        if u.path == "/glance" and (self._authed() or self.client_address[0] in ("127.0.0.1", "::1")):
+            body = self._json_body()
+            for cid in body.get("delete") or []:
+                extras.glance_delete(str(cid))
+            return self.reply(200, {"cards": extras.glance_set(body.get("cards") or [], bool(body.get("replace")))})
         if u.path == "/approvals" and (self._authed() or self.client_address[0] in ("127.0.0.1", "::1")):
             try:
                 n = int(self.headers.get("Content-Length") or 0)
@@ -861,7 +958,15 @@ class H(BaseHTTPRequestHandler):
             profile = route["name"]                             # "default" unless a real alt (or fallback)
             text = q.get("text", [""])[0]
             if not text:
-                pcm = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                    pcm = read_chunked(self.rfile)   # the gadget streams the note while it is spoken
+                else:
+                    n = int(self.headers.get("Content-Length", 0))
+                    if n > MAX_AUDIO:
+                        return self.reply(413, {"error": "audio too large"})
+                    pcm = self.rfile.read(n)
+                if self.headers.get("X-Audio") == "ima-adpcm":   # a quarter of the upload, for the funnel
+                    pcm = ima_adpcm_to_pcm(pcm)
                 text = transcribe(pcm) if len(pcm) > 6400 else ""
             t_stt = time.time() - t0
             if not text:
@@ -871,20 +976,24 @@ class H(BaseHTTPRequestHandler):
             print("heard:", text, "profile:", profile, flush=True)
             if re.fullmatch(r"(?i)\W*(start|begin)?\s*(a )?(new|fresh) (conversation|chat|session)\W*|\W*start over\W*", text):
                 clear_sid(route)
+                print("conversation reset:", profile, flush=True)
+                if want_stream:   # the gadget reads NDJSON; a bare JSON body was "CAN'T REACH HERMES"
+                    return self.stream_short(text, "Okay, starting a fresh conversation.")
                 return self.reply(200, {"heard": text, "reply": "Okay, starting a fresh conversation.", "react": "", "image_b64": ""})
             if want_stream:
-                return self.do_POST_stream_stream(u, text, route)
+                return self.do_POST_stream_stream(u, text, route, stt=t_stt)
             t1 = time.time()
             out, mood, image = ask_hermes(text, route)
             print("reply:", out[:80], "[%s]" % mood if mood else "", "[image]" if image else "",
                   "(stt %.1fs, hermes %.1fs)" % (t_stt, time.time() - t1), flush=True)
+            extras.history_add(text, out, profile, mood, q.get("source", ["gadget"])[0])
             self.reply(200, {"heard": text, "reply": out, "react": mood,
                              "image_b64": base64.b64encode(image).decode() if image else ""})
         except Exception as e:
             print("error:", e, file=sys.stderr, flush=True)
             self.reply(502, {"error": str(e)[:120]})
 
-    def do_POST_stream_stream(self, u, text, route=None):
+    def do_POST_stream_stream(self, u, text, route=None, stt=0.0):
         """NDJSON: heard -> status -> tts chunks -> final. Real chunked framing (the gadget's
         HTTP client requires it; curl tolerates its absence, esp_http_client does not)."""
         route = route or {}
@@ -1147,13 +1256,60 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b"0\r\n\r\n")   # the chunked body's terminator
         self.wfile.flush()
         print("reply:", out[:80], "[%s]" % mood if mood else "", "[image]" if image else "",
-              "(stt %.1fs, hermes %.1fs, streamed)" % (t_stt, time.time() - t1), flush=True)
+              "(stt %.1fs, hermes %.1fs, streamed)" % (stt, time.time() - t1), flush=True)
+        try:
+            extras.history_add(text, out, route.get("name") or "default", mood,
+                               urllib.parse.parse_qs(u.query).get("source", ["gadget"])[0])
+        except Exception as e:
+            print("history failed:", e, file=sys.stderr, flush=True)
 
     def log_message(self, *a):
         pass
 
 
+class _LogTee:
+    """Timestamped, size-rotated log file that sys.stdout/sys.stderr can point at.
+    One old generation is kept (`relay.log.1`); rotation happens at start-up, never mid-line."""
+
+    def __init__(self, path, mirror=None, max_bytes=10_000_000):
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > max_bytes:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        self.f = open(path, "a", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)   # POSIX; a no-op on Windows
+        except OSError:
+            pass
+        self.mirror = mirror
+        self.buf = ""
+
+    def write(self, s):
+        if not s:
+            return 0
+        self.buf += s
+        while "\n" in self.buf:
+            line, self.buf = self.buf.split("\n", 1)
+            self.f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + line + "\n")
+            if self.mirror:
+                self.mirror.write(line + "\n")
+                self.mirror.flush()
+        self.f.flush()
+        return len(s)
+
+    def flush(self):
+        if self.buf:
+            self.f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + self.buf)
+            self.buf = ""
+        self.f.flush()
+
+
 if __name__ == "__main__":
+    _log_path = os.environ.get("RELAY_LOG")
+    if _log_path:
+        sys.stdout = sys.stderr = _LogTee(_log_path)
+
     def _warm():
         # Held while starting so transcribe_worker waits instead of racing; released even on
         # failure, or the first turn would block on this lock forever (the old lambda leaked it).

@@ -11,3 +11,5 @@ session_ids.json
 notifications.json
 print_watcher_state.json
 *.bak*
+history.json
+glance.json

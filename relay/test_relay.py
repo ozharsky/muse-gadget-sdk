@@ -1,4 +1,5 @@
 """Regression tests for the relay's reply post-processing (no server, no network)."""
+import io
 import json
 import os
 import shutil
@@ -270,14 +271,14 @@ class ProfileRoutingTests(unittest.TestCase):
 
 
 class AgentEntryTests(unittest.TestCase):
-    """The shipped agents.json loads with the default + the live alternates (sidekick); describe()
+    """The shipped agents.json loads with the default + the live alternates (beepbop); describe()
     never leaks key material."""
 
     def setUp(self):
         self.entries = agents.load()
 
     def test_has_default_and_known_profiles(self):
-        for name in ("default", "sidekick"):
+        for name in ("default", "beepbop"):
             self.assertIn(name, self.entries)
 
     def test_default_is_the_sasshole_voice(self):
@@ -394,12 +395,12 @@ class ProfileHttpTurnTests(unittest.TestCase):
         self.assertEqual(route["voice"], "sasshole")
 
     def test_profile_turn_uses_the_p_path_and_voice(self):
-        if "sidekick" not in agents.load():
-            self.skipTest("example profile sidekick not in agents.json")
-        self._turn("?text=hi&profile=sidekick")
+        if "beepbop" not in agents.load():
+            self.skipTest("example profile beepbop not in agents.json")
+        self._turn("?text=hi&profile=beepbop")
         route = self.fake.calls[-1]
-        self.assertEqual(route["name"], "sidekick")
-        self.assertIn("/p/sidekick/v1/chat/completions", route["api_url"])
+        self.assertEqual(route["name"], "beepbop")
+        self.assertIn("/p/beepbop/v1/chat/completions", route["api_url"])
         self.assertEqual(route["voice"], "plain")
 
     def test_unknown_profile_turn_routes_to_default(self):
@@ -415,11 +416,11 @@ class ProfileHttpTurnTests(unittest.TestCase):
     def test_sessions_are_per_agent(self):
         """Each agent slot keeps its own conversation; clearing one never touches the other."""
         relay.save_sid({"name": "default"}, "idA")
-        relay.save_sid({"name": "sidekick"}, "idB")
+        relay.save_sid({"name": "beepbop"}, "idB")
         self.assertEqual(relay.load_sid({"name": "default"}), "idA")
-        self.assertEqual(relay.load_sid({"name": "sidekick"}), "idB")
-        relay.clear_sid({"name": "sidekick"})
-        self.assertEqual(relay.load_sid({"name": "sidekick"}), "")
+        self.assertEqual(relay.load_sid({"name": "beepbop"}), "idB")
+        relay.clear_sid({"name": "beepbop"})
+        self.assertEqual(relay.load_sid({"name": "beepbop"}), "")
         self.assertEqual(relay.load_sid({"name": "default"}), "idA")
 
 
@@ -469,14 +470,38 @@ class StreamRouteTests(unittest.TestCase):
         p = os.path.join(dir_, "agents.json")
         with open(p, "w") as f:
             json.dump({"default": {"voice": "sasshole"},
-                       "sidekick": {"voice": "plain",
+                       "beepbop": {"voice": "plain",
                                    "api_key_file": os.path.expanduser("~/.hermes/config.yaml")}}, f)
-        r = agents.resolve("sidekick", base="http://127.0.0.1:8642", path=p)
+        r = agents.resolve("beepbop", base="http://127.0.0.1:8642", path=p)
         cap = self._capture(r)
-        self.assertTrue(cap["url"].endswith("/p/sidekick/v1/chat/completions"))
+        self.assertTrue(cap["url"].endswith("/p/beepbop/v1/chat/completions"))
         self.assertEqual(cap["auth"], "Bearer " + r["api_key"])
         self.assertEqual(cap["body"]["messages"][0]["content"], relay.system_prompt("plain"))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HardeningTests(unittest.TestCase):
+    """The socket/body/log guards added after the 2026-10-25 QA (N-M1/N-M2)."""
+
+    def test_chunked_reader_refuses_oversize(self):
+        body = b"5\r\nhello\r\n0\r\n\r\n"
+        self.assertEqual(relay.read_chunked(io.BytesIO(body), cap=100), b"hello")
+        with self.assertRaises(ValueError):
+            relay.read_chunked(io.BytesIO(body), cap=3)
+
+    def test_log_tee_timestamps_and_rotates(self):
+        import os, tempfile, time as _t
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "relay.log")
+            with open(p, "w") as f:
+                f.write("x" * 50)
+            tee = relay._LogTee(p, max_bytes=10)
+            tee.write("hello\nworld\n")
+            tee.flush()
+            self.assertTrue(os.path.exists(p + ".1"), "old log rotated aside")
+            lines = open(p).read().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertRegex(lines[0], r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] hello$")
