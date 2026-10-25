@@ -109,3 +109,5 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
 
 # Resume the Muse VM TLS session on reconnect (no full handshake on every agent switch)
 CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
+
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

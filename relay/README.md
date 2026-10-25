@@ -53,10 +53,27 @@ every request; any mismatch is a 401. Keep the file out of git (the bundled `.gi
 does) and use HTTPS (a Tailscale funnel, or any TLS reverse proxy) if you expose the
 relay beyond your own network.
 
+## Running it as a service
+
+`relay-launch.cmd` (Windows) / `relay-launch.sh` set the environment and start the
+relay; every setting it exports matters:
+
+| Variable | Why |
+|---|---|
+| `RELAY_LAN_OVERRIDE` | The address `/agents` announces to the gadget. Set it to the **door** the gadget can actually reach (e.g. an always-on LAN bridge), not this machine's own LAN IP — those are often different subnets. |
+| `RELAY_LOG` | Write a timestamped, size-rotated log (`relay.log`, one `.1` generation) instead of a plain stdout redirect. |
+| `FFMPEG_BIN` | Image shrinking on machines without `sips`. |
+
+On Windows, start it through `pythonw.exe` (a GUI-subsystem interpreter) so there is
+no console window to close — a console-window kill aborts the process with
+`forrtl: error (200)` in the log. Pair it with a keeper task (`relay_keeper.cmd`) that
+curls the relay, the LAN door and the funnel, restarts what is down and logs what is
+not.
+
 ## Tests
 
 ```bash
-python -m unittest test_relay test_notifications     # ~76 tests, no network needed
+python -m unittest test_relay test_notifications     # ~78 tests, no network needed
 ```
 
 ## Security posture
@@ -64,5 +81,8 @@ python -m unittest test_relay test_notifications     # ~76 tests, no network nee
 - Every endpoint requires the shared token (constant-time compare).
 - Secrets stay server-side: agent bearer keys are read from files you point at;
   the Google key from the environment or a file. Nothing is logged or echoed.
+- Bounded by construction: a 30 s socket timeout and size caps (JSON 1 MB, audio
+  4 MB, chunked notes capped) mean a stalled or hostile client cannot pin a thread
+  or an allocation. Logs are timestamped and rotated.
 - This is a LAN/personal-scale bridge. Exposing it publicly is your call: put TLS in
   front and keep the token long.

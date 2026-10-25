@@ -130,7 +130,8 @@ static int build_status(char *out, size_t len)
                     muse_settings_wifi_on() ? "true" : "false", wifi_state_name(w.state), s->ssid_e, w.ip, w.rssi,
                     s->host_e, s->vm_e, muse_settings_hatch_token_len() ? "true" : "false", muse_hatch_state_name(h.state),
                     muse_link_hatch_linked() ? "true" : "false", muse_link_state_name(muse_link_state()),
-                    s->relay_lan_e, s->relay_remote_e, muse_settings_relay_token_len() ? "true" : "false",
+                    s->relay_lan_e, s->relay_remote_e,
+                    (muse_settings_relay_token_len() || CONFIG_MUSE_HERMES_TOKEN[0]) ? "true" : "false",
                     muse_settings_volume(), muse_settings_speaker_on() ? "true" : "false",
                     muse_settings_mic_gain(), muse_settings_brightness(),
                     muse_settings_sleep_s(), s->last_e);

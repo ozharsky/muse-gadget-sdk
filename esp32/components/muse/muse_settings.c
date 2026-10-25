@@ -169,9 +169,17 @@ esp_err_t muse_settings_init(void)
         s.ble_on = b;
     }
     if (nvs_get_u8(s_nvs, "agent", &b) == ESP_OK) {
-        /* Old value is the same 0/1 (Muse/Hermes) the new enum keeps for those slots. */
-        s.agent = b < MUSE_AGENT_COUNT ? b : MUSE_AGENT_HERMES;
+        /* Old value is the same 0/1 (Muse/Hermes) the new enum keeps for those slots.
+         * An out-of-range value falls back to Muse, the safe default: it needs no
+         * relay and no Mac, so a wrong slot never leaves the box unable to answer. */
+        if (b < MUSE_AGENT_COUNT) {
+            s.agent = b;
+        } else {
+            ESP_LOGW(TAG, "agent from nvs: %u is out of range (count %d) -- using Muse",
+                     (unsigned)b, (int)MUSE_AGENT_COUNT);
+        }
     }
+    ESP_LOGI(TAG, "settings: agent=%d alt='%s'", (int)s.agent, s.agent_alt_profile);
     load_str("agent_alt", s.agent_alt_profile, sizeof(s.agent_alt_profile));
     load_str("relay_lan", s.relay_lan, sizeof(s.relay_lan));
     load_str("relay_remote", s.relay_remote, sizeof(s.relay_remote));
