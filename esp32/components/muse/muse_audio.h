@@ -62,5 +62,9 @@ float muse_audio_dbfs(const int16_t *mono, size_t frames);
 /* RMS of a buffer mapped to a 0..1 perceptual level. */
 float muse_audio_level(const int16_t *mono, size_t frames);
 
+/* How bright the sound is: log10 of its second difference's energy over its own, about -3 for
+ * "oo", -2 for "ah", -1.5 for "ee", above -1 for "s". 0 for silence. (The faces' mouth shapes.) */
+float muse_audio_brightness(const int16_t *mono, size_t frames);
+
 /* Short UI chirp: rising for "go", falling for "done". */
 void muse_audio_chirp(int rising);

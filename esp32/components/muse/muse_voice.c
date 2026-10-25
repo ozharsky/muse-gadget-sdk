@@ -456,6 +456,7 @@ static bool hatch_reply(bool *delivered)
                 ESP_LOGI(TAG, "reply audio after %.2fs", (esp_timer_get_time() - t0) / 1e6);
             }
             muse_state_set_level(muse_audio_level(buf, n));
+            muse_state_set_tone(muse_audio_brightness(buf, n));
             muse_audio_write(buf, n);
             played += n;
         } else if (done) {

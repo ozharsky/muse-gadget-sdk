@@ -44,6 +44,12 @@
 #include "muse_console.h"
 #include "muse_link.h"
 #include "muse_mem.h"
+#if MUSE_PORTRAITS
+#include "avatar/muse_portrait.h"
+#if CONFIG_MUSE_IMU
+#include "muse_imu.h"
+#endif
+#endif
 #include "muse_menu.h"
 #include "muse_pixel.h"
 #include "muse_mjpeg.h"
@@ -1506,6 +1512,19 @@ static void on_camera_hint_clicked(lv_event_t *e)
 }
 #endif
 
+#if MUSE_PORTRAITS
+/* On the face, the eyes go to the finger, and follow it while it's down. */
+static void on_face_touch(lv_event_t *e)
+{
+    (void)e;
+    if (s_tv && lv_tileview_get_tile_active(s_tv) == s_face && lv_obj_get_scroll_x(s_tv) == s_w) {
+        lv_point_t pt;
+        lv_indev_get_point(s_indev, &pt);
+        muse_portrait_look((float)(pt.x - s_w / 2) / (s_w * 0.3f), (float)(pt.y - s_h / 2) / (s_h * 0.3f), 1.2f);
+    }
+}
+#endif
+
 static void on_any_press(lv_event_t *e)
 {
     (void)e;
@@ -1594,6 +1613,10 @@ static void build_overlays(void)
 
     if (s_indev) {
         lv_indev_add_event_cb(s_indev, on_any_press, LV_EVENT_PRESSED, NULL);
+#if MUSE_PORTRAITS
+        lv_indev_add_event_cb(s_indev, on_face_touch, LV_EVENT_PRESSED, NULL);
+        lv_indev_add_event_cb(s_indev, on_face_touch, LV_EVENT_PRESSING, NULL);
+#endif
     }
 }
 
@@ -1705,6 +1728,11 @@ static void update_chrome(float now)
             s_shown_page = shown;
         }
         int sx = lv_obj_get_scroll_x(s_tv);
+#if MUSE_PORTRAITS
+        if (sx != s_w && sx > 0 && sx < 2 * s_w) {   /* the face slides: it looks toward the page coming in */
+            muse_portrait_look(sx < s_w ? -1.0f : 1.0f, 0.1f, 0.4f);
+        }
+#endif
         muse_settings_ui_tick(sx > s_w);                 /* settings is the third tile */
         muse_glance_ui_tick(sx < s_w, sx % s_w == 0);   /* the Glance page (first tile), or sliding over it */
     }
@@ -2337,6 +2365,12 @@ static void raise_draw_threads(void)
 
 static void frame_tick(lv_timer_t *timer)
 {
+#if MUSE_PORTRAITS && CONFIG_MUSE_IMU
+    float tx, ty;
+    if (muse_imu_tilt(&tx, &ty)) {
+        muse_portrait_tilt(tx, ty);   /* the eyes drift with the gadget's lean */
+    }
+#endif
     static bool s_raised;
     if (!s_raised) {
         raise_draw_threads();

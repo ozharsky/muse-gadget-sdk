@@ -6,7 +6,7 @@
  *
  * PACK.bin is a portrait pack (portraits/portrait_<name>.bin); BASE.rgb565 its portrait decoded
  * (portrait_review.py does that: the host has no esp_new_jpeg). FACE 0 Muse, 1 Hermes, 2 BEEPBOP.
- * SCRIPT: idle | modes | speak | pet | bored | react:<name>. Runs at 25 fps and writes every
+ * SCRIPT: idle | modes | speak | listen | look | tilt | tell | pet | bored | react:<name>. Runs at 25 fps and writes every
  * EVERY-th frame as size x size RGB565 to stdout. Exits 1 if a reaction name is unknown.
  */
 #include <math.h>
@@ -24,12 +24,13 @@ static size_t g_pack_len;
 static uint8_t *g_raw;
 static size_t g_raw_len;
 static int64_t g_us;
-static float g_level;
+static float g_level, g_tone;
 static uint32_t g_rng = 12345;
 
 uint32_t esp_random(void) { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 17; g_rng ^= g_rng << 5; return g_rng; }
 int64_t esp_timer_get_time(void) { return g_us; }
 float muse_state_level(void) { return g_level; }
+float muse_state_tone(void) { return g_tone; }
 
 static const esp_partition_t PART;
 const esp_partition_t *esp_partition_find_first(int t, int s, const char *l) { (void)t; (void)s; (void)l; return &PART; }
@@ -85,6 +86,12 @@ static float speech(float t)
     return 0.42f + 0.45f * syl * (0.8f + 0.2f * sinf(t * 2.3f));
 }
 
+/* The voice's brightness (muse_audio_brightness): vowels drifting through "oo", "ah", "ee". */
+static float tone(float t)
+{
+    return -2.1f + 0.75f * sinf(t * 6.2832f * 0.9f) + 0.25f * sinf(t * 6.2832f * 2.7f);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 6) {
@@ -102,6 +109,10 @@ int main(int argc, char **argv)
     float len = 12.0f;
     if (!strcmp(script, "modes")) len = 15.0f;
     else if (!strcmp(script, "speak")) len = 6.0f;
+    else if (!strcmp(script, "listen")) len = 5.0f;
+    else if (!strcmp(script, "look")) len = 6.0f;
+    else if (!strcmp(script, "tilt")) len = 6.0f;
+    else if (!strcmp(script, "tell")) len = 18.0f;
     else if (!strcmp(script, "pet")) len = 4.5f;
     else if (!strcmp(script, "bored")) len = 50.0f;
     else if (!strncmp(script, "react:", 6)) len = 4.4f;
@@ -119,6 +130,19 @@ int main(int argc, char **argv)
                    t < 10 ? MUSE_MODE_SPEAKING : t < 11.5f ? MUSE_MODE_IDLE : t < 13.5f ? MUSE_MODE_ERROR : MUSE_MODE_OFF;
         } else if (!strcmp(script, "speak")) {
             mode = MUSE_MODE_SPEAKING;
+        } else if (!strcmp(script, "listen")) {
+            mode = MUSE_MODE_LISTENING;
+            g_level = speech(t * 0.9f + 0.3f) * 0.9f;   /* someone talking to it */
+        } else if (!strcmp(script, "look")) {   /* touches: right, left, low, high, then let go */
+            static const float P[5][2] = { { 0.8f, 0 }, { -0.8f, 0.1f }, { 0.2f, 0.9f }, { -0.3f, -0.8f }, { 0, 0 } };
+            int k = (int)(t / 1.1f);
+            if (k < 4 && fmodf(t, 1.1f) < 0.05f) {
+                muse_portrait_look(P[k][0], P[k][1], 1.0f);
+            }
+        } else if (!strcmp(script, "tilt")) {
+            muse_portrait_tilt(sinf(t * 1.2f), 0.6f * sinf(t * 0.7f));
+        } else if (!strcmp(script, "tell")) {   /* a reply ends at 3 s, then idle long enough for one */
+            mode = t < 3.0f ? MUSE_MODE_SPEAKING : MUSE_MODE_IDLE;
         } else if (!strcmp(script, "pet")) {
             happy = t > 0.5f && t < 3.5f ? 1.0f : 0;
         } else if (!strncmp(script, "react:", 6) && t >= 0.4f && !reacted) {
@@ -130,6 +154,7 @@ int main(int argc, char **argv)
         }
         if (mode == MUSE_MODE_SPEAKING) {
             g_level = speech(t);
+            g_tone = tone(t);
         }
         if (mode != last) {
             last = mode;

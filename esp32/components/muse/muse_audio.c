@@ -340,6 +340,23 @@ float muse_audio_level(const int16_t *mono, size_t frames)
     return l < 0 ? 0 : (l > 1 ? 1 : l);
 }
 
+float muse_audio_brightness(const int16_t *mono, size_t frames)
+{
+    /* The second difference weights each frequency by f^4, so the high resonance that makes
+     * "ee" (and the hiss of an "s") outweighs the low first resonance every vowel shares. */
+    double e0 = 0, e2 = 0;
+    for (size_t i = 2; i < frames; i++) {
+        double d = (double)mono[i] - 2.0 * mono[i - 1] + mono[i - 2];
+        e0 += (double)mono[i] * mono[i];
+        e2 += d * d;
+    }
+    if (e0 < (double)frames * 30.0 * 30.0 || e2 <= 0) {
+        return 0;   /* too quiet to say */
+    }
+    float b = log10f((float)(e2 / e0));
+    return b > -0.01f ? -0.01f : b;
+}
+
 void muse_audio_chirp(int rising)
 {
     enum { MS = 90, N = MUSE_AUDIO_RATE * MS / 1000 };

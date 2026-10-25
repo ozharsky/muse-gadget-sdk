@@ -68,6 +68,7 @@ static i2c_master_dev_handle_t s_dev;
 static bool s_present;
 
 static muse_imu_vec_t s_rest;
+static volatile muse_imu_vec_t s_last;
 static bool s_have_rest;
 static int64_t s_stable_since;
 static int64_t s_tilt_seen, s_flip_seen, s_last_jolt, s_last_shake;
@@ -180,6 +181,16 @@ esp_err_t muse_imu_init(i2c_master_bus_handle_t bus)
     return ESP_OK;
 }
 
+bool muse_imu_tilt(float *x, float *y)
+{
+    if (!s_have_rest) {
+        return false;
+    }
+    *x = (float)(s_last.x - s_rest.x) / 500.0f;   /* ~30 degrees is all the way */
+    *y = (float)(s_last.y - s_rest.y) / 500.0f;
+    return true;
+}
+
 unsigned muse_imu_poll(int64_t now_us, bool asleep)
 {
     if (!s_present || (!asleep && now_us - s_last_poll < AWAKE_PERIOD_US)
@@ -193,6 +204,7 @@ unsigned muse_imu_poll(int64_t now_us, bool asleep)
         return 0;
     }
     muse_imu_vec_t v = { mg[0], mg[1], mg[2] };
+    s_last = v;
     if (!s_have_rest) {
         s_rest = v;
         s_have_rest = true;

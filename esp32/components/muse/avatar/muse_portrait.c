@@ -31,9 +31,10 @@ static const char *const NAMES[3] = { "pt_muse", "pt_hermes", "pt_beepbop" };
 enum {
     V_EYES_HALF, V_EYES_LEFT, V_EYES_RIGHT, V_EYES_UP, V_EYES_DOWN, V_EYES_WIDE, V_EYES_ANGRY, V_BROW_RAISE,
     V_WINK, V_EYES_GLOW, V_EYES_CLOSED, V_SAD, V_LAUGH, V_SMILE, V_SMIRK, V_MOUTH_1, V_MOUTH_2, V_MOUTH_3,
+    V_MOUTH_EE, V_MOUTH_OO, V_MOUTH_MM,   /* visemes: lips spread, rounded, pressed */
     V_COUNT, V_NONE = 0xff
 };
-#define MAX_PATCHES 20
+#define MAX_PATCHES 24
 
 /* The pack header, as portrait_pack.py writes it (HDR there). */
 typedef struct __attribute__((packed)) {
@@ -44,7 +45,7 @@ typedef struct __attribute__((packed)) {
 } pack_patch_t;
 
 typedef struct __attribute__((packed)) {
-    char magic[4];                /* "MPT1" */
+    char magic[4];                /* "MPT2" (24 patches; "MPT1" had 20 and is refused) */
     uint16_t size;                /* the portrait is size x size */
     uint8_t kind, npatch;         /* kind 0 = photo face, 1 = screen face */
     uint32_t jpg_off, jpg_len;
@@ -55,7 +56,7 @@ typedef struct __attribute__((packed)) {
     uint32_t light_off, phase_off;   /* photo faces: where the portrait glows (size^2), how far from the eyes ((size/2)^2) */
     uint32_t light_col;              /* and its colour */
 } pack_hdr_t;
-_Static_assert(sizeof(pack_hdr_t) == 418, "pack header: keep in step with HDR in tools/muse/portrait_pack.py");
+_Static_assert(sizeof(pack_hdr_t) == 490, "pack header: keep in step with HDR in tools/muse/portrait_pack.py");
 
 /* ---- Reactions ------------------------------------------------------------------------ */
 
@@ -150,6 +151,7 @@ typedef struct {
     int eyes, mouth;
     float lookx, looky, open_l, open_r, sx, sy, brow_l, brow_r, tilt, talk, curve, bob;
     float blush, tear, sweat, sparkle, dots;
+    float vis;   /* talking mouth: -1 rounded ("oo") .. +1 spread ("ee") */
 } screen_t;
 
 static volatile bool s_enabled = true;
@@ -212,6 +214,19 @@ static struct {
 } s_lt;
 static uint8_t s_wave[256];       /* how bright the light is, by distance from the eyes */
 static uint16_t s_hot565;         /* where it brightens to: its own colour, lighter */
+
+/* Where the eyes are sent (a touch, a page coming in) and the gadget's tilt: x right, y down, -1..1. */
+static float s_look_x, s_look_y, s_look_until;
+static volatile float s_tilt_x, s_tilt_y;
+/* The voice: the listener's level, its syllables as pulses along the light, and its brightness
+ * (high resonances, "ee"/"s", vs low, "oo") for the mouth's shape. */
+static muse_lip_agc_t s_agc_in;
+static float s_in, s_open_prev, s_in_prev;
+static struct { float t0, dir; } s_burst[4];   /* dir +1: out from the eyes (speech), -1: in (listening) */
+static int s_burst_n;
+static float s_tone_mean = -2.0f, s_tone_dev = 0.4f, s_tone_z, s_mm_until;
+/* Each agent's tell: Muse's glitch burst, Hermes's knowing look. */
+static float s_tell_until = -10.0f, s_next_tell = 12.0f;
 #define BELL_N 128                /* the light's falloff table, over q^2 in [0, 32) */
 static float s_bell[BELL_N + 2];
 static void bell_init(void);
@@ -259,6 +274,19 @@ void muse_portrait_set_size(int px)
 void muse_portrait_redraw_all(void)
 {
     s_full_dirty = true;
+}
+
+void muse_portrait_look(float x, float y, float secs)
+{
+    s_look_x = x < -1 ? -1 : x > 1 ? 1 : x;
+    s_look_y = y < -1 ? -1 : y > 1 ? 1 : y;
+    s_look_until = s_now + secs;
+}
+
+void muse_portrait_tilt(float x, float y)
+{
+    s_tilt_x = x < -1 ? -1 : x > 1 ? 1 : x;
+    s_tilt_y = y < -1 ? -1 : y > 1 ? 1 : y;
 }
 
 bool muse_portrait_react(const char *name)
@@ -348,7 +376,7 @@ static bool load(int face)
     s_mapped = true;
     s_pack = map;
     memcpy(&s_h, s_pack, sizeof(s_h));
-    if (((uintptr_t)s_pack & 3) || memcmp(s_h.magic, "MPT1", 4) || !s_h.size || s_h.size > 512 ||
+    if (((uintptr_t)s_pack & 3) || memcmp(s_h.magic, "MPT2", 4) || !s_h.size || s_h.size > 512 ||
         (size_t)s_h.jpg_off + s_h.jpg_len > len) {
         unload();
         return false;
@@ -524,6 +552,25 @@ static void photo_frame(const muse_pose_t *p, float now, float dt, float b, floa
     if (s_glance >= 0 && env < 0.5f) {
         t[s_glance] = 1.0f;
     }
+    float gx = 0, gy = 0;
+    if (now < s_look_until) {
+        gx = s_look_x;
+        gy = s_look_y;
+        s_glance = -1;
+    } else if (s_glance < 0) {
+        gx = s_tilt_x * 0.6f;
+        gy = s_tilt_y * 0.6f;
+    }
+    if ((gx != 0 || gy != 0) && env < 0.5f) {
+        t[V_EYES_RIGHT] = clamp01(gx);
+        t[V_EYES_LEFT] = clamp01(-gx);
+        t[V_EYES_DOWN] = clamp01(gy);
+        if (s_has[V_EYES_UP]) {
+            t[V_EYES_UP] = clamp01(-gy);
+        } else {
+            t[V_BROW_RAISE] = clamp01(-gy) * 0.5f;
+        }
+    }
 
     s_kick *= expf(-dt * 5.0f);
     switch (m) {
@@ -571,7 +618,18 @@ static void photo_frame(const muse_pose_t *p, float now, float dt, float b, floa
     if (m == MUSE_MODE_IDLE && now < s_mood_until && s_mood >= 0 && env < 0.5f) {
         t[s_mood] = 0.9f;
     }
-    if (now - s_reply_end < 1.8f) {
+    /* Each one's tell, after a reply and now and then while idle: Hermes gives a slow knowing
+     * look (smirk, raised brow, lids lowered); Muse's face glitches for a moment (below). */
+    bool after_reply = now - s_reply_end < 2.6f;
+    if (m == MUSE_MODE_IDLE && now >= s_next_tell && env < 0.5f) {
+        s_tell_until = now + (s_face == 0 ? 0.35f : 2.4f);
+        s_next_tell = s_tell_until + 18.0f + rnd() * 22.0f;
+    }
+    if (s_face == 1 && (after_reply || now < s_tell_until) && env < 0.5f) {
+        t[V_SMIRK] = 0.85f;
+        t[V_BROW_RAISE] = 0.7f;
+        t[V_EYES_HALF] = 0.3f;
+    } else if (after_reply && now - s_reply_end < 1.8f) {
         t[s_face == 0 ? V_SMIRK : V_SMILE] = 0.7f;   /* SHODAN is pleased with herself */
     }
     if (p->happy > 0.3f) {
@@ -614,6 +672,11 @@ static void photo_frame(const muse_pose_t *p, float now, float dt, float b, floa
     } else {
         s_fx_glitch = 0;
     }
+    if (s_face == 0 && now < s_tell_until) {
+        float ph = (s_tell_until - now) / 0.35f;   /* 1 -> 0 over the burst: two sharp jolts */
+        float g = sinf(ph * 6.2832f * 2.0f) > 0.2f ? 0.55f : 0.15f;
+        s_fx_glitch = s_fx_glitch > g ? s_fx_glitch : g;
+    }
 
     /* the mouth: three openings chained, the widest only on the loudest syllables */
     if (mouth > 0.01f) {
@@ -624,13 +687,27 @@ static void photo_frame(const muse_pose_t *p, float now, float dt, float b, floa
         t[V_SMILE] *= 0.3f;
         t[V_SMIRK] *= 0.3f;
         t[V_SAD] *= 0.5f;
+        if (m == MUSE_MODE_SPEAKING) {   /* the shape of the sound: "ee" spreads the lips, "oo" rounds them */
+            float on = clamp01(mouth * 2.0f);
+            float ee = s_has[V_MOUTH_EE] ? clamp01((s_tone_z - 0.5f) * 1.6f) * on : 0;
+            float oo = s_has[V_MOUTH_OO] ? clamp01((-s_tone_z - 0.5f) * 1.6f) * on : 0;
+            float k = 1.0f - (ee > oo ? ee : oo);
+            t[V_MOUTH_1] *= k;
+            t[V_MOUTH_2] *= k;
+            t[V_MOUTH_3] *= k;
+            t[V_MOUTH_EE] = ee;
+            t[V_MOUTH_OO] = oo;
+        }
+    }
+    if (m == MUSE_MODE_SPEAKING && now < s_mm_until && s_has[V_MOUTH_MM]) {
+        t[V_MOUTH_MM] = 0.9f;   /* lips pressed for a "b", "m", "p" */
     }
     t[V_EYES_CLOSED] = b;
     float face = clamp01(t[V_LAUGH] > t[V_SAD] ? t[V_LAUGH] : t[V_SAD]);
     for (int v = V_EYES_HALF; v <= V_EYES_CLOSED; v++) {
         t[v] *= 1.0f - face;
     }
-    for (int v = V_MOUTH_1; v <= V_MOUTH_3; v++) {
+    for (int v = V_MOUTH_1; v <= V_MOUTH_MM; v++) {
         t[v] *= 1.0f - clamp01(t[V_LAUGH]);   /* the laugh has its own open mouth */
     }
 
@@ -639,6 +716,7 @@ static void photo_frame(const muse_pose_t *p, float now, float dt, float b, floa
         [V_EYES_WIDE] = 14, [V_EYES_ANGRY] = 10, [V_BROW_RAISE] = 10, [V_WINK] = 18, [V_EYES_GLOW] = 12,
         [V_EYES_CLOSED] = 1000, [V_SAD] = 8, [V_LAUGH] = 10, [V_SMILE] = 9, [V_SMIRK] = 9,
         [V_MOUTH_1] = 1000, [V_MOUTH_2] = 1000, [V_MOUTH_3] = 1000,   /* the lip follower already eases */
+        [V_MOUTH_EE] = 30, [V_MOUTH_OO] = 30, [V_MOUTH_MM] = 40,
     };
     for (int v = 0; v < V_COUNT; v++) {
         s_w[v] = approach(s_w[v], clamp01(t[v]), RATE[v], dt);
@@ -661,7 +739,9 @@ static void light_frame(const muse_pose_t *p, float now, float dt, float open, f
     typedef struct { float base, amp, speed, waves, flicker; } look_t;
     look_t m = { 0.0f, 0.9f, 0.45f, 3.0f, 0 };    /* idle: bright packets running out along the cords */
     switch (p->mode) {
-    case MUSE_MODE_LISTENING: m = (look_t){ 0.1f, 0.5f, -0.9f, 3.0f, 0 }; break;      /* drawn in */
+    case MUSE_MODE_LISTENING:   /* drawn in, brighter and faster as you speak */
+        m = (look_t){ 0.08f + 0.3f * s_in, 0.35f + 0.6f * s_in, -0.7f - 1.3f * s_in, 3.0f, 0 };
+        break;
     case MUSE_MODE_THINKING: m = (look_t){ 0.1f, 0.6f, 1.8f, 5.0f, 0.15f }; break;    /* racing data */
     case MUSE_MODE_SPEAKING: m = (look_t){ 0.25f * open, 0.15f + 0.75f * open, 1.0f, 3.0f, 0 }; break;
     case MUSE_MODE_ERROR: m = (look_t){ 0, 0.5f, 0.5f, 2.0f, 0.6f }; break;            /* unsteady */
@@ -706,17 +786,34 @@ static void light_frame(const muse_pose_t *p, float now, float dt, float open, f
         m.waves += (r.waves - m.waves) * e;
         m.flicker += (r.flicker - m.flicker) * e;
     }
-    s_lt.base = approach(s_lt.base, m.base, p->mode == MUSE_MODE_SPEAKING ? 20 : 6, dt);
-    s_lt.amp = approach(s_lt.amp, m.amp, p->mode == MUSE_MODE_SPEAKING ? 20 : 6, dt);
+    if (s_face == 0 && now < s_tell_until) {
+        m.flicker = 0.7f;
+    }
+    s_lt.base = approach(s_lt.base, m.base, p->mode == MUSE_MODE_SPEAKING || p->mode == MUSE_MODE_LISTENING ? 20 : 6, dt);
+    s_lt.amp = approach(s_lt.amp, m.amp, p->mode == MUSE_MODE_SPEAKING || p->mode == MUSE_MODE_LISTENING ? 20 : 6, dt);
     s_lt.waves = approach(s_lt.waves, m.waves, 4, dt);
     s_lt.flicker = approach(s_lt.flicker, m.flicker, 8, dt);
     s_lt.phase += m.speed * dt;
 
     float fl = s_lt.flicker > 0.01f && rnd() < 0.5f ? 1.0f - s_lt.flicker * rnd() : 1.0f;
+    float bpos[4], bamp[4];
+    int nb = 0;
+    for (int k = 0; k < s_burst_n; k++) {   /* a packet crosses the light in 0.55 s */
+        float age = (now - s_burst[k].t0) / 0.55f;
+        if (age >= 0 && age < 1.0f) {
+            bpos[nb] = s_burst[k].dir > 0 ? age : 1.0f - age;
+            bamp[nb++] = 0.9f * (1.0f - age * 0.6f);
+        }
+    }
     for (int i = 0; i < 256; i++) {
-        float c = cosf(6.2832f * ((float)i / 255.0f * s_lt.waves - s_lt.phase));
+        float x = (float)i / 255.0f;
+        float c = cosf(6.2832f * (x * s_lt.waves - s_lt.phase));
         float v = 0.5f + 0.5f * c, v2 = v * v;
         float in = (s_lt.base + s_lt.amp * v2 * v2 * v2) * fl;   /* v^6: short, distinct pulses, dark between */
+        for (int k = 0; k < nb; k++) {
+            float d = (x - bpos[k]) * 14.0f;
+            in += bamp[k] / (1.0f + d * d * d * d);
+        }
         s_wave[i] = (uint8_t)(in >= 1.0f ? 255 : in <= 0 ? 0 : in * 255.0f);
     }
 }
@@ -748,6 +845,13 @@ static void screen_frame(const muse_pose_t *p, float now, float dt, float b, flo
     }
     t.lookx = s_tlookx;
     t.looky = s_tlooky;
+    if (now < s_look_until) {   /* a touch, a page coming in */
+        t.lookx = s_look_x * r * 0.9f;
+        t.looky = s_look_y * r * 0.6f;
+    } else {
+        t.lookx += s_tilt_x * r * 0.5f;
+        t.looky += s_tilt_y * r * 0.4f;
+    }
     t.bob = 1.5f * sinf(now * 1.4f);   /* floats in its screen */
     if (m == MUSE_MODE_IDLE && !rc) {   /* idle habits: a wink, a curious brow, a happy moment */
         if (now >= s_next_wink) {
@@ -801,6 +905,7 @@ static void screen_frame(const muse_pose_t *p, float now, float dt, float b, flo
         t.lookx *= 0.4f;
         t.looky *= 0.4f;
         t.talk = open;
+        t.vis = s_tone_z > 0.5f ? clamp01((s_tone_z - 0.5f) * 1.6f) : -clamp01((-s_tone_z - 0.5f) * 1.6f);
         t.sy = 1.0f + 0.12f * open;            /* the eyes bounce with the syllables */
         t.brow_l = t.brow_r = r * 0.3f * open;
         t.bob += 3.0f * open;
@@ -895,6 +1000,7 @@ static void screen_frame(const muse_pose_t *p, float now, float dt, float b, flo
     s->brow_r = approach(s->brow_r, t.brow_r, 14, dt);
     s->tilt = approach(s->tilt, t.tilt, 12, dt);
     s->talk = m == MUSE_MODE_SPEAKING ? t.talk : approach(s->talk, t.talk, 14, dt);
+    s->vis = approach(s->vis, m == MUSE_MODE_SPEAKING ? t.vis : 0, 20, dt);
     s->curve = approach(s->curve, t.curve, 12, dt);
     s->bob = approach(s->bob, t.bob, 20, dt);
     s->blush = approach(s->blush, t.blush, 6, dt);
@@ -914,7 +1020,7 @@ static void screen_frame(const muse_pose_t *p, float now, float dt, float b, flo
     uint32_t key = 2166136261u;
     float q[] = { s->lookx, s->looky, s->open_l, s->open_r, s->sx * 8, s->sy * 8, s->brow_l, s->brow_r,
                   s->tilt * 8, s->talk * 16, s->curve * 8, s->bob, s->blush * 8, s->tear * 8, s->sweat * 8,
-                  s->sparkle * 8, s->dots * 8, s_cr / 4, s_cg / 4, s_cb / 4,
+                  s->sparkle * 8, s->dots * 8, s->vis * 8, s_cr / 4, s_cg / 4, s_cb / 4,
                   (s->dots + s->tear + s->sweat + s->sparkle) > 0.02f ? now * 20 : 0 };
     for (size_t i = 0; i < sizeof(q) / sizeof(q[0]); i++) {
         key = (key ^ (uint32_t)(int32_t)lroundf(q[i] * 16.0f)) * 16777619u;   /* 1/16 px: slow drifts move every frame */
@@ -973,6 +1079,34 @@ bool muse_portrait_render(const muse_pose_t *p, int face, float glitch)
     }
     /* the raw per-chunk level: the UI's smoothed one blurs the syllables away */
     float open = muse_lip_agc(&s_agc, p->mode == MUSE_MODE_SPEAKING ? muse_state_level() : 0, dt);
+    s_in = muse_lip_agc(&s_agc_in, p->mode == MUSE_MODE_LISTENING ? muse_state_level() : 0, dt);
+    float on_now = p->mode == MUSE_MODE_SPEAKING ? open : s_in, on_prev = p->mode == MUSE_MODE_SPEAKING ? s_open_prev : s_in_prev;
+    if (on_now > 0.55f && on_prev < 0.35f) {   /* a syllable starts: launch a packet */
+        int k = s_burst_n < 4 ? s_burst_n++ : 0;
+        if (s_burst_n == 4) {   /* full: replace the oldest */
+            for (int j = 1; j < 4; j++) {
+                k = s_burst[j].t0 < s_burst[k].t0 ? j : k;
+            }
+        }
+        s_burst[k].t0 = now;
+        s_burst[k].dir = p->mode == MUSE_MODE_SPEAKING ? 1.0f : -1.0f;
+    }
+    if (p->mode == MUSE_MODE_SPEAKING) {
+        if (open < 0.12f && s_open_prev > 0.45f) {
+            s_mm_until = now + 0.09f;   /* a sharp closure between syllables: lips pressed */
+        }
+        float tone = muse_state_tone();   /* log10 brightness of the last audio chunk; 0 = no voice */
+        if (tone < 0 && muse_state_level() > 0.05f) {
+            s_tone_mean += (tone - s_tone_mean) * clamp01(dt * 1.2f);   /* this reply's own average... */
+            s_tone_dev += (fabsf(tone - s_tone_mean) - s_tone_dev) * clamp01(dt * 1.2f);   /* ...and spread */
+            float dev = s_tone_dev > 0.12f ? s_tone_dev : 0.12f;
+            s_tone_z = (tone - s_tone_mean) / dev;
+        }
+    } else {
+        s_tone_z = 0;
+    }
+    s_open_prev = open;
+    s_in_prev = s_in;
     float b = p->mode == MUSE_MODE_OFF ? 1.0f : blink(now);
     if (s_h.kind == 1) {
         screen_frame(p, now, dt, b, open);
@@ -1281,7 +1415,8 @@ static void build_light(void)
     float mw = s_h.mouth_w, imw = 1.0f / mw;
     float mx = s_h.mouth[0] + s->lookx * 0.5f, my = s_h.mouth[1] + s->looky * 0.5f + s->bob;
     float tm = clamp01(s->talk * 4.0f), line_k = (1.0f - tm) * (1.0f - s->dots);
-    float rx = 0.36f - 0.06f * s->talk, ry = 0.06f + 0.3f * s->talk, irx = 1.0f / rx, iry = 1.0f / ry;
+    float rx = (0.36f - 0.06f * s->talk) * (1.0f + 0.3f * s->vis), ry = (0.06f + 0.3f * s->talk) * (1.0f - 0.35f * s->vis);
+    float irx = 1.0f / rx, iry = 1.0f / ry;   /* "ee" spreads the oval wide and flat, "oo" draws it in */
     for (int i = 0; i < 3; i++) {
         s_lk.dot_ph[i] = 0.35f + 0.65f * maxf(sinf(s_now * 5.0f - (float)i * 0.9f), 0);
     }

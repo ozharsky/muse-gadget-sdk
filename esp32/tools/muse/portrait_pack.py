@@ -35,10 +35,11 @@ FACE = (0.15, 0.85, 0.22, 0.82)
 VARIANTS = (("eyes_half", EYES, 2), ("eyes_left", EYES, 2), ("eyes_right", EYES, 2), ("eyes_up", EYES, 2),
             ("eyes_down", EYES, 2), ("eyes_wide", EYES, 2), ("eyes_angry", EYES, 2), ("brow_raise", EYES, 1),
             ("wink", EYES, 1), ("eyes_glow", EYES, 2), ("eyes_closed", EYES, 2), ("sad", FACE, 3), ("laugh", FACE, 3),
-            ("smile", MOUTH, 1), ("smirk", MOUTH, 1), ("mouth_1", MOUTH, 1), ("mouth_2", MOUTH, 1), ("mouth_3", MOUTH, 1))
-MAX_PATCHES = 20
+            ("smile", MOUTH, 1), ("smirk", MOUTH, 1), ("mouth_1", MOUTH, 1), ("mouth_2", MOUTH, 1), ("mouth_3", MOUTH, 1),
+            ("mouth_ee", MOUTH, 1), ("mouth_oo", MOUTH, 1), ("mouth_mm", MOUTH, 1))   # visemes: spread, rounded, pressed
+MAX_PATCHES = 24
 HDR = "<4sHBBII" + "4hhhhhhIhhhh" + "BB4HII" * MAX_PATCHES + "III"   # ... light_off, phase_off, light colour
-assert struct.calcsize(HDR) == 418, "pack header: keep in step with pack_hdr_t in muse_portrait.c"
+assert struct.calcsize(HDR) == 490, "pack header: keep in step with pack_hdr_t in muse_portrait.c"
 
 
 def prep(path, black=None):
@@ -207,7 +208,7 @@ def main():
 
     flat = [x for p in patches for x in p] + [0] * 8 * (MAX_PATCHES - len(patches))
     s = scr or dict(eye_l=(0, 0), eye_r=(0, 0), eye_rad=0, brow_dy=0, mouth=(0, 0), mouth_w=0, glow=0, clip=(0, 0, 0, 0))
-    hdr = struct.pack(HDR, b"MPT1", SIZE, kind, len(patches), jpg_off, len(jpg),
+    hdr = struct.pack(HDR, b"MPT2", SIZE, kind, len(patches), jpg_off, len(jpg),
                       *s["eye_l"], *s["eye_r"], s["eye_rad"], s["brow_dy"], *s["mouth"], s["mouth_w"], s["glow"], *s["clip"],
                       *flat, light_off, phase_off, light_col)
     blob = hdr + b"\0" * (-len(hdr) % 4) + bytes(data)

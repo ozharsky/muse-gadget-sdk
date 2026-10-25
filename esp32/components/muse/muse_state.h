@@ -51,6 +51,9 @@ muse_mode_t muse_state_mode(float *secs_in_mode);
 /* Live audio level (mic while listening, playback while speaking), 0..1. */
 void muse_state_set_level(float level);
 float muse_state_level(void);
+/* The playing voice's brightness (muse_audio_brightness): the faces' mouth shapes. */
+void muse_state_set_tone(float tone);
+float muse_state_tone(void);
 
 /* Progress of the current phase (recording length or playback), 0..1. */
 void muse_state_set_progress(float progress);

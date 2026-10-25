@@ -47,3 +47,7 @@ esp_err_t muse_imu_read(int16_t mg[3]);
 
 /* Throttled (slower asleep) gesture poll; returns MUSE_IMU_* edges. */
 unsigned muse_imu_poll(int64_t now_us, bool asleep);
+
+/* How far the last sample leans from the resting pose (re-learnt after 2 s still), about -1..1
+ * per screen axis. False before the first rest. Any task. */
+bool muse_imu_tilt(float *x, float *y);

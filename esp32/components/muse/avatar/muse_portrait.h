@@ -26,6 +26,12 @@ uint32_t muse_portrait_accent(int face, muse_mode_t mode);
 // The whole face redraws next frame (something else drew over the canvas: a clip).
 void muse_portrait_redraw_all(void);
 
+// Send the eyes somewhere for secs (a touch, a page coming in): x right, y down, -1..1. LVGL task.
+void muse_portrait_look(float x, float y, float secs);
+
+// The gadget's tilt away from its resting pose, -1..1: the eyes drift with it. Any task.
+void muse_portrait_tilt(float x, float y);
+
 // A reaction by name (the relay's [react:...] moods): true if the portrait plays it.
 bool muse_portrait_react(const char *name);
 

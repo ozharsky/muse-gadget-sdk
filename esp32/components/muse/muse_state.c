@@ -98,6 +98,18 @@ float muse_state_level(void)
     return s_level;
 }
 
+static volatile float s_tone;
+
+void muse_state_set_tone(float tone)
+{
+    s_tone = tone;
+}
+
+float muse_state_tone(void)
+{
+    return s_tone;
+}
+
 void muse_state_set_progress(float progress)
 {
     s_progress = progress < 0 ? 0 : (progress > 1 ? 1 : progress);
