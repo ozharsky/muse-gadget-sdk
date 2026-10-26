@@ -70,6 +70,25 @@ no console window to close — a console-window kill aborts the process with
 curls the relay, the LAN door and the funnel, restarts what is down and logs what is
 not.
 
+## Voice pacing and pronunciation
+
+Chirp 3 HD reads punctuation, so each sentence the relay synthesizes is sent as **`markup`**
+with a trailing `[pause short]` (and `[pause]` after a written ellipsis): chunks stop sounding
+clipped. `TTS_RATE` (env) sets `speaking_rate` (0.25–2.0).
+
+`pronunciations.json` next to the relay overrides how names are said:
+
+```json
+{ "BEEPBOP": "ˈbiːpbɒp", "Etsy": "ˈɛtsi" }
+```
+
+IPA only (`PHONETIC_ENCODING_IPA`), each phrase **unique after case-folding** (the API rejects
+`BEEPBOP` + `Beepbop` as duplicates). The relay sends them as the API's
+`customPronunciations.pronunciations` with every request; a voice or locale that rejects either
+markup or the overrides falls back to plain text for that sentence and logs
+`tts: markup/pronunciation rejected`. Edits take effect on the next relay restart (the list is
+cached per process).
+
 ## Tests
 
 ```bash

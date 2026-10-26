@@ -127,6 +127,41 @@ SESSION_RESET_TOKENS = 0        # 0 = OFF: never silently drop a conversation. T
                                 # like any long chat now -- revisit with compression if big turns get heavy.
 TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-Chirp3-HD-Algenib")   # Hermes-mode voice (config key MUSE_HERMES_TTS_VOICE)
 TTS_LANG = "-".join(TTS_VOICE.split("-")[:2])
+TTS_RATE = float(os.environ.get("TTS_RATE", "1.0"))                  # speaking_rate, 0.25..2.0 (Chirp 3 HD)
+# Chirp 3 HD pacing: `[pause]` / `[pause short]` / `[pause long]` in the `markup` input add
+# breath where punctuation alone reads rushed (docs.cloud.google.com/text-to-speech/docs/chirp3-hd).
+# Pronunciation overrides live in pronunciations.json next to this file:
+#   {"BEEPBOP": "ˈbiːbɒp", "Oleg": "oʊˈlɛɡ", ...}   (IPA; Preview API field, en-US/en-GB fine)
+PRON_FILE = os.path.join(HERE, "pronunciations.json")
+
+
+def load_pronunciations():
+    """Pronunciation overrides as the API's CustomPronunciations message:
+    {"pronunciations": [{"phrase", "phoneticEncoding", "pronunciation"}, ...]}."""
+    try:
+        with open(PRON_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        entries = [{"phrase": k, "phoneticEncoding": "PHONETIC_ENCODING_IPA", "pronunciation": v}
+                   for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)]
+        return {"pronunciations": entries} if entries else None
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print("pronunciations.json ignored (%s)" % e, file=sys.stderr, flush=True)
+        return None
+
+
+def spoken_markup(text):
+    """The sentence as TTS markup: sentence-final punctuation earns a short breath and a
+    written ellipsis a full pause, so a chunked reply stops sounding clipped between pieces."""
+    s = text.strip()
+    if not s:
+        return s
+    if s.endswith("..."):
+        return s + " [pause]"
+    if s[-1] in ".!?":
+        return s + " [pause short]"
+    return s + " [pause short]"
 
 
 def read_hermes_key():
@@ -532,24 +567,44 @@ def read_tts_key():
     return _tts_key_cache or None
 
 
+_pron_cache = None
+
+
 def tts_synth(text, voice=None):
-    """Google TTS for one sentence: returns raw MP3 bytes, or None."""
+    """Google TTS for one sentence: returns raw MP3 bytes, or None.
+    Uses `markup` for pause tags and the pronunciation overrides when present; a voice or
+    locale that rejects either falls back to plain `text` so a reply never loses its voice."""
+    global _pron_cache
     import base64
     key = read_tts_key()
     if not key:
         return None
-    body = {"input": {"text": text},
-            "voice": {"languageCode": TTS_LANG, "name": voice or TTS_VOICE},
-            "audioConfig": {"audioEncoding": "MP3", "speakingRate": 1.0}}
-    req = urllib.request.Request(
-        "https://texttospeech.googleapis.com/v1/text:synthesize?key=" + key,
-        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    try:
+    if _pron_cache is None:
+        _pron_cache = load_pronunciations()
+    voice_cfg = {"languageCode": TTS_LANG, "name": voice or TTS_VOICE}
+    audio_cfg = {"audioEncoding": "MP3", "speakingRate": TTS_RATE}
+
+    def synth(inp):
+        body = {"input": inp, "voice": voice_cfg, "audioConfig": audio_cfg}
+        req = urllib.request.Request(
+            "https://texttospeech.googleapis.com/v1/text:synthesize?key=" + key,
+            data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
         r = json.load(urllib.request.urlopen(req, timeout=20))
         return base64.b64decode(r["audioContent"])
+
+    marked = {"markup": spoken_markup(text)}
+    if _pron_cache:
+        marked["customPronunciations"] = _pron_cache
+    try:
+        return synth(marked)
     except Exception as e:
-        print("tts synth failed:", e, file=sys.stderr, flush=True)
-        return None
+        print("tts: markup/pronunciation rejected (%s); falling back to plain text" % e,
+              file=sys.stderr, flush=True)
+        try:
+            return synth({"text": text})   # plain path: no pauses, no overrides
+        except Exception as e2:
+            print("tts synth failed:", e2, file=sys.stderr, flush=True)
+            return None
 
 
 _SENT_RE = re.compile(r"[^.!?]*[.!?]+[\s\'\"»)]*")

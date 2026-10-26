@@ -89,7 +89,7 @@ def read_api_key_file(path):
     Returns None on a missing file or an ``api_server`` block with no non-empty ``key:``.
     """
     try:
-        lines = open(_resolve_path(path)).read().splitlines()
+        lines = open(_resolve_path(path), encoding="utf-8", errors="replace").read().splitlines()
     except OSError:
         return None
     for i, line in enumerate(lines):
@@ -111,7 +111,7 @@ def read_personality_file(path):
     if not path:
         return None
     try:
-        return open(_resolve_path(path)).read().strip()
+        return open(_resolve_path(path), encoding="utf-8", errors="replace").read().strip()
     except OSError:
         return None
 
@@ -143,7 +143,7 @@ def load(path=None):
     an exception, so a half-written file can't take the relay's turns down."""
     path = path or AGENTS_FILE
     try:
-        data = json.load(open(_resolve_path(path)))
+        data = json.load(open(_resolve_path(path), encoding="utf-8", errors="replace"))
         if not isinstance(data, dict):
             raise ValueError("agents.json is not a JSON object")
     except (OSError, ValueError) as e:

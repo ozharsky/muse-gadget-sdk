@@ -505,3 +505,25 @@ class HardeningTests(unittest.TestCase):
             lines = open(p).read().splitlines()
             self.assertEqual(len(lines), 2)
             self.assertRegex(lines[0], r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] hello$")
+
+
+class PacingAndPronunciationTests(unittest.TestCase):
+    def test_spoken_markup_pauses(self):
+        self.assertEqual(relay.spoken_markup("Done."), "Done. [pause short]")
+        self.assertEqual(relay.spoken_markup("Wait..."), "Wait... [pause]")
+        self.assertEqual(relay.spoken_markup("and then"), "and then [pause short]")
+
+    def test_pronunciations_load_and_bad_file_is_ignored(self):
+        import json, os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "pronunciations.json")
+            with open(p, "w") as f:
+                json.dump({"Etsy": "ˈɛtsi", "bad": 5}, f)
+            old = relay.PRON_FILE
+            relay.PRON_FILE = p
+            try:
+                got = relay.load_pronunciations()
+            finally:
+                relay.PRON_FILE = old
+            self.assertEqual(got, {"pronunciations": [{"phrase": "Etsy", "phoneticEncoding":
+                                    "PHONETIC_ENCODING_IPA", "pronunciation": "ˈɛtsi"}]})
