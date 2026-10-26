@@ -34,9 +34,9 @@ to be executed end to end by an assistant (build → flash → connect). The age
 contract lives in [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md).
 
 <p align="center">
-  <img src=".github/images/fork/face-muse.png" width="200" alt="Muse — the painted portrait face, captured on the glass">
-  <img src=".github/images/fork/face-hermes.png" width="200" alt="Hermes — the painted portrait face, captured on the glass">
-  <img src=".github/images/fork/face-beepbop.png" width="200" alt="BEEPBOP (ALT profile) — the painted portrait face, captured on the glass">
+  <img src=".github/images/fork/face-muse.gif" width="200" alt="Muse — circuit-woman portrait: blink, glance, smile, and lip-sync mouth shapes">
+  <img src=".github/images/fork/face-hermes.gif" width="200" alt="Hermes — winged-helmet portrait: blink, glance, smile, and lip-sync mouth shapes">
+  <img src=".github/images/fork/face-beepbop.gif" width="200" alt="BEEPBOP (ALT profile) — green robot whose screen face lights up and animates">
 </p>
 
 <p align="center">
@@ -44,9 +44,25 @@ contract lives in [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md).
   <img src=".github/images/fork/settings.png" width="250" alt="Settings: Agents, Notifications, Wi-Fi, Muse, Hermes, Bluetooth">
 </p>
 
-<p align="center"><i>The three portrait faces — Muse, Hermes, BEEPBOP (ALT) — captured on the actual
-466×466 panel · the Glance page with live cards (weather, agent state, home-server CPU/GPU) ·
-Settings with the Agents row. Pixel faces remain one switch away (<code>&gt;portrait=0</code>)</i></p>
+<p align="center"><i>The three portrait faces — Muse (circuit woman), Hermes (winged helmet) and
+BEEPBOP (green robot) — animated from the same expression and lip-shape frames the device
+blends · the Glance page with live cards (weather, agent state, home-server CPU/GPU) ·
+Settings with the Agents row. Pixel faces remain one switch away
+(<code>&gt;portrait=0</code>)</i></p>
+
+**In short:** one round board, three agents (Muse cloud, Hermes, plus any relay
+profile), a painted face that blinks and lip-syncs, hold-to-talk voice with
+streamed Google Chirp 3 HD replies, a Glance page with live cards, notifications
+your agent can push on its own, and a safe-flash path with boot rollback.
+
+| Control | Does |
+|---|---|
+| Hold **BOOT** | talk — release to send |
+| **Double-tap BOOT** | next agent slot (Muse → Hermes → ALT) |
+| Tap **PWR** | screen off (any press wakes); **double-press** toggles BLE phone setup; hold 1.5 s powers off |
+| Tap the **face** | pet it (reaction); opens the waiting notification, if one is pending |
+| **Swipe** left/right | Glance ← face → Settings |
+| **Flip face-down** | quiet park and stop the current reply; pick it up or tilt it to wake |
 
 ---
 
@@ -218,8 +234,9 @@ that firmware must survive rather than fix:
 - Restart paths: **Settings → Restart**, console `>reboot`, the watchdog hard
   ceiling, and a host-side USB reset (`tools/muse/reset_gadget.py reset`) that works
   on a fully hung firmware — the reset is done by the chip's USB peripheral, not by
-  code. On the **1.75C the PWR key is the talk button**; on boards whose PWR switch
-  is dead, a deep-sleep soft-off is the only software "off" (BOOT wakes it).
+  code. On the **1.75C, BOOT is the talk button and PWR sleeps, holds to power off,
+  or toggles phone setup on a double-press**; on boards whose PWR switch is dead, a
+  deep-sleep soft-off is the only software "off" (BOOT wakes it).
 - **Black box in NVS** (`>diag`) records why the last restart happened and what the
   display was doing. On 8 MB boards a flash coredump partition captures the panic
   backtrace too; the 1.75C profiles log panics over serial and keep the black box.
@@ -249,9 +266,10 @@ agent's state (idle / working / blocked tasks / next reminder) and the home
 server's CPU/GPU temperatures and RAM, each with its own icon and accent colour.
 Cards are fetched when the page opens and refreshed every few minutes while it
 stays on screen (the `UPDATED n MIN AGO` line ticks every 30 s), and are served by
-the relay's `/glance` endpoint (or written by any script: `POST /glance`). Face-down
-quietly parks the device; motion gestures from the QMI8658 (nod to answer, shake to
-dismiss) work on the 1.75C.
+the relay's `/glance` endpoint (or written by any script: `POST /glance`). The
+QMI8658 on the 1.75C adds motion: face-down parks the device in quiet mode, tilting
+it wakes it (or gets an alert reaction), shaking it gets a confused look, and
+flipping it face-down stops whatever it is saying.
 
 ### 🗣️ Voice — streamed notes in, paced speech out
 
@@ -327,7 +345,7 @@ themselves.
 | display (2026-10-22/23) | `2a89df3` `a27d2b6` `f09cc66` `0132817` | **Tear-free whole frames** at 80 MHz QSPI timed to the TE signal, 40/60 fps on USB and 25 on battery, frames never starved; iPhone link removed |
 | glance (2026-10-20/23) | `7ef284e` `6bfc482` `a2c328f` `6df7cd1` | Glance page + idle cards (weather, agents, system/CPU/GPU), face-down quiet, nod/shake gestures, timezone at boot |
 | speech (2026-10-21/23) | `aee1635` `1d3d60f` `4bbdbfa` | Voice notes stream up while spoken (chunked ADPCM), 10 s decoded-reply buffer, empty TTS pieces skipped |
-| power/175C (2026-10-20/23) | `bded6ad` `4fcad72` `9d08ae8` | PWR is the talk button on the 1.75C (AXP2101 shutdown off); talk button only talks; PMU power state on screen; motion gestures |
+| power/175C (2026-10-20/23) | `bded6ad` `4fcad72` `9d08ae8` | AXP2101 long-press shutdown off, so firmware owns power-off; talk button only talks; PMU power state on screen; motion gestures |
 | media/logs (2026-10-19/21) | `4808ba2` `1e484a7` `d7b56f4` `cc09427` | MJPEG clip player, flash asset pack, persistent log history in flash (`>log.dump/save/clear`) |
 | setup | `8952e2c` `b3c2922` `93acda3` | The setup page's browser flow documented; **any agent** connectable from the page: relay host/URL/token over BLE + serial (NVS-backed, relay gates all runtime), *Your own agent* + Save & restart; `e2e_ble_setup.py` full-radio E2E; headless console helpers `>pair.code` `>ble.setup=` `>wifi.on=` |
 | sharing | `a0583fe` `8918603` `19a5bed` `b8dfb13` `9d7db67` `5ce1023` | On-glass README artwork + idle GIFs, `docs/AGENT-PROTOCOL.md` + `docs/AI-SETUP.md`, the bundled `relay/` (suite green out of the box), personal-data sanitize; boot-repair self-heal for the lost-pairing state |

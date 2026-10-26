@@ -92,7 +92,7 @@ cached per process).
 ## Tests
 
 ```bash
-python -m unittest test_relay test_notifications     # ~78 tests, no network needed
+python -m unittest test_relay test_notifications     # 80 tests, no network needed
 ```
 
 ## Security posture
