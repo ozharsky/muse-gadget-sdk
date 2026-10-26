@@ -1995,7 +1995,8 @@ static size_t tts_body(char *body, size_t cap, const char *text, const char *voi
             body[n++] = *c;
         }
     }
-    snprintf(body + n, cap - n, "\"%s\"%s},\"voice\":{\"languageCode\":\"%.*s\",\"name\":\"%s\"},"
+    /* the pause tag belongs INSIDE the string: "text [pause short]" */
+    snprintf(body + n, cap - n, "%s\"%s},\"voice\":{\"languageCode\":\"%.*s\",\"name\":\"%s\"},"
              "\"audioConfig\":{\"audioEncoding\":\"MP3\",\"speakingRate\":%.2f}}",
              fancy ? tts_pause_tag(text) : "", fancy ? TTS_PRON_JSON : "", lang_len, voice, voice, rate);
     return strlen(body);
