@@ -1946,10 +1946,76 @@ static keep_t s_keep_tts;     /* texttospeech.googleapis.com */
 static keep_t s_keep_relay;   /* the relay's GETs: notifications, their history, the glance cards */
 static keep_t s_keep_stream;  /* the turn's client; each turn connects afresh (esp_http_client_open always does) */
 
+/* Chirp 3 HD pacing and pronunciation (docs.cloud.google.com/text-to-speech/docs/chirp3-hd):
+ * pauses come from `[pause]` / `[pause short]` in the markup input, names from an IPA table
+ * beside it. Every phrase must be unique after case-folding; the API 400s duplicates. */
+static const char TTS_PRON_JSON[] =
+    ",\"customPronunciations\":{\"pronunciations\":["
+    "{\"phrase\":\"BEEPBOP\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"ˈbiːpbɒp\"},"
+    "{\"phrase\":\"Muse\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"mjuːz\"},"
+    "{\"phrase\":\"Hermes\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"ˈhɜːrmiːz\"},"
+    "{\"phrase\":\"Oleg\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"oʊˈlɛɡ\"},"
+    "{\"phrase\":\"Zharsky\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"ˈʒɑːrski\"},"
+    "{\"phrase\":\"Etsy\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"ˈɛtsi\"},"
+    "{\"phrase\":\"Kalshi\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"ˈkælʃi\"},"
+    "{\"phrase\":\"SHODAN\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"ˈʃoʊdæn\"},"
+    "{\"phrase\":\"Ollama\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"oʊˈlɑːmə\"},"
+    "{\"phrase\":\"Gemini\",\"phoneticEncoding\":\"PHONETIC_ENCODING_IPA\",\"pronunciation\":\"ˈdʒɛmɪnaɪ\"}"
+    "]}";
+
+static const char *tts_pause_tag(const char *text)
+{
+    size_t n = strlen(text);
+    while (n && (text[n - 1] == ' ' || text[n - 1] == '\n')) {
+        n--;
+    }
+    if (n >= 3 && !strncmp(text + n - 3, "...", 3)) {
+        return " [pause]";
+    }
+    if (n && (text[n - 1] == '.' || text[n - 1] == '!' || text[n - 1] == '?')) {
+        return " [pause short]";
+    }
+    return "";
+}
+
+/* The request body; `fancy` adds the pause tag and the pronunciation table. Returns its length. */
+static size_t tts_body(char *body, size_t cap, const char *text, const char *voice, int lang_len,
+                       double rate, bool fancy)
+{
+    size_t n = snprintf(body, cap, "{\"input\":{\"%s\":\"", fancy ? "markup" : "text");
+    for (const char *c = text; *c && n + 8 < cap; c++) {
+        if (*c == '"' || *c == '\\') {
+            body[n++] = '\\';
+            body[n++] = *c;
+        } else if (*c == '*' || *c == '#') {
+            continue;   /* markdown: not worth saying */
+        } else if ((uint8_t)*c < 0x20) {
+            body[n++] = ' ';
+        } else {
+            body[n++] = *c;
+        }
+    }
+    snprintf(body + n, cap - n, "\"%s\"%s},\"voice\":{\"languageCode\":\"%.*s\",\"name\":\"%s\"},"
+             "\"audioConfig\":{\"audioEncoding\":\"MP3\",\"speakingRate\":%.2f}}",
+             fancy ? tts_pause_tag(text) : "", fancy ? TTS_PRON_JSON : "", lang_len, voice, voice, rate);
+    return strlen(body);
+}
+
+static uint32_t tts_billed_chars(const char *text)
+{
+    uint32_t n = 0;
+    for (const char *c = text; *c; c++) {
+        if (*c != '*' && *c != '#' && ((uint8_t)*c & 0xC0) != 0x80) {
+            n++;   /* a character, not each of its UTF-8 bytes */
+        }
+    }
+    return n;
+}
+
 static bool fetch_tts(const char *text, bool last = true, bool first = true)
 {
     const size_t CAP = 192 * 1024;   /* one 90-char piece is ~66 KB of JSON; 900 KB was the whole-message era */
-    char *body = static_cast<char *>(psram_alloc(TEXT_MAX * 2 + 256));
+    char *body = static_cast<char *>(psram_alloc(TEXT_MAX * 2 + 1400));
     char *resp = static_cast<char *>(psram_alloc(CAP));
     bool ok = false;
     uint32_t billed = 0;   /* characters actually sent, as Google counts them */
@@ -1965,28 +2031,9 @@ static bool fetch_tts(const char *text, bool last = true, bool first = true)
         goto out;
     }
     {
-        size_t n = snprintf(body, 128, "{\"input\":{\"text\":\"");
-        for (const char *c = text; *c && n < TEXT_MAX * 2 - 8; c++) {
-            if (*c == '"' || *c == '\\') {
-                body[n++] = '\\';
-                body[n++] = *c;
-                billed++;
-            } else if (*c == '*' || *c == '#') {
-                continue;   /* markdown: not worth saying */
-            } else if ((uint8_t)*c < 0x20) {
-                body[n++] = ' ';
-                billed++;
-            } else {
-                body[n++] = *c;
-                if (((uint8_t)*c & 0xC0) != 0x80) {
-                    billed++;   /* a character, not each of its UTF-8 bytes */
-                }
-            }
-        }
-        snprintf(body + n, 200, "\"},\"voice\":{\"languageCode\":\"%.*s\",\"name\":\"%s\"},"
-                 "\"audioConfig\":{\"audioEncoding\":\"MP3\",\"speakingRate\":%.2f}}", lang_len, voice, voice, hermes_mode() ? 1.0 : CONFIG_MUSE_TTS_RATE_PCT / 100.0);
-    }
-    {
+        size_t cap = TEXT_MAX * 2 + 1400;
+        const double rate = hermes_mode() ? 1.0 : CONFIG_MUSE_TTS_RATE_PCT / 100.0;
+        billed = tts_billed_chars(text);
         static const char URL[] = "https://texttospeech.googleapis.com/v1/text:synthesize?key=" CONFIG_MUSE_TTS_GOOGLE_KEY;
         tts_buf_t buf = { resp, 0, CAP, false };
         esp_http_client_config_t cfg = {};
@@ -2000,19 +2047,28 @@ static bool fetch_tts(const char *text, bool last = true, bool first = true)
         cfg.event_handler = tts_http_evt;
         cfg.user_data = &buf;
         int64_t t0 = now_us();
-        int status;
-        esp_err_t err = keep_perform(&s_keep_tts, &cfg, [&](esp_http_client_handle_t h) {
-            buf.len = 0;
-            buf.over = false;
-            esp_http_client_set_header(h, "Content-Type", "application/json");
-            esp_http_client_set_post_field(h, body, strlen(body));
-        }, &status);
-        if (err != ESP_OK || status != 200 || buf.over) {
-            ESP_LOGW(TAG, "tts: request failed (err %s, HTTP %d%s)", esp_err_to_name(err), status, buf.over ? ", too big" : "");
-            if (status != 200 && buf.len) {
-                buf.p[buf.len < 300 ? buf.len : 299] = 0;   /* Google's error text */
+        int status = 0;
+        esp_err_t err = ESP_FAIL;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            bool fancy = attempt == 0;   /* a voice/locale that rejects markup or the table gets plain text */
+            tts_body(body, cap, text, voice, lang_len, rate, fancy);
+            err = keep_perform(&s_keep_tts, &cfg, [&](esp_http_client_handle_t h) {
+                buf.len = 0;
+                buf.over = false;
+                esp_http_client_set_header(h, "Content-Type", "application/json");
+                esp_http_client_set_post_field(h, body, strlen(body));
+            }, &status);
+            if (err == ESP_OK && status == 200 && !buf.over) {
+                break;
+            }
+            ESP_LOGW(TAG, "tts: %s request failed (err %s, HTTP %d%s)", fancy ? "markup" : "plain",
+                     esp_err_to_name(err), status, buf.over ? ", too big" : "");
+            if (fancy && status != 200 && buf.len) {
+                buf.p[buf.len < 200 ? buf.len : 199] = 0;   /* Google's error text */
                 ESP_LOGW(TAG, "tts: %s", buf.p);
             }
+        }
+        if (err != ESP_OK || status != 200 || buf.over) {
             goto out;
         }
         buf.p[buf.len] = 0;
