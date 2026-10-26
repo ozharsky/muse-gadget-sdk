@@ -2521,8 +2521,11 @@ esp_err_t muse_ui_start(void)
         ESP_LOGE(TAG, "display init failed");
         return ESP_FAIL;
     }
-    lv_display_add_event_cb(disp, refr_event, LV_EVENT_REFR_START, NULL);   /* >refr */
+#if LV_USE_SNAPSHOT
+    /* Bench-only (>refr): the counters live in the snapshot block above. */
+    lv_display_add_event_cb(disp, refr_event, LV_EVENT_REFR_START, NULL);
     lv_display_add_event_cb(disp, refr_event, LV_EVENT_REFR_READY, NULL);
+#endif
 
     s_image_mutex = xSemaphoreCreateMutex();
     muse_board->display_lock(-1);

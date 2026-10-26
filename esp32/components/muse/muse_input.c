@@ -1025,9 +1025,13 @@ static bool console_command(char *line, bool whole)
         return true;
     }
     if (!strcmp(line, "imu")) {
+#if CONFIG_MUSE_IMU
         int16_t mg[3] = { 0 };
         esp_err_t err = muse_imu_read(mg);
         printf("@imu %s present=%d %d %d %d\n", esp_err_to_name(err), muse_imu_present(), mg[0], mg[1], mg[2]);
+#else
+        printf("@imu absent (no IMU on this board)\n");
+#endif
         return true;
     }
     if (!strcmp(line, "batt.cue")) {
