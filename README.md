@@ -20,30 +20,33 @@ limitations under the License.
 
 **This repo is a fork of [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk),
 developed on the `hermes-local` branch (the default branch here).** Upstream
-turns the Waveshare ESP32-S3 1.43″ round AMOLED board into a voice companion for
-the Muse cloud agent; this fork turns the same hardware into a **switchable
-companion for three different agents** — it talks to the one you picked, reaches
-out on its own when things happen, and survives the display freezes the stock
-firmware panics on.
+turns a Waveshare ESP32-S3 round AMOLED board into a voice companion for the Muse
+cloud agent; this fork turns it into a **switchable companion for three different
+agents** — it talks to the one you picked, reaches out on its own when things
+happen, and survives the display freezes the stock firmware panics on. The board
+this fork is developed and tested on is the **Waveshare ESP32-S3-Touch-AMOLED-1.75C**
+(466×466 AMOLED, 16 MB flash + PSRAM); the 1.43C from upstream still builds
+(`s3143c` profile) with the same features minus the portrait faces and TE frame
+pacing.
 
 **Building this with an AI?** [`docs/AI-SETUP.md`](docs/AI-SETUP.md) is a runbook written
 to be executed end to end by an assistant (build → flash → connect). The agent wire
 contract lives in [`docs/AGENT-PROTOCOL.md`](docs/AGENT-PROTOCOL.md).
 
 <p align="center">
-  <img src=".github/images/fork/face-shodan.png" width="200" alt="SHODAN — the Muse agent face, captured on the glass">
-  <img src=".github/images/fork/face-stone.png" width="200" alt="The stone god — the Hermes (default profile) face, captured on the glass">
-  <img src=".github/images/fork/face-golem.png" width="200" alt="The jade golem — the Hermes ALT face, captured on the glass">
+  <img src=".github/images/fork/face-muse.png" width="200" alt="Muse — the painted portrait face, captured on the glass">
+  <img src=".github/images/fork/face-hermes.png" width="200" alt="Hermes — the painted portrait face, captured on the glass">
+  <img src=".github/images/fork/face-beepbop.png" width="200" alt="BEEPBOP (ALT profile) — the painted portrait face, captured on the glass">
 </p>
 
 <p align="center">
-  <img src=".github/images/fork/settings.png" width="250" alt="Settings: Agents, Notifications with unread count, Wi-Fi, Muse, Hermes">
-  <img src=".github/images/fork/inbox.png" width="250" alt="Notifications inbox: agent-tagged rows, a live reminder counting down, tap to open / hold to remove">
+  <img src=".github/images/fork/glance.png" width="250" alt="Glance page: weather card, an agent's live state card, and the home server's CPU/GPU tiles">
+  <img src=".github/images/fork/settings.png" width="250" alt="Settings: Agents, Notifications, Wi-Fi, Muse, Hermes, Bluetooth">
 </p>
 
-<p align="center"><i>The three faces — SHODAN (Muse), the stone god (Hermes), the jade golem (ALT) — all
-captured on the actual 466×466 panel · Settings with the Agents row and a live Notifications
-count · the on-device inbox, where amber <code>in 1h</code> is a reminder the agent set by voice</i></p>
+<p align="center"><i>The three portrait faces — Muse, Hermes, BEEPBOP (ALT) — captured on the actual
+466×466 panel · the Glance page with live cards (weather, agent state, home-server CPU/GPU) ·
+Settings with the Agents row. Pixel faces remain one switch away (<code>&gt;portrait=0</code>)</i></p>
 
 ---
 
@@ -51,11 +54,16 @@ count · the on-device inbox, where amber <code>in 1h</code> is a reminder the a
 
 ### 🎭 Three agents, one button
 
-| Slot | Default | Face | Path |
+| Slot | Default | Face (1.75C) | Path |
 |---|---|---|---|
-| Muse | SHODAN | pixel SHODAN | Muse cloud VM (pair via the app) |
-| Hermes | default profile | **stone god** | your relay → Hermes (bundled in [`relay/`](relay)) |
-| ALT | any named profile (e.g. `my-alt`) | **jade golem** | your relay → that profile |
+| Muse | Muse | painted portrait, blue winged helmet (pixel SHODAN as fallback) | Muse cloud VM (pair via the app) |
+| Hermes | default profile | painted portrait, circuit woman (pixel stone god as fallback) | your relay → Hermes (bundled in [`relay/`](relay)) |
+| ALT | any named profile (here: `beepbop`) | painted portrait, green robot (pixel jade golem as fallback) | your relay → that profile |
+
+Faces are **AI-painted portraits with rigged expressions, lip sync and light that
+follows the voice**, loaded from the assets partition; `>portrait=0` swaps back to the
+hand-built pixel faces without a reflash. Each portrait pack is generated with
+`tools/muse/portrait_pack.py` and can be replaced with your own art.
 
 **Double-tap** the talk button cycles slots (gesture pinned by a host test: tap
 < 300 ms, 1.2 s window; a long press is never a tap). **Settings → Agents** is a
@@ -132,34 +140,94 @@ that firmware must survive rather than fix:
   removed whole (2026-10-10)** — its poll held the session task and slowed voice
   turns; reminders and notifications are the surviving reverse channels.
 
+### 📊 Glance — the idle page earns its pixels
+
+A dedicated page and a strip on the face: **live cards** for the weather, each
+agent's state (idle / working / blocked tasks / next reminder) and the home
+server's CPU/GPU temperatures and RAM, each with its own icon and accent colour.
+Cards refresh when the page opens and every 30 s while it stays on screen, say
+`UPDATED 3 MIN AGO` when stale, and are served by the relay's `/glance` endpoint
+(or written by any script: `POST /glance`). Face-down quietly parks the device;
+motion gestures from the QMI8658 (nod to answer, shake to dismiss) work on the 1.75C.
+
+### 🗣️ Voice — streamed notes in, paced speech out
+
+- The voice note **streams up while you speak** (chunked IMA-ADPCM, ~1/4 the
+  bytes), so upload time shrinks and the display never blocks; the relay decodes
+  it, falls back to local faster-whisper when Google STT is unavailable, and
+  answers as NDJSON with **per-sentence TTS chunks** — speech starts ~3–5 s
+  sooner than the whole-reply fetch era.
+- Chirp 3 HD pacing on **both** paths (relay and device): every sentence ends in a
+  `[pause short]` markup breath (`[pause]` after an ellipsis), so chunked replies
+  stop sounding clipped. `TTS_RATE` (relay) / `CONFIG_MUSE_TTS_RATE_PCT` (device)
+  set `speaking_rate`.
+- **Pronunciation overrides** in IPA for names the voice mangles: the relay reads
+  `relay/pronunciations.json`, the device carries the same table compiled in. A
+  voice or locale that rejects markup or overrides falls back to plain text per
+  sentence and logs one line — a reply never loses its voice.
+- A 10 s decoded-reply buffer and empty-piece skipping keep the speaker fed even
+  when one piece fails.
+
+### ✅ Approvals on the glass
+
+Destructive or system-wide commands the agent wants to run raise a **card on the
+gadget**: tap allow or deny; the relay denies on its own timeout. Hermes runs with
+manual approvals + unattended deny, so a stolen token alone cannot silently run a
+command — someone has to tap the screen.
+
+### 🧭 Always-on LAN door + watchdog
+
+The relay lives on an always-on box; the gadget reaches it through a **LAN door**
+(an always-on bridge in the gadget's own subnet, forwarded over Tailscale) and
+falls back to the public funnel away from home. The door runs as a systemd unit
+with `Restart=always`; a keeper task on the relay host curls relay, door and
+funnel every 2 minutes and logs `DOOR DOWN` / `FUNNEL DOWN` verdicts; the relay
+writes a timestamped, size-rotated log. A wrong LAN address announced by the relay
+cannot poison the saved door silently (`RELAY_LAN_OVERRIDE` pins what it
+announces).
+
 ### 🖼️ Avatars & UI
 
-Three hand-built pixel faces with baked mood frames, per-agent reactions, reading
-mode per agent, and a **palette-read discipline** that eliminated the
-random-panic class (every framebuffer read-back is bounds-guarded against dynamic
-indices). Connection colors are a canonical palette (ok green / working amber /
-fault red). 207 hardware-free host tests keep input gestures, session logic and
-caption wrapping honest; a UART snapshot hook (`tools/muse/snap.py`) captures the
-real screen for UI review.
+Painted portrait faces (Muse, Hermes, BEEPBOP) with rigged expressions, lip shapes
+and light that follows the voice, over the original **hand-built pixel faces** with
+baked mood frames, per-agent reactions and a **palette-read discipline** that
+eliminated the random-panic class (every framebuffer read-back is bounds-guarded
+against dynamic indices). Reading mode per agent, typewriter captions, a 12-hour
+clock, and connection colours as a canonical palette (ok green / working amber /
+fault red). **222 hardware-free host tests** keep input gestures, session logic,
+TTS request shapes and caption wrapping honest; a UART snapshot hook
+(`tools/muse/snap.py`) captures the real screen for UI review.
 
 <p align="center">
-  <img src=".github/images/fork/anim-shodan.gif" width="200" alt="SHODAN idle loop">
-  <img src=".github/images/fork/anim-stone.gif" width="200" alt="Stone god idle loop">
-  <img src=".github/images/fork/anim-golem.gif" width="200" alt="Jade golem idle loop">
+  <img src=".github/images/fork/anim-shodan.gif" width="200" alt="SHODAN pixel-mode idle loop (the fallback face)">
+  <img src=".github/images/fork/anim-stone.gif" width="200" alt="Stone god pixel-mode idle loop (the fallback face)">
+  <img src=".github/images/fork/anim-golem.gif" width="200" alt="Jade golem pixel-mode idle loop (the fallback face)">
 </p>
 
-<p align="center"><i>Resting-behaviour loops rendered through the shipping renderers — per-face blink
-cadence, saccades, breathing and the signature accent beats (Stage C)</i></p>
+<p align="center"><i>Pixel-mode resting loops, still shipped as the fallback (<code>&gt;portrait=0</code>) — per-face
+blink cadence, saccades, breathing and signature accent beats</i></p>
 
 ---
 
 ## Changelog (the `hermes-local` branch)
 
-123 commits over upstream `main` — newest first. Full detail lives in the commits
+166 commits over upstream `main` — newest first. Full detail lives in the commits
 themselves.
 
 | Area | Commits | What |
 |---|---|---|
+| voice (2026-10-25) | `b66633f` `033403b` `58c56fc` | Chirp 3 HD `[pause]` markup + IPA pronunciation overrides on relay **and** device (`pronunciations.json` / compiled table), `TTS_RATE`, per-path plain-text fallback; the JSON-quoting hotfix that restored Muse audio |
+| relay hygiene (2026-10-25) | `1b246ea` | Deployed relay fork adopted into `relay/` (chunked ADPCM upload, `/glance`, `/history`, companion page, `stream_short`, beepbop profile) + hardening: 30 s socket timeout, body caps, timestamped rotated log, single-instance launcher, locked-screenshot retry, whisper worker stderr fix, UTF-8 config reads |
+| stability (2026-10-25) | `f20bc97` | main stack 8K→16K (1.3 KB → 9.4 KB headroom), status reports the effective relay token, out-of-range agent falls back to Muse and logs what loaded |
+| upstream picks (2026-10-24/25) | `2c54a4c` `f09f652` `a76307b` `d9c36f8` | Fast AES-GCM for the C5, `display.draw_file` over Noise, SDK-token pairing memory, VM-id/real-token settings rows |
+| faces (2026-10-23/24) | `591af42` `8e3beea` | **AI-painted portraits** for Muse/Hermes/BEEPBOP with rigged expressions and lip shapes (`tools/muse/portrait_pack.py`, assets partition); light follows the voice, eyes follow you |
+| agents (2026-10-22) | `8212568` | Muse stops running out of memory; a hung reply can't block the next note |
+| door (2026-10-23) | `7aa9a43` `bccfdae` | Always-on LAN door (systemd + `Restart=always`), `RELAY_LAN_OVERRIDE`, `>dns=` bench; house art/voice tunings carried in the 175C profile |
+| display (2026-10-22/23) | `2a89df3` `a27d2b6` `f09cc66` `0132817` | **Tear-free whole frames** at 80 MHz QSPI timed to the TE signal, 40/60 fps on USB and 25 on battery, frames never starved; iPhone link removed |
+| glance (2026-10-20/23) | `7ef284e` `6bfc482` `a2c328f` `6df7cd1` | Glance page + idle cards (weather, agents, system/CPU/GPU), face-down quiet, nod/shake gestures, timezone at boot |
+| speech (2026-10-21/23) | `aee1635` `1d3d60f` `4bbdbfa` | Voice notes stream up while spoken (chunked ADPCM), 10 s decoded-reply buffer, empty TTS pieces skipped |
+| power/175C (2026-10-20/23) | `bded6ad` `4fcad72` `9d08ae8` | PWR is the talk button on the 1.75C (AXP2101 shutdown off); talk button only talks; PMU power state on screen; motion gestures |
+| media/logs (2026-10-19/21) | `4808ba2` `1e484a7` `d7b56f4` `cc09427` | MJPEG clip player, flash asset pack, persistent log history in flash (`>log.dump/save/clear`) |
 | setup | `8952e2c` `b3c2922` `93acda3` | The setup page's browser flow documented; **any agent** connectable from the page: relay host/URL/token over BLE + serial (NVS-backed, relay gates all runtime), *Your own agent* + Save & restart; `e2e_ble_setup.py` full-radio E2E; headless console helpers `>pair.code` `>ble.setup=` `>wifi.on=` |
 | sharing | `a0583fe` `8918603` `19a5bed` `b8dfb13` `9d7db67` `5ce1023` | On-glass README artwork + idle GIFs, `docs/AGENT-PROTOCOL.md` + `docs/AI-SETUP.md`, the bundled `relay/` (suite green out of the box), personal-data sanitize; boot-repair self-heal for the lost-pairing state |
 | art program | `51a575c` `345ee1b` `eadf69b` `f5b8c2b` `1da7a32` `937086a` `14f9c22` | Faces v2 on all three faces (A1/B3/C5), per-face idle personas + signature accent beats, easing rig, idle scheduler, moods v3 (all 52 reactions reworked), the on-device video player + indexed clip registry, `art-pipeline` toolchain landed in-repo |
@@ -183,9 +251,89 @@ themselves.
 | misc | `fa1af1a` `007920c` `f749df5` `828d0b7` `482afcc` `8a64488` `ae43010` `d318efd` | Reply-too-long caption; PSRAM decoder move; debug dir gitignored; repo hygiene |
 
 <details>
-<summary><b>All 123 commit subjects</b></summary>
+<summary><b>All 203 commit subjects</b></summary>
 
 ```
+58c56fc muse voice: put the pause tag inside the JSON string
+033403b muse voice: same breaths and pronunication table as the relay
+b66633f relay: give the voice breath and correct the names
+f20bc97 gadget: roomier main stack, honest relay-token row, safe agent fallback
+1b246ea relay: adopt the deployed fork, harden the public door
+2c54a4c C5: faster AES-GCM (cached GHASH tables, PSRAM staged through internal RAM) (#199)
+f09f652 esp32: add display.draw_file, an image from the VM over Noise (#250)
+a76307b esp32: remember the SDK token pairing used, and stop refreshing to report it (#221)
+d9c36f8 Muse settings: VM in the VM ID row, real device token state, SDK token
+8e3beea faces: light that follows the voice, eyes that follow you, lip shapes, a tell each
+8212568 agents stay reachable: Muse no longer runs out of memory, a hung reply can't block the next note
+7aa9a43 relay door: the always-on Pi5 LAN bridge, not a Mac IP
+2a89df3 display: tear-free whole frames at 80 MHz, frames never starved; iPhone link removed
+aee1635 voice turns on the go: note streams up while spoken, no display freezes, readable status
+591af42 portraits: painted faces for Muse, Hermes and BEEPBOP (expressions, lip sync, light)
+bded6ad pmu: PWR is the talk button on the 1.75C, so turn off the AXP2101 long-press shutdown
+4fcad72 input: the talk button only talks (drop the 20 s hold-to-restart)
+6df7cd1 glance: live while on screen (30 s), 'updated N min ago', CPU/GPU stat tiles; timezone set at boot
+1d3d60f muse speech: 10 s decoded-reply buffer (was 2 s) so piece fetches never gap the speaker
+4bbdbfa muse speech: skip empty TTS pieces; one failed piece no longer ends the reply
+5a4d821 iPhone link fixes: per-characteristic CCCD discovery (AMS/ANCS subscribe), alerts switch (off by default), backlog/burst guard, app names
+5036477 iPhone link (ANCS notifications + AMS now playing), +14 KB internal RAM
+8e6927f gyro: nod / head-shake from QMI8658 rotation rates; BLE controller code in flash (+17 KB internal RAM)
+a2c328f face: only the clock at the bottom while idle (the glance cards have their own page)
+6bfc482 glance: Hermes and system cards (agent/chip/alert icons, system + alert kinds), roomier card text
+7ef284e gadget: Glance page, idle glance cards, face-down quiet mode, swipe/nod answers
+d68179a plain SHODAN voice (no FX, 100% pitch/rate); per-face avatar centring; mouth pose cross-fade
+0132817 face 60 fps on USB, and a tap stops the video
+4808ba2 video: the MJPEG player actually reaches the glass
+1e484a7 video: MJPEG clips from the asset pack (300 px, centred)
+53e0902 i2c: bus scan and RTC probe; no RTC hardware on this board
+cc09427 logs: persistent history in flash (W/E live, save-on-restart), plus >log.dump/ram/save/clear
+a6a2113 player: a clip can no longer trap the UI
+d7b56f4 animation: flash asset pack for clips, JPEG bench, IMU parallax
+f09cc66 ui: face cadence follows the power source (40 fps on USB, 25 on battery)
+a27d2b6 lcd: frame-synced TE, band timing bench, 40 fps face on the 1.75C
+3c5388b imu: wait for a real first sample before taking the rest pose
+9d08ae8 175C: motion gestures, and the PMU power state on screen
+bccfdae 175c: carry the house art/voice tunings and relay doors
+1a29cfd readme: ci badge
+c377a68 Rename ci-for-you.yml to ci.yml
+a873560 ci: fresh-clone build + host suite
+abe184b qa: keep the approval card awake, honest relay errors, and gates that can't be skipped
+2c4a972 qa: restore the host suite after the keep-WiFi reset change
+ea29c8a boot auth: never ask api.muse.ai with the SDK token
+2742d26 harden the boot-time auth path: no empty-token requests, no one-strike unpairing
+8cdf279 gadget approvals: on-screen card + verdict, agent-initiated asks, Wi-Fi kept on a token reset
+887bf76 gadget approvals: an on-screen card with tap buttons + verdict POST
+d4a8efb gadget: a working face during turns, a spoken-reply budget, and doctor.py
+56b56e9 fix: Muse replies speak again — pin GTS Root R4 for the Google TTS fetch
+3f9fd0a docs: fresh clones need one configure before the host tests (fetches managed_components)
+7d4019b usability: ship the two IDF bus-lock fixes in-repo + fix the runbook's build steps
+35d0c97 avatar: actually track muse_rig.h (fresh clones could not build)
+1caeccd docs: the SDK token can be set over serial after flashing (nvs-stored, preferred over the build token)
+3acc959 Pick wave (upstream, Oct 15): SDK token over serial, noise zero-copy, snap.py fixes
+e786c53 audit batch 3: chirp scratch to PSRAM (muse_audio, pattern from muse_voice); image-draw wake also pokes the input task (dark-screen window); keypad upper labels built from LABELS (one table); LCD tear-window finding encoded as comments (no mechanism change); VOICE_NOTE kept (upstream feature flag, not fork residue)
+8872947 audit batch 2: panel-call handshake cut (fire-and-forget; all boards pass static call args); keypad releases gate on the held key only; TTS response buffer piece-sized (192K vs 900K); settings setters return NVS errors and the BLE acks surface failures; reading view hides when Settings opens; notif poll comment truth; battery drain stays raw (test_drain pins charge detection) + rate-limited read-fail diagnostic
+d26addc audit batch 1 (verified fixes): stream-alloc guard; notif URL buffers sized for base+path; BLE status scratch moved to heap + cmd lock over serial/BLE dispatch; ADC fail = unknown %, never 0; wifi reconnect-timer NULL guard; NVS save errors logged; battery latch; copy fixes (wake hint, inbox, Hermes row); setup path + stale-path doc scrub; CRLF strays normalized
+b3d1b82 docs: changelog to 123 commits, setup-page wave row, HERMES-FORK section 9; relay bundle EOLs normalized to LF (suite green)
+3b56ccb Add Freenove FNK0104B (ESP32-S3, 2.8" ILI9341 touch LCD) as a board with the full UI (#49)
+031f65b Add M5Stack Core2 v1.0 support (#39)
+cb9a0ce Make the addressable status LED's GPIO configurable (#46)
+9f5ab23 Document what the two crypto host tests need to run (#42)
+7f01256 Remove two sdkconfig.defaults lines that have no effect (#41)
+4bd647b Point skills at the built-in Home Link guide (#69)
+2b4127d Build the reTerminal E1002 firmware in CI (#44)
+a2b9e52 Add the license header to the reTerminal E1002 sdkconfig overlay (#43)
+693cde9 Support the reTerminal E1002's six-colour e-paper (#35)
+e4d5cdf Add M5Stack CoreS3 as a board with the full UI (#25)
+6c487f1 fix: size pairing decrypt buffers to the message (#31)
+5853b6c Link Waveshare boards to the new documentation site (#30)
+b1a3822 Add M5Stack Cardputer ADV support (#10)
+7e88df2 Add the M5Stack StopWatch as a board with the full UI (#17)
+d62b72f Add ESP32-S3-BOX-3 support (#16)
+b9008ab Request text replies; drop the server TTS fetch (#12)
+3e1d890 Add Waveshare ESP32-S3-Touch-AMOLED-1.75 board (#8)
+1b56662 camera_sscma: wait for the stream task before stream_stop returns (#4)
+468e5ba Fix simulator shutdown test failures on macOS (#5)
+1bf41be Bound the wait for output after a system.run timeout (#3)
+7e7123e Initial commit
 93acda3 tools: e2e_ble_setup.py — full BLE E2E of the relay setup surface (pairing-code gated, reboot disconnect handled); runbook pointer
 b3c2922 setup page connects ANY agent: relay host/URL/token settable over BLE+serial (NVS-backed, runtime gates replace build-time checks), page section + Save & restart, docs truthful
 8952e2c docs: feature the SDK browser setup page (tools/muse/ble_setup.html) — computer setup path, no phone/relay
@@ -365,16 +513,18 @@ to a server you point it at, and speaks the reply it gets back. Three transports
 
 ```
 esp32/components/muse/          the companion itself (this fork's center of work)
-  muse_chat_session.cpp         session task: turns, tasks, notifications, inbox fetch
-  muse_voice.c                  push-to-talk, pre-roll, held notes, sound flags
+  muse_chat_session.cpp         session task: turns, streaming, TTS pacing, approvals, glance/notif fetch
+  muse_voice.c                  push-to-talk, pre-roll, held notes, streaming note upload
   muse_settings_ui.c            every settings page incl. Agents + Notifications
-  muse_lcd_bands.c              panel driver + the two freeze guards
+  muse_glance_ui.c              the Glance page (live cards, clock)
+  boards/muse_lcd_bands.c       panel driver, TE whole-frame pacing + the freeze guards
   muse_diag.c/.h                the NVS black box
-  avatar/                       three faces + icon headers (tracked, self-contained)
-  boards/board_waveshare_s3_143c.c   the target board
-esp32/tests/                    207 hardware-free host tests
+  avatar/                       portrait + pixel faces, mood packs, icon headers (tracked, self-contained)
+  boards/board_waveshare_s3_175c.c   the target board (1.43C driver still builds)
+esp32/tests/                    222 hardware-free host tests
 docs/                           AGENT-PROTOCOL.md (wire contract) + AI-SETUP.md (runbook)
-relay/                          reference agent bridge (macOS / Windows / Linux)
+relay/                          reference agent bridge: profiles, STT/TTS, glance/history,
+                                notifications, companion page, pronunciation table
 ```
 
 The reference relay ([`relay/`](relay): agent routing, STT/TTS, the notification store)
@@ -395,6 +545,27 @@ cd esp32 && env -u PYTHONPATH python3 -m unittest discover -s tests -p 'test_*.p
 
 First time in a fresh clone, run one configure before the tests (`idf.py reconfigure` or any
 build): it fetches `esp32/managed_components/`, which several test classes compile against.
+
+On macOS, `idf.py` segfaults with Homebrew's Python asyncio; this is the recipe that
+works here (incremental builds, ~1–2 min after the first full one):
+
+```bash
+cd esp32
+export PATH=$HOME/.espressif/python_env/idf6.0_py3.13_env/bin:$PATH
+arch -arm64 bash -c 'source ~/esp/esp-idf-v6/export.sh; ninja -C build-muse-waveshare-s3-175c'
+```
+
+Flashing reboots the device, and a boot loop can revoke the Muse pairing — flash
+behind a rollback guard that watches the first 30 s of boot and restores a known-good
+image on any panic/assert instead of risking repeated boots:
+
+```bash
+arch -arm64 ~/.espressif/python_env/idf6.0_py3.13_env/bin/python \
+  ~/muse/art-pipeline/safeflash.py build-muse-waveshare-s3-175c/muse-gadget.bin GOOD.bin 30
+```
+
+`GOOD.bin` is a previously verified image; build one from a clean HEAD (`git stash`,
+build, copy the bin, `git stash pop`) before flashing risky changes.
 
 On the author's machine a wrapper (`build_flash.sh`) hard-gates the device
 secrets before every build, verifies them inside the built binary, and archives
@@ -419,10 +590,16 @@ boundary: put a token on it (the reference relay does) if you expose it beyond y
 
 ```bash
 git fetch upstream
-git rebase upstream/main hermes-local
+git log --oneline hermes-local..upstream/main     # what's new
+git cherry-pick -x <commits worth taking>
 ```
 
-Upstream `main` is kept untouched as the rebase base; `hermes-local` is linear.
+Upstream `main` is kept untouched. Since October the branches have diverged far
+enough (166 commits vs. 30+ upstream boards) that a wholesale merge is the wrong
+tool: resolving it costs 30+ conflicts and leaves upstream-only board tests
+failing against this fork's app wiring. The policy is **pick what matters**
+(tunnel performance, shared-bug fixes, small UX wins) and leave upstream's board
+sprawl alone. A full merge is only worth it with a board-scoped plan.
 
 ---
 
